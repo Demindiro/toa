@@ -151,7 +151,7 @@ but this is not required.
 |   7:3 | (zero)            |
 | ...:8 | branches          |
 
-#### External parent
+#### External node
 
 | bytes | short description |
 | -----:|:----------------- |
