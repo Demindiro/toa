@@ -1,10 +1,10 @@
 use core::convert::Infallible;
 
 pub trait Device {
-    type Read<'a>
+    type Read<'a>: AsRef<[u8]>
     where
         Self: 'a;
-    type Write<'a>
+    type Write<'a>: Write<Error = Self::Error>
     where
         Self: 'a;
     type ReadTicket;
@@ -38,6 +38,8 @@ pub trait Write {
     type Error;
 
     fn append(&mut self, data: &[u8]) -> Result<(), Self::Error>;
+
+    fn offset(&self) -> u64;
 }
 
 pub enum Event<ReadTicket, Read, WriteTicket, Write> {
@@ -89,6 +91,7 @@ pub enum Alignment {
 pub struct VecWrite<'a, T> {
     vec: &'a mut Vec<T>,
     remaining: usize,
+    offset: u64,
 }
 
 impl Device for Vec<u8> {
@@ -118,10 +121,12 @@ impl Device for Vec<u8> {
     }
 
     fn write(&mut self, bytes: usize) -> Result<Ticket<Infallible, VecWrite<'_, u8>>, Self::Error> {
+        let offset = u64::try_from(self.len()).unwrap();
         Vec::reserve(self, bytes);
         Ok(Ticket::Done(VecWrite {
             vec: self,
             remaining: bytes,
+            offset,
         }))
     }
 
@@ -159,5 +164,9 @@ impl Write for VecWrite<'_, u8> {
                 self.remaining = x;
                 self.vec.extend_from_slice(data)
             })
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
     }
 }

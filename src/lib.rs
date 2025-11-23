@@ -5,6 +5,7 @@ pub mod snapshot;
 
 use core::fmt;
 use std::collections::BTreeMap;
+use device::Write;
 
 pub struct Appender<D> {
     device: D,
@@ -12,6 +13,7 @@ pub struct Appender<D> {
     next_objects: BTreeMap<Hash, ObjectPointer>,
     snapshot_len: SnapshotOffset,
     record_pitch: u8,
+    record_stack: Vec<record::Entry>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -21,9 +23,9 @@ pub struct Hash([u8; 32]);
 pub struct ReadTicket(usize);
 pub struct WriteTicket(usize);
 
-pub enum Read<'a> {
+pub enum Read {
     Wait(ReadTicket),
-    Done(&'a [u8]),
+    Done(Vec<u8>),
 }
 
 pub enum Event<'a> {
@@ -52,13 +54,14 @@ struct ObjectPointer {
 }
 
 impl<D> Appender<D> {
-    pub fn new(device: D) -> Self {
+    pub fn new(device: D, record_pitch: u8) -> Self {
         Self {
             device,
             next_record: Default::default(),
             next_objects: Default::default(),
             snapshot_len: SnapshotOffset(0),
-            record_pitch: 20,
+            record_pitch,
+            record_stack: Default::default(),
         }
     }
 
@@ -70,6 +73,20 @@ impl<D> Appender<D> {
         let mut n = self.snapshot_len;
         n.0 -= u64::try_from(self.next_record.len()).expect("usize <= u64");
         n
+    }
+
+    fn next_record_remaining(&self) -> usize {
+        self.record_pitch() - self.next_record.len()
+    }
+
+    fn next_record_is_full(&self) -> bool {
+        self.next_record_remaining() == 0
+    }
+
+    fn offset_to_record(&self, x: SnapshotOffset) -> (u64, usize) {
+        let i = x.0 >> self.record_pitch;
+        let e = &self.record_stack[usize::try_from(i).unwrap()];
+        (e.offset, usize::try_from(x.0 - (i << self.record_pitch)).unwrap())
     }
 }
 
@@ -93,14 +110,14 @@ where
         key: &Hash,
         offset: u64,
         len: usize,
-    ) -> Result<Option<Read<'_>>, Error<D::Error>> {
+    ) -> Result<Option<Read>, Error<D::Error>> {
         let ptr = if let Some(x) = self.next_objects.get(key) {
             *x
         } else {
             todo!("look for object on device");
         };
         if ptr.len <= offset {
-            return Ok(Some(Read::Done(&[])));
+            return Ok(Some(Read::Done([].into())));
         }
         let len = usize::try_from(ptr.len - offset)
             .unwrap_or(usize::MAX)
@@ -110,9 +127,17 @@ where
             dbg!(offset, self.next_record_offset());
             let start =
                 usize::try_from(offset.0 - self.next_record_offset().0).expect("inside record");
-            return Ok(Some(Read::Done(&self.next_record[start..start + len])));
+            return Ok(Some(Read::Done(self.next_record[start..start + len].into())));
         }
-        todo!("fetch from device");
+
+        let (record_addr, record_offset) = self.offset_to_record(offset);
+        match self.device.read(record_addr, self.record_pitch()).map_err(Error::Device)? {
+            device::Ticket::Wait(_) => todo!("async..."),
+            device::Ticket::Done(x) => {
+                // TODO decompress
+                return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())))
+            }
+        }
     }
 
     pub fn wait(&mut self, out: &mut [u8]) -> Result<Option<Event>, Error<D::Error>> {
@@ -124,13 +149,38 @@ where
     }
 
     fn record_append(&mut self, data: &[u8]) -> Result<SnapshotOffset, Error<D::Error>> {
-        if self.next_record.len() + data.len() >= self.record_pitch() {
-            todo!("flush");
+        let mut data = data;
+        let offset = self.snapshot_len;
+        while !data.is_empty() {
+            if self.next_record_is_full() {
+                self.record_flush()?;
+            }
+            let n = data.len().min(self.next_record_remaining());
+            let x;
+            (x, data) = data.split_at(n);
+            self.next_record.extend_from_slice(x);
+            self.snapshot_len.0 += u64::try_from(x.len()).expect("usize <= u64");
         }
-        let n = self.snapshot_len;
-        self.snapshot_len.0 += u64::try_from(data.len()).expect("usize <= u64");
-        self.next_record.extend_from_slice(data);
-        Ok(n)
+        Ok(offset)
+    }
+
+    fn record_flush(&mut self) -> Result<(), Error<D::Error>> {
+        let record_len = u32::try_from(self.next_record.len()).unwrap();
+        let offset = match self.device.write(self.next_record.len()).map_err(Error::Device)? {
+            device::Ticket::Wait(_) => todo!("async..."),
+            device::Ticket::Done(mut x) => {
+                x.append(&self.next_record).map_err(Error::Device)?;
+                x.offset()
+            }
+        };
+        self.record_stack.push(record::Entry {
+            offset,
+            compression_info: record::CompressionInfo::new_uncompressed(record_len).unwrap(),
+            uncompressed_len: record_len,
+            poly1305: 0,
+        });
+        self.next_record.clear();
+        Ok(())
     }
 }
 
@@ -145,7 +195,7 @@ mod test {
     use super::*;
 
     fn init() -> Appender<Vec<u8>> {
-        Appender::new(Vec::new())
+        Appender::new(Vec::new(), 12)
     }
 
     #[test]
@@ -185,5 +235,18 @@ mod test {
             Read::Wait(_) => unreachable!(),
             Read::Done(x) => assert_eq!(x, b"Greetings!"),
         }
+    }
+
+    #[test]
+    fn insert_many() {
+        let mut s = init();
+        let f = |x| format!("A number {x}").into_bytes();
+        let keys = (0..1 << 12).map(|i| s.add(&f(i)).unwrap()).collect::<Vec<_>>();
+        keys.iter().enumerate().for_each(|(i, k)| {
+            match s.read(k, 0, 100).unwrap().unwrap() {
+                Read::Wait(_) => unreachable!(),
+                Read::Done(x) => assert_eq!(x, f(i)),
+            }
+        });
     }
 }

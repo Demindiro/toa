@@ -1,22 +1,26 @@
 #[repr(C)]
-struct Entry {
-    offset: u64,
-    compression_info: CompressionInfo,
-    uncompressed_length: u32,
-    poly1305: u128,
+pub struct Entry {
+    pub offset: u64,
+    pub compression_info: CompressionInfo,
+    pub uncompressed_len: u32,
+    pub poly1305: u128,
 }
 
 #[repr(transparent)]
-struct CompressionInfo(u32);
+pub struct CompressionInfo(u32);
 
-enum CompressionAlgorithm {
+pub enum CompressionAlgorithm {
     N1,
     N2,
     N3,
 }
 
 impl CompressionInfo {
-    fn algorithm(&self) -> Option<CompressionAlgorithm> {
+    pub fn new_uncompressed(length: u32) -> Option<Self> {
+        (length < 1 << 30).then(|| Self(length << 2))
+    }
+
+    pub fn algorithm(&self) -> Option<CompressionAlgorithm> {
         match self.0 & 3 {
             0 => None,
             1 => Some(CompressionAlgorithm::N1),
@@ -26,7 +30,7 @@ impl CompressionInfo {
         }
     }
 
-    fn len(&self) -> u32 {
+    pub fn len(&self) -> u32 {
         self.0 >> 2
     }
 }
