@@ -1,5 +1,3 @@
-use core::convert::Infallible;
-
 pub trait Device {
     type Read<'a>: AsRef<[u8]>
     where
@@ -7,25 +5,17 @@ pub trait Device {
     type Write<'a>: Write<Error = Self::Error>
     where
         Self: 'a;
-    type ReadTicket;
-    type WriteTicket;
     type Error;
 
     fn read<'a>(
         &'a mut self,
         offset: u64,
         bytes: usize,
-    ) -> Result<Ticket<Self::ReadTicket, Self::Read<'a>>, Self::Error>;
+    ) -> Result<Self::Read<'a>, Self::Error>;
     fn write<'a>(
         &'a mut self,
         bytes: usize,
-    ) -> Result<Ticket<Self::WriteTicket, Self::Write<'a>>, Self::Error>;
-    fn wait<'a>(
-        &'a mut self,
-    ) -> Result<
-        Option<Event<Self::ReadTicket, Self::Read<'a>, Self::WriteTicket, Self::Write<'a>>>,
-        Self::Error,
-    >;
+    ) -> Result<Self::Write<'a>, Self::Error>;
 
     fn len(&self) -> u64;
     fn optimal_alignment(&self) -> Alignment;
@@ -40,16 +30,6 @@ pub trait Write {
     fn append(&mut self, data: &[u8]) -> Result<(), Self::Error>;
 
     fn offset(&self) -> u64;
-}
-
-pub enum Event<ReadTicket, Read, WriteTicket, Write> {
-    Read { ticket: ReadTicket, data: Read },
-    Write { ticket: WriteTicket, buffer: Write },
-}
-
-pub enum Ticket<Wait, Done> {
-    Wait(Wait),
-    Done(Done),
 }
 
 pub enum Alignment {
@@ -103,37 +83,28 @@ impl Device for Vec<u8> {
         = VecWrite<'a, u8>
     where
         Self: 'a;
-    type ReadTicket = Infallible;
-    type WriteTicket = Infallible;
     type Error = &'static str;
 
     fn read(
         &mut self,
         offset: u64,
         bytes: usize,
-    ) -> Result<Ticket<Infallible, &[u8]>, Self::Error> {
+    ) -> Result<&[u8], Self::Error> {
         usize::try_from(offset)
             .ok()
             .and_then(|x| x.checked_add(bytes).map(|y| x..y))
             .and_then(|x| self.get(x))
-            .map(Ticket::Done)
             .ok_or("out of bounds")
     }
 
-    fn write(&mut self, bytes: usize) -> Result<Ticket<Infallible, VecWrite<'_, u8>>, Self::Error> {
+    fn write(&mut self, bytes: usize) -> Result<VecWrite<'_, u8>, Self::Error> {
         let offset = u64::try_from(self.len()).unwrap();
         Vec::reserve(self, bytes);
-        Ok(Ticket::Done(VecWrite {
+        Ok(VecWrite {
             vec: self,
             remaining: bytes,
             offset,
-        }))
-    }
-
-    fn wait(
-        &mut self,
-    ) -> Result<Option<Event<Infallible, &[u8], Infallible, VecWrite<'_, u8>>>, Self::Error> {
-        Ok(None)
+        })
     }
 
     fn len(&self) -> u64 {

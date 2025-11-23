@@ -131,13 +131,9 @@ where
         }
 
         let (record_addr, record_offset) = self.offset_to_record(offset);
-        match self.device.read(record_addr, self.record_pitch()).map_err(Error::Device)? {
-            device::Ticket::Wait(_) => todo!("async..."),
-            device::Ticket::Done(x) => {
-                // TODO decompress
-                return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())))
-            }
-        }
+        let x = self.device.read(record_addr, self.record_pitch()).map_err(Error::Device)?;
+        // TODO decompress
+        return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())))
     }
 
     pub fn wait(&mut self, out: &mut [u8]) -> Result<Option<Event>, Error<D::Error>> {
@@ -166,13 +162,9 @@ where
 
     fn record_flush(&mut self) -> Result<(), Error<D::Error>> {
         let record_len = u32::try_from(self.next_record.len()).unwrap();
-        let offset = match self.device.write(self.next_record.len()).map_err(Error::Device)? {
-            device::Ticket::Wait(_) => todo!("async..."),
-            device::Ticket::Done(mut x) => {
-                x.append(&self.next_record).map_err(Error::Device)?;
-                x.offset()
-            }
-        };
+        let mut x = self.device.write(self.next_record.len()).map_err(Error::Device)?;
+        x.append(&self.next_record).map_err(Error::Device)?;
+        let offset = x.offset();
         self.record_stack.push(record::Entry {
             offset,
             compression_info: record::CompressionInfo::new_uncompressed(record_len).unwrap(),
