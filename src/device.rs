@@ -23,13 +23,14 @@ pub trait Device {
     fn wait<'a>(
         &'a mut self,
     ) -> Result<
-        Event<Self::ReadTicket, Self::Read<'a>, Self::WriteTicket, Self::Write<'a>>,
+        Option<Event<Self::ReadTicket, Self::Read<'a>, Self::WriteTicket, Self::Write<'a>>>,
         Self::Error,
     >;
 
     fn len(&self) -> u64;
     fn optimal_alignment(&self) -> Alignment;
 
+    fn sync(&mut self) -> Result<(), Self::Error>;
     fn wipe(&mut self) -> Result<(), Self::Error>;
 }
 
@@ -126,8 +127,8 @@ impl Device for Vec<u8> {
 
     fn wait(
         &mut self,
-    ) -> Result<Event<Infallible, &[u8], Infallible, VecWrite<'_, u8>>, Self::Error> {
-        panic!("cannot generate events");
+    ) -> Result<Option<Event<Infallible, &[u8], Infallible, VecWrite<'_, u8>>>, Self::Error> {
+        Ok(None)
     }
 
     fn len(&self) -> u64 {
@@ -140,6 +141,10 @@ impl Device for Vec<u8> {
 
     fn wipe(&mut self) -> Result<(), Self::Error> {
         Ok(<[u8]>::fill(self, 0))
+    }
+
+    fn sync(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
