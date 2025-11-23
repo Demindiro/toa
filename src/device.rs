@@ -11,9 +11,21 @@ pub trait Device {
     type WriteTicket;
     type Error;
 
-    fn read<'a>(&'a mut self, offset: u64, bytes: usize) -> Result<Ticket<Self::ReadTicket, Self::Read<'a>>, Self::Error>;
-    fn write<'a>(&'a mut self, bytes: usize) -> Result<Ticket<Self::WriteTicket, Self::Write<'a>>, Self::Error>;
-    fn wait<'a>(&'a mut self) -> Result<Event<Self::ReadTicket, Self::Read<'a>, Self::WriteTicket, Self::Write<'a>>, Self::Error>;
+    fn read<'a>(
+        &'a mut self,
+        offset: u64,
+        bytes: usize,
+    ) -> Result<Ticket<Self::ReadTicket, Self::Read<'a>>, Self::Error>;
+    fn write<'a>(
+        &'a mut self,
+        bytes: usize,
+    ) -> Result<Ticket<Self::WriteTicket, Self::Write<'a>>, Self::Error>;
+    fn wait<'a>(
+        &'a mut self,
+    ) -> Result<
+        Event<Self::ReadTicket, Self::Read<'a>, Self::WriteTicket, Self::Write<'a>>,
+        Self::Error,
+    >;
 
     fn len(&self) -> u64;
     fn optimal_alignment(&self) -> Alignment;
@@ -79,17 +91,23 @@ pub struct VecWrite<'a, T> {
 }
 
 impl Device for Vec<u8> {
-    type Read<'a> = &'a [u8]
+    type Read<'a>
+        = &'a [u8]
     where
         Self: 'a;
-    type Write<'a> = VecWrite<'a, u8>
+    type Write<'a>
+        = VecWrite<'a, u8>
     where
         Self: 'a;
     type ReadTicket = Infallible;
     type WriteTicket = Infallible;
     type Error = &'static str;
 
-    fn read(&mut self, offset: u64, bytes: usize) -> Result<Ticket<Infallible, &[u8]>, Self::Error> {
+    fn read(
+        &mut self,
+        offset: u64,
+        bytes: usize,
+    ) -> Result<Ticket<Infallible, &[u8]>, Self::Error> {
         usize::try_from(offset)
             .ok()
             .and_then(|x| x.checked_add(bytes).map(|y| x..y))
@@ -106,7 +124,9 @@ impl Device for Vec<u8> {
         }))
     }
 
-    fn wait(&mut self) -> Result<Event<Infallible, &[u8], Infallible, VecWrite<'_, u8>>, Self::Error> {
+    fn wait(
+        &mut self,
+    ) -> Result<Event<Infallible, &[u8], Infallible, VecWrite<'_, u8>>, Self::Error> {
         panic!("cannot generate events");
     }
 
@@ -127,9 +147,12 @@ impl Write for VecWrite<'_, u8> {
     type Error = &'static str;
 
     fn append(&mut self, data: &[u8]) -> Result<(), Self::Error> {
-        self.remaining.checked_sub(data.len()).ok_or("too much data").map(|x| {
-            self.remaining = x;
-            self.vec.extend_from_slice(data)
-        })
+        self.remaining
+            .checked_sub(data.len())
+            .ok_or("too much data")
+            .map(|x| {
+                self.remaining = x;
+                self.vec.extend_from_slice(data)
+            })
     }
 }
