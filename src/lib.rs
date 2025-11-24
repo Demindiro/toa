@@ -22,6 +22,13 @@ pub struct Hash([u8; 32]);
 
 pub type Read = Vec<u8>;
 
+pub struct IterRead<'a, D> {
+    appender: &'a mut Appender<D>,
+    key: Hash,
+    offset: u64,
+    remaining: usize,
+}
+
 #[derive(Clone, Debug)]
 pub enum Error<D> {
     Device(D),
@@ -127,6 +134,25 @@ where
         Ok(Some(x.into()))
     }
 
+    pub fn read_exact(
+        &mut self,
+        key: &Hash,
+        offset: u64,
+        len: usize,
+    ) -> Result<Option<IterRead<D>>, Error<D::Error>> {
+        let _ptr = if let Some(x) = self.next_objects.get(key) {
+            *x
+        } else {
+            todo!("look for object on device");
+        };
+        Ok(Some(IterRead {
+            appender: self,
+            key: *key,
+            offset,
+            remaining: len,
+        }))
+    }
+
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
         Ok(self.next_objects.contains_key(key))
     }
@@ -166,6 +192,50 @@ where
     }
 }
 
+impl<'a, D> IterRead<'a, D>
+where
+    D: device::Device,
+{
+    fn into_bytes(mut self) -> Result<Vec<u8>, Error<D::Error>> {
+        let mut v = Vec::new();
+        for x in self {
+            v.extend_from_slice(&x?);
+        }
+        Ok(v)
+    }
+}
+
+impl<'a, D> Iterator for IterRead<'a, D>
+where
+    D: device::Device,
+{
+    type Item = Result<Read, Error<D::Error>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let r = match self
+            .appender
+            .read(&self.key, self.offset, self.remaining)
+            .transpose()
+            .expect("exists")
+        {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
+        if r.is_empty() {
+            self.remaining = 0;
+            return None;
+        }
+        self.offset += u64::try_from(r.len()).expect("usize <= u64");
+        self.remaining -= r.len();
+        Some(Ok(r))
+    }
+}
+
+impl<'a, D> core::iter::FusedIterator for IterRead<'a, D> where D: device::Device {}
+
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|x| write!(f, "{x:02x}"))
@@ -176,26 +246,50 @@ impl fmt::Debug for Hash {
 mod test {
     use super::*;
 
-    fn init() -> Appender<std::cell::RefCell<Vec<u8>>> {
-        Appender::new(Default::default(), 12)
+    struct Test {
+        appender: Appender<std::cell::RefCell<Vec<u8>>>,
+    }
+
+    impl Test {
+        fn assert_eq(&mut self, key: &Hash, value: &[u8]) {
+            let x = self.read_exact(&key, 0, usize::MAX).unwrap().unwrap();
+            let x = x.into_bytes().unwrap();
+            assert_eq!(&x, value);
+        }
+    }
+
+    impl core::ops::Deref for Test {
+        type Target = Appender<core::cell::RefCell<Vec<u8>>>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.appender
+        }
+    }
+
+    impl core::ops::DerefMut for Test {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.appender
+        }
+    }
+
+    fn init() -> Test {
+        Test {
+            appender: Appender::new(Default::default(), 12),
+        }
     }
 
     #[test]
     fn insert_one_empty() {
         let mut s = init();
         let key = s.add(b"").unwrap();
-        let x = s.read(&key, 0, 10).unwrap().unwrap();
-        assert_eq!(x, &[]);
+        s.assert_eq(&key, &[]);
     }
 
     #[test]
     fn insert_one() {
         let mut s = init();
         let key = s.add(b"Hello, world!").unwrap();
-        let x = s.read(&key, 0, 10).unwrap().unwrap();
-        assert_eq!(x, b"Hello, wor");
-        let x = s.read(&key, 0, 100).unwrap().unwrap();
-        assert_eq!(x, b"Hello, world!");
+        s.assert_eq(&key, b"Hello, world!");
     }
 
     #[test]
@@ -203,10 +297,8 @@ mod test {
         let mut s = init();
         let a = s.add(b"Hello, world!").unwrap();
         let b = s.add(b"Greetings!").unwrap();
-        let x = s.read(&a, 0, 100).unwrap().unwrap();
-        assert_eq!(x, b"Hello, world!");
-        let x = s.read(&b, 0, 100).unwrap().unwrap();
-        assert_eq!(x, b"Greetings!");
+        s.assert_eq(&a, b"Hello, world!");
+        s.assert_eq(&b, b"Greetings!");
     }
 
     #[test]
@@ -216,16 +308,8 @@ mod test {
         let keys = (0..1 << 12)
             .map(|i| s.add(&f(i)).unwrap())
             .collect::<Vec<_>>();
-        keys.iter().enumerate().for_each(|(i, k)| {
-            let x = s.read(k, 0, 100).unwrap().unwrap();
-            let y = f(i);
-            let l = x.len();
-            assert_eq!(x, &y[..l]);
-            drop(x);
-            if l < y.len() {
-                let x = s.read(k, l as u64, 100).unwrap().unwrap();
-                assert_eq!(&x, &y[l..]);
-            }
-        });
+        keys.iter()
+            .enumerate()
+            .for_each(|(i, k)| s.assert_eq(k, &f(i)));
     }
 }
