@@ -1,3 +1,5 @@
+use core::mem;
+
 #[repr(C)]
 pub struct Entry {
     pub offset: u64,
@@ -5,6 +7,8 @@ pub struct Entry {
     pub uncompressed_len: u32,
     pub poly1305: u128,
 }
+
+const _: () = assert!(mem::size_of::<Entry>() == 32);
 
 #[repr(transparent)]
 pub struct CompressionInfo(u32);
@@ -32,5 +36,16 @@ impl CompressionInfo {
 
     pub fn len(&self) -> u32 {
         self.0 >> 2
+    }
+}
+
+impl Entry {
+    pub fn into_bytes(self) -> [u8; 32] {
+        let mut buf = [0; 32];
+        buf[..8].copy_from_slice(&self.offset.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.compression_info.0.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.uncompressed_len.to_le_bytes());
+        buf[16..].copy_from_slice(&self.poly1305.to_le_bytes());
+        buf
     }
 }

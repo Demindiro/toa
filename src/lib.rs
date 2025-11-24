@@ -14,6 +14,8 @@ pub struct Appender<D> {
     snapshot_len: SnapshotOffset,
     record_pitch: u8,
     record_stack: Vec<record::Entry>,
+    snapshots: Vec<Snapshot>,
+    last_snapshot_offset: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -44,12 +46,27 @@ pub struct Unmount {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SnapshotId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SnapshotRef {
+    pub id: SnapshotId,
+    pub offset: u64,
+}
+
+struct Snapshot {
+    object_trie_root: SnapshotOffset,
+    record_trie_root: record::Entry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct SnapshotOffset(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ObjectPointer {
     offset: SnapshotOffset,
     len: u64,
+    snapshot: SnapshotId,
 }
 
 impl<D> Appender<D> {
@@ -61,6 +78,8 @@ impl<D> Appender<D> {
             snapshot_len: SnapshotOffset(0),
             record_pitch,
             record_stack: Default::default(),
+            snapshots: Default::default(),
+            last_snapshot_offset: u64::MAX,
         }
     }
 
@@ -90,18 +109,27 @@ impl<D> Appender<D> {
             usize::try_from(x.0 - (i << self.record_pitch)).unwrap(),
         )
     }
+
+    fn current_snapshot(&self) -> SnapshotId {
+        SnapshotId(1 + u64::try_from(self.snapshots.len()).expect("usize <= u64"))
+    }
 }
 
 impl<D> Appender<D>
 where
     D: device::Device,
 {
-    pub fn mount(device: D, root: u64) -> Result<Self, Error<D::Error>> {
+    pub fn mount(device: D, root: u64, record_pitch: u8) -> Result<Self, Error<D::Error>> {
+        if root == u64::MAX {
+            return Ok(Self::new(device, record_pitch));
+        }
         todo!()
     }
 
-    pub fn unmount(self) -> Result<(D, Unmount), Error<D::Error>> {
-        todo!();
+    pub fn unmount(mut self) -> Result<(D, Unmount), Error<D::Error>> {
+        let offset = self.commit()?;
+        let root = self.last_snapshot_offset;
+        Ok((self.device, Unmount { root }))
     }
 
     pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
@@ -111,7 +139,15 @@ where
         }
         let offset = self.record_append(data)?;
         let len = u64::try_from(data.len()).expect("usize <= u64");
-        self.next_objects.insert(key, ObjectPointer { offset, len });
+        let snapshot = self.current_snapshot();
+        self.next_objects.insert(
+            key,
+            ObjectPointer {
+                offset,
+                len,
+                snapshot,
+            },
+        );
         Ok(key)
     }
 
@@ -186,6 +222,45 @@ where
         let x = &x.as_ref()[record_offset..];
         let x = &x[..len.min(x.len())];
         Ok(x.into())
+    }
+
+    fn commit(&mut self) -> Result<(), Error<D::Error>> {
+        if self.next_objects.is_empty() {
+            return Ok(());
+        }
+
+        let id = self.current_snapshot();
+
+        let object_trie_root = self.commit_object_trie()?;
+        let record_trie_root = self.commit_record_trie()?;
+
+        let snap = snapshot::Snapshot {
+            skiplist: todo!(),
+            id: id.0,
+            object_trie_root: object_trie_root.0,
+            record_trie_root,
+        };
+        let snap = snap.into_bytes();
+        let offset = self
+            .device
+            .write(snap.len())
+            .and_then(|mut x| x.append(&snap).map(|()| x.offset()))
+            .and_then(|x| self.device.sync().map(|()| x))
+            .map_err(Error::Device)?;
+        self.last_snapshot_offset = offset;
+        self.snapshots.push(Snapshot {
+            object_trie_root,
+            record_trie_root,
+        });
+        Ok(())
+    }
+
+    fn commit_object_trie(&mut self) -> Result<SnapshotOffset, Error<D::Error>> {
+        todo!();
+    }
+
+    fn commit_record_trie(&mut self) -> Result<record::Entry, Error<D::Error>> {
+        todo!();
     }
 }
 
@@ -283,7 +358,7 @@ mod test {
             let (dev, unmount) = self.appender.unmount().unwrap();
             let Unmount { root } = unmount;
             Self {
-                appender: Appender::mount(dev, root).unwrap(),
+                appender: Appender::mount(dev, root, 12).unwrap(),
             }
         }
     }
@@ -341,6 +416,11 @@ mod test {
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
+    }
+
+    #[test]
+    fn remount_noop() {
+        let _ = init().remount();
     }
 
     #[test]
