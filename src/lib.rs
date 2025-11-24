@@ -38,6 +38,11 @@ pub enum Error<D> {
     Device(D),
 }
 
+#[derive(Clone, Debug)]
+pub struct Unmount {
+    pub root: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct SnapshotOffset(u64);
 
@@ -91,6 +96,14 @@ impl<D> Appender<D>
 where
     D: device::Device,
 {
+    pub fn mount(device: D, root: u64) -> Result<Self, Error<D::Error>> {
+        todo!()
+    }
+
+    pub fn unmount(self) -> Result<(D, Unmount), Error<D::Error>> {
+        todo!();
+    }
+
     pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
         let key = Hash(blake3::hash(data).into());
         if self.contains_key(&key)? {
@@ -265,6 +278,14 @@ mod test {
             let x = x.into_bytes().unwrap();
             assert_eq!(&x, value);
         }
+
+        fn remount(self) -> Self {
+            let (dev, unmount) = self.appender.unmount().unwrap();
+            let Unmount { root } = unmount;
+            Self {
+                appender: Appender::mount(dev, root).unwrap(),
+            }
+        }
     }
 
     impl core::ops::Deref for Test {
@@ -317,6 +338,19 @@ mod test {
         let keys = (0..1 << 12)
             .map(|i| s.add(&f(i)).unwrap())
             .collect::<Vec<_>>();
+        keys.iter()
+            .enumerate()
+            .for_each(|(i, k)| s.assert_eq(k, &f(i)));
+    }
+
+    #[test]
+    fn remount() {
+        let mut s = init();
+        let f = |x| format!("A number {x}").into_bytes();
+        let keys = (0..1 << 12)
+            .map(|i| s.add(&f(i)).unwrap())
+            .collect::<Vec<_>>();
+        let mut s = s.remount();
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
