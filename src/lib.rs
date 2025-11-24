@@ -23,10 +23,14 @@ pub struct Hash([u8; 32]);
 pub type Read = Vec<u8>;
 
 pub struct IterRead<'a, D> {
-    appender: &'a mut Appender<D>,
-    key: Hash,
+    object: &'a mut Object<'a, D>,
     offset: u64,
     remaining: usize,
+}
+
+pub struct Object<'a, D> {
+    appender: &'a mut Appender<D>,
+    ptr: ObjectPointer,
 }
 
 #[derive(Clone, Debug)]
@@ -98,58 +102,15 @@ where
         Ok(key)
     }
 
-    pub fn read(
-        &mut self,
-        key: &Hash,
-        offset: u64,
-        len: usize,
-    ) -> Result<Option<Read>, Error<D::Error>> {
+    pub fn get(&mut self, key: &Hash) -> Result<Option<Object<'_, D>>, Error<D::Error>> {
         let ptr = if let Some(x) = self.next_objects.get(key) {
             *x
         } else {
             todo!("look for object on device");
         };
-        if ptr.len <= offset {
-            return Ok(Some([].into()));
-        }
-        let len = usize::try_from(ptr.len - offset)
-            .unwrap_or(usize::MAX)
-            .min(len);
-        let offset = SnapshotOffset(ptr.offset.0 + offset);
-        if self.next_record_offset() <= offset {
-            dbg!(offset, self.next_record_offset());
-            let start =
-                usize::try_from(offset.0 - self.next_record_offset().0).expect("inside record");
-            return Ok(Some(self.next_record[start..start + len].into()));
-        }
-
-        let (record_addr, record_offset) = self.offset_to_record(offset);
-        let x = self
-            .device
-            .read(record_addr, self.record_pitch())
-            .map_err(Error::Device)?;
-        // TODO decompress
-        let x = &x.as_ref()[record_offset..];
-        let x = &x[..len.min(x.len())];
-        Ok(Some(x.into()))
-    }
-
-    pub fn read_exact(
-        &mut self,
-        key: &Hash,
-        offset: u64,
-        len: usize,
-    ) -> Result<Option<IterRead<D>>, Error<D::Error>> {
-        let _ptr = if let Some(x) = self.next_objects.get(key) {
-            *x
-        } else {
-            todo!("look for object on device");
-        };
-        Ok(Some(IterRead {
+        Ok(Some(Object {
             appender: self,
-            key: *key,
-            offset,
-            remaining: len,
+            ptr,
         }))
     }
 
@@ -190,6 +151,58 @@ where
         self.next_record.clear();
         Ok(())
     }
+
+    fn current_data(
+        &mut self,
+        offset: SnapshotOffset,
+        len: usize,
+    ) -> Result<Read, Error<D::Error>> {
+        if self.next_record_offset() <= offset {
+            dbg!(offset, self.next_record_offset());
+            let start =
+                usize::try_from(offset.0 - self.next_record_offset().0).expect("inside record");
+            return Ok(self.next_record[start..start + len].into());
+        }
+
+        let (record_addr, record_offset) = self.offset_to_record(offset);
+        let x = self
+            .device
+            .read(record_addr, self.record_pitch())
+            .map_err(Error::Device)?;
+        // TODO decompress
+        let x = &x.as_ref()[record_offset..];
+        let x = &x[..len.min(x.len())];
+        Ok(x.into())
+    }
+}
+
+impl<'a, D> Object<'a, D>
+where
+    D: device::Device,
+{
+    pub fn read(&mut self, offset: u64, len: usize) -> Result<Read, Error<D::Error>> {
+        if self.ptr.len <= offset {
+            return Ok([].into());
+        }
+        let len = usize::try_from(self.ptr.len - offset)
+            .unwrap_or(usize::MAX)
+            .min(len);
+        let offset = SnapshotOffset(self.ptr.offset.0 + offset);
+
+        self.appender.current_data(offset, len)
+    }
+
+    pub fn read_exact(
+        &'a mut self,
+        offset: u64,
+        len: usize,
+    ) -> Result<IterRead<D>, Error<D::Error>> {
+        Ok(IterRead {
+            object: self,
+            offset,
+            remaining: len,
+        })
+    }
 }
 
 impl<'a, D> IterRead<'a, D>
@@ -215,12 +228,7 @@ where
         if self.remaining == 0 {
             return None;
         }
-        let r = match self
-            .appender
-            .read(&self.key, self.offset, self.remaining)
-            .transpose()
-            .expect("exists")
-        {
+        let r = match self.object.read(self.offset, self.remaining) {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
@@ -252,7 +260,8 @@ mod test {
 
     impl Test {
         fn assert_eq(&mut self, key: &Hash, value: &[u8]) {
-            let x = self.read_exact(&key, 0, usize::MAX).unwrap().unwrap();
+            let mut x = self.get(&key).unwrap().unwrap();
+            let x = x.read_exact(0, usize::MAX).unwrap();
             let x = x.into_bytes().unwrap();
             assert_eq!(&x, value);
         }
