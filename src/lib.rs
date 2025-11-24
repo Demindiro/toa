@@ -141,7 +141,9 @@ where
             .read(record_addr, self.record_pitch())
             .map_err(Error::Device)?;
         // TODO decompress
-        return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())));
+        let x = &x.as_ref()[record_offset..];
+        let x = &x[..len.min(x.len())];
+        Ok(Some(Read::Done(x.into())))
     }
 
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
@@ -247,7 +249,18 @@ mod test {
             .enumerate()
             .for_each(|(i, k)| match s.read(k, 0, 100).unwrap().unwrap() {
                 Read::Wait(_) => unreachable!(),
-                Read::Done(x) => assert_eq!(x, f(i)),
+                Read::Done(x) => {
+                    let y = f(i);
+                    let l = x.len();
+                    assert_eq!(x, &y[..l]);
+                    drop(x);
+                    if l < y.len() {
+                        match s.read(k, l as u64, 100).unwrap().unwrap() {
+                            Read::Wait(_) => unreachable!(),
+                            Read::Done(x) => assert_eq!(&x, &y[l..]),
+                        }
+                    }
+                }
             });
     }
 }
