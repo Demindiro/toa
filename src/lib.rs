@@ -5,12 +5,11 @@ pub mod snapshot;
 
 use core::fmt;
 use device::Write;
-use std::collections::BTreeMap;
 
 pub struct Appender<D> {
     device: D,
     next_record: Vec<u8>,
-    next_objects: BTreeMap<Hash, ObjectPointer>,
+    objects: object::ObjectTrie,
     snapshot_len: SnapshotOffset,
     record_pitch: u8,
     record_stack: Vec<record::Entry>,
@@ -74,7 +73,7 @@ impl<D> Appender<D> {
         Self {
             device,
             next_record: Default::default(),
-            next_objects: Default::default(),
+            objects: Default::default(),
             snapshot_len: SnapshotOffset(0),
             record_pitch,
             record_stack: Default::default(),
@@ -134,37 +133,45 @@ where
 
     pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
         let key = Hash(blake3::hash(data).into());
-        if self.contains_key(&key)? {
-            return Ok(key);
-        }
-        let offset = self.record_append(data)?;
+        let offset = self.snapshot_len;
         let len = u64::try_from(data.len()).expect("usize <= u64");
         let snapshot = self.current_snapshot();
-        self.next_objects.insert(
-            key,
+        let dev = |_: SnapshotOffset, _: &mut [u8]| {
+            todo!();
+        };
+        let insert = match self.objects.find(&key, dev)? {
+            object::Find::Object(_) => return Ok(key),
+            object::Find::None(x) => x,
+        };
+        insert.insert(
             ObjectPointer {
                 offset,
                 len,
                 snapshot,
             },
+            dev,
         );
+        self.record_append(data)?;
         Ok(key)
     }
 
     pub fn get(&mut self, key: &Hash) -> Result<Option<Object<'_, D>>, Error<D::Error>> {
-        let ptr = if let Some(x) = self.next_objects.get(key) {
-            *x
-        } else {
-            todo!("look for object on device");
+        let dev = |_: SnapshotOffset, _: &mut [u8]| {
+            todo!();
         };
-        Ok(Some(Object {
-            appender: self,
-            ptr,
-        }))
+        self.objects
+            .find(key, dev)
+            .map(|x| x.into_object())
+            .map(|x| {
+                x.map(|ptr| Object {
+                    appender: self,
+                    ptr,
+                })
+            })
     }
 
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
-        Ok(self.next_objects.contains_key(key))
+        self.objects.find(key, |_, _| todo!()).map(|x| x.is_none())
     }
 
     fn record_append(&mut self, data: &[u8]) -> Result<SnapshotOffset, Error<D::Error>> {
@@ -225,7 +232,7 @@ where
     }
 
     fn commit(&mut self) -> Result<(), Error<D::Error>> {
-        if self.next_objects.is_empty() {
+        if !self.objects.dirty() {
             return Ok(());
         }
 
