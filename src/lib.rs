@@ -136,10 +136,6 @@ where
         return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())))
     }
 
-    pub fn wait(&mut self, out: &mut [u8]) -> Result<Option<Event>, Error<D::Error>> {
-        todo!();
-    }
-
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
         Ok(self.next_objects.contains_key(key))
     }
@@ -186,8 +182,8 @@ impl fmt::Debug for Hash {
 mod test {
     use super::*;
 
-    fn init() -> Appender<Vec<u8>> {
-        Appender::new(Vec::new(), 12)
+    fn init() -> Appender<std::cell::RefCell<Vec<u8>>> {
+        Appender::new(Default::default(), 12)
     }
 
     #[test]

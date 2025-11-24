@@ -1,3 +1,5 @@
+use core::cell::{self, RefCell};
+
 pub trait Device {
     type Read<'a>: AsRef<[u8]>
     where
@@ -7,21 +9,14 @@ pub trait Device {
         Self: 'a;
     type Error;
 
-    fn read<'a>(
-        &'a mut self,
-        offset: u64,
-        bytes: usize,
-    ) -> Result<Self::Read<'a>, Self::Error>;
-    fn write<'a>(
-        &'a mut self,
-        bytes: usize,
-    ) -> Result<Self::Write<'a>, Self::Error>;
+    fn read<'a>(&'a self, offset: u64, bytes: usize) -> Result<Self::Read<'a>, Self::Error>;
+    fn write<'a>(&'a self, bytes: usize) -> Result<Self::Write<'a>, Self::Error>;
 
     fn len(&self) -> u64;
     fn optimal_alignment(&self) -> Alignment;
 
-    fn sync(&mut self) -> Result<(), Self::Error>;
-    fn wipe(&mut self) -> Result<(), Self::Error>;
+    fn sync(&self) -> Result<(), Self::Error>;
+    fn wipe(&self) -> Result<(), Self::Error>;
 }
 
 pub trait Write {
@@ -69,14 +64,17 @@ pub enum Alignment {
 }
 
 pub struct VecWrite<'a, T> {
-    vec: &'a mut Vec<T>,
+    vec: cell::RefMut<'a, Vec<T>>,
     remaining: usize,
     offset: u64,
 }
 
-impl Device for Vec<u8> {
+// retardation
+pub struct RefAsRef<'a, T: ?Sized>(cell::Ref<'a, T>);
+
+impl Device for RefCell<Vec<u8>> {
     type Read<'a>
-        = &'a [u8]
+        = RefAsRef<'a, [u8]>
     where
         Self: 'a;
     type Write<'a>
@@ -85,41 +83,41 @@ impl Device for Vec<u8> {
         Self: 'a;
     type Error = &'static str;
 
-    fn read(
-        &mut self,
-        offset: u64,
-        bytes: usize,
-    ) -> Result<&[u8], Self::Error> {
+    fn read(&self, offset: u64, bytes: usize) -> Result<RefAsRef<'_, [u8]>, Self::Error> {
+        let vec = self.borrow();
         usize::try_from(offset)
             .ok()
             .and_then(|x| x.checked_add(bytes).map(|y| x..y))
-            .and_then(|x| self.get(x))
+            .filter(|x| x.end <= vec.len())
+            .map(|x| cell::Ref::map(vec, |y| &y[x]))
+            .map(RefAsRef)
             .ok_or("out of bounds")
     }
 
-    fn write(&mut self, bytes: usize) -> Result<VecWrite<'_, u8>, Self::Error> {
-        let offset = u64::try_from(self.len()).unwrap();
-        Vec::reserve(self, bytes);
+    fn write(&self, bytes: usize) -> Result<VecWrite<'_, u8>, Self::Error> {
+        let mut vec = self.borrow_mut();
+        let offset = u64::try_from(vec.len()).unwrap();
+        vec.reserve(bytes);
         Ok(VecWrite {
-            vec: self,
+            vec,
             remaining: bytes,
             offset,
         })
     }
 
     fn len(&self) -> u64 {
-        <[u8]>::len(self).try_into().unwrap_or(u64::MAX)
+        self.borrow().len().try_into().unwrap_or(u64::MAX)
     }
 
     fn optimal_alignment(&self) -> Alignment {
         Alignment::N0
     }
 
-    fn wipe(&mut self) -> Result<(), Self::Error> {
-        Ok(<[u8]>::fill(self, 0))
+    fn wipe(&self) -> Result<(), Self::Error> {
+        Ok(self.borrow_mut().fill(0))
     }
 
-    fn sync(&mut self) -> Result<(), Self::Error> {
+    fn sync(&self) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -139,5 +137,14 @@ impl Write for VecWrite<'_, u8> {
 
     fn offset(&self) -> u64 {
         self.offset
+    }
+}
+
+impl<T> AsRef<T> for RefAsRef<'_, T>
+where
+    T: ?Sized,
+{
+    fn as_ref(&self) -> &T {
+        &*self.0
     }
 }
