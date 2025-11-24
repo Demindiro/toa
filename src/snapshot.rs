@@ -4,14 +4,10 @@ const SKIPLIST_NUM: usize = 10;
 
 #[repr(C)]
 pub struct Snapshot {
-    skiplist: [u64; SKIPLIST_NUM],
-    id: u64,
-    timestamp: u64,
-    object_tree_root: u64,
-    records_root: u64,
-    records_pitch: u8,
-    records_depth: u8,
-    _zero: [u8; 14],
+    pub skiplist: [u64; SKIPLIST_NUM],
+    pub id: u64,
+    pub object_trie_root: u64,
+    pub record_trie_root: crate::record::Entry,
 }
 
 const _: () = assert!(mem::size_of::<Snapshot>() == 128);

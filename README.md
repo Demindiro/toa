@@ -86,12 +86,8 @@ If a password is used, the key is XORed with the password hash.
 | -------:|:----------------- |
 |    79:0 | skiplist          |
 |   87:80 | ID                |
-|   95:88 | timestamp         |
-|  103:96 | object tree root  |
-| 111:104 | records root      |
-| 112:112 | records pitch     |
-| 113:113 | records depth     |
-| 127:114 | (zero)            |
+|   95:88 | object trie root  |
+|  127:96 | record trie root  |
 
 
 ### 3. Record trie
