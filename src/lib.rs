@@ -4,8 +4,8 @@ pub mod record;
 pub mod snapshot;
 
 use core::fmt;
-use std::collections::BTreeMap;
 use device::Write;
+use std::collections::BTreeMap;
 
 pub struct Appender<D> {
     device: D,
@@ -86,7 +86,10 @@ impl<D> Appender<D> {
     fn offset_to_record(&self, x: SnapshotOffset) -> (u64, usize) {
         let i = x.0 >> self.record_pitch;
         let e = &self.record_stack[usize::try_from(i).unwrap()];
-        (e.offset, usize::try_from(x.0 - (i << self.record_pitch)).unwrap())
+        (
+            e.offset,
+            usize::try_from(x.0 - (i << self.record_pitch)).unwrap(),
+        )
     }
 }
 
@@ -127,13 +130,18 @@ where
             dbg!(offset, self.next_record_offset());
             let start =
                 usize::try_from(offset.0 - self.next_record_offset().0).expect("inside record");
-            return Ok(Some(Read::Done(self.next_record[start..start + len].into())));
+            return Ok(Some(Read::Done(
+                self.next_record[start..start + len].into(),
+            )));
         }
 
         let (record_addr, record_offset) = self.offset_to_record(offset);
-        let x = self.device.read(record_addr, self.record_pitch()).map_err(Error::Device)?;
+        let x = self
+            .device
+            .read(record_addr, self.record_pitch())
+            .map_err(Error::Device)?;
         // TODO decompress
-        return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())))
+        return Ok(Some(Read::Done(x.as_ref()[record_offset..][..len].into())));
     }
 
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
@@ -158,7 +166,10 @@ where
 
     fn record_flush(&mut self) -> Result<(), Error<D::Error>> {
         let record_len = u32::try_from(self.next_record.len()).unwrap();
-        let mut x = self.device.write(self.next_record.len()).map_err(Error::Device)?;
+        let mut x = self
+            .device
+            .write(self.next_record.len())
+            .map_err(Error::Device)?;
         x.append(&self.next_record).map_err(Error::Device)?;
         let offset = x.offset();
         self.record_stack.push(record::Entry {
@@ -229,12 +240,14 @@ mod test {
     fn insert_many() {
         let mut s = init();
         let f = |x| format!("A number {x}").into_bytes();
-        let keys = (0..1 << 12).map(|i| s.add(&f(i)).unwrap()).collect::<Vec<_>>();
-        keys.iter().enumerate().for_each(|(i, k)| {
-            match s.read(k, 0, 100).unwrap().unwrap() {
+        let keys = (0..1 << 12)
+            .map(|i| s.add(&f(i)).unwrap())
+            .collect::<Vec<_>>();
+        keys.iter()
+            .enumerate()
+            .for_each(|(i, k)| match s.read(k, 0, 100).unwrap().unwrap() {
                 Read::Wait(_) => unreachable!(),
                 Read::Done(x) => assert_eq!(x, f(i)),
-            }
-        });
+            });
     }
 }
