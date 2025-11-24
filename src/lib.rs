@@ -20,24 +20,7 @@ pub struct Appender<D> {
 #[repr(transparent)]
 pub struct Hash([u8; 32]);
 
-pub struct ReadTicket(usize);
-pub struct WriteTicket(usize);
-
-pub enum Read {
-    Wait(ReadTicket),
-    Done(Vec<u8>),
-}
-
-pub enum Event<'a> {
-    Read {
-        ticket: ReadTicket,
-        data: &'a [u8],
-    },
-    Write {
-        ticket: WriteTicket,
-        data: &'a mut (),
-    },
-}
+pub type Read = Vec<u8>;
 
 #[derive(Clone, Debug)]
 pub enum Error<D> {
@@ -120,7 +103,7 @@ where
             todo!("look for object on device");
         };
         if ptr.len <= offset {
-            return Ok(Some(Read::Done([].into())));
+            return Ok(Some([].into()));
         }
         let len = usize::try_from(ptr.len - offset)
             .unwrap_or(usize::MAX)
@@ -130,9 +113,7 @@ where
             dbg!(offset, self.next_record_offset());
             let start =
                 usize::try_from(offset.0 - self.next_record_offset().0).expect("inside record");
-            return Ok(Some(Read::Done(
-                self.next_record[start..start + len].into(),
-            )));
+            return Ok(Some(self.next_record[start..start + len].into()));
         }
 
         let (record_addr, record_offset) = self.offset_to_record(offset);
@@ -143,7 +124,7 @@ where
         // TODO decompress
         let x = &x.as_ref()[record_offset..];
         let x = &x[..len.min(x.len())];
-        Ok(Some(Read::Done(x.into())))
+        Ok(Some(x.into()))
     }
 
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
@@ -203,24 +184,18 @@ mod test {
     fn insert_one_empty() {
         let mut s = init();
         let key = s.add(b"").unwrap();
-        match s.read(&key, 0, 10).unwrap().unwrap() {
-            Read::Wait(_) => unreachable!(),
-            Read::Done(x) => assert_eq!(x, &[]),
-        }
+        let x = s.read(&key, 0, 10).unwrap().unwrap();
+        assert_eq!(x, &[]);
     }
 
     #[test]
     fn insert_one() {
         let mut s = init();
         let key = s.add(b"Hello, world!").unwrap();
-        match s.read(&key, 0, 10).unwrap().unwrap() {
-            Read::Wait(_) => unreachable!(),
-            Read::Done(x) => assert_eq!(x, b"Hello, wor"),
-        }
-        match s.read(&key, 0, 100).unwrap().unwrap() {
-            Read::Wait(_) => unreachable!(),
-            Read::Done(x) => assert_eq!(x, b"Hello, world!"),
-        }
+        let x = s.read(&key, 0, 10).unwrap().unwrap();
+        assert_eq!(x, b"Hello, wor");
+        let x = s.read(&key, 0, 100).unwrap().unwrap();
+        assert_eq!(x, b"Hello, world!");
     }
 
     #[test]
@@ -228,14 +203,10 @@ mod test {
         let mut s = init();
         let a = s.add(b"Hello, world!").unwrap();
         let b = s.add(b"Greetings!").unwrap();
-        match s.read(&a, 0, 100).unwrap().unwrap() {
-            Read::Wait(_) => unreachable!(),
-            Read::Done(x) => assert_eq!(x, b"Hello, world!"),
-        }
-        match s.read(&b, 0, 100).unwrap().unwrap() {
-            Read::Wait(_) => unreachable!(),
-            Read::Done(x) => assert_eq!(x, b"Greetings!"),
-        }
+        let x = s.read(&a, 0, 100).unwrap().unwrap();
+        assert_eq!(x, b"Hello, world!");
+        let x = s.read(&b, 0, 100).unwrap().unwrap();
+        assert_eq!(x, b"Greetings!");
     }
 
     #[test]
@@ -245,22 +216,16 @@ mod test {
         let keys = (0..1 << 12)
             .map(|i| s.add(&f(i)).unwrap())
             .collect::<Vec<_>>();
-        keys.iter()
-            .enumerate()
-            .for_each(|(i, k)| match s.read(k, 0, 100).unwrap().unwrap() {
-                Read::Wait(_) => unreachable!(),
-                Read::Done(x) => {
-                    let y = f(i);
-                    let l = x.len();
-                    assert_eq!(x, &y[..l]);
-                    drop(x);
-                    if l < y.len() {
-                        match s.read(k, l as u64, 100).unwrap().unwrap() {
-                            Read::Wait(_) => unreachable!(),
-                            Read::Done(x) => assert_eq!(&x, &y[l..]),
-                        }
-                    }
-                }
-            });
+        keys.iter().enumerate().for_each(|(i, k)| {
+            let x = s.read(k, 0, 100).unwrap().unwrap();
+            let y = f(i);
+            let l = x.len();
+            assert_eq!(x, &y[..l]);
+            drop(x);
+            if l < y.len() {
+                let x = s.read(k, l as u64, 100).unwrap().unwrap();
+                assert_eq!(&x, &y[l..]);
+            }
+        });
     }
 }
