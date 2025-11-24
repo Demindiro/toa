@@ -1,14 +1,20 @@
+use crate::{Hash, ObjectPointer, SnapshotId, SnapshotOffset};
 use core::mem;
-use crate::{Hash, SnapshotId, SnapshotOffset};
 
 #[derive(Default)]
 pub struct ObjectTrie {
     root: Option<Node>,
 }
 
-enum Find {
-    None { different_nibble: Nibble },
-    Object { offset: SnapshotOffset, length: u64 },
+pub enum Find<'a> {
+    None(Insert<'a>),
+    Object(ObjectPointer),
+}
+
+pub struct Insert<'a> {
+    trie: &'a mut ObjectTrie,
+    key: &'a Hash,
+    nibble: Nibble,
 }
 
 #[derive(Clone, Copy)]
@@ -18,8 +24,7 @@ enum Node {
     Parent(Parent),
     Leaf {
         hash: Hash,
-        offset: SnapshotOffset,
-        length: u64,
+        ptr: ObjectPointer,
     },
     External {
         id: SnapshotId,
@@ -63,23 +68,45 @@ impl ObjectTrie {
         self.root = Some(Node::External { id, offset });
     }
 
-    pub fn find<F>(&mut self, key: &Hash, dev: F) -> Find
+    pub fn find<'a, E, F>(&'a mut self, key: &'a Hash, dev: F) -> Result<Find<'a>, E>
     where
-        F: Fn(),
+        F: Fn(SnapshotOffset, &mut [u8]) -> Result<(), E>,
     {
-        let none = |x| Find::None { different_nibble: x };
-        let Some(mut cur) = self.root.as_ref() else { return none(Nibble(0)) };
-        loop {
+        let none = |trie, nibble| Find::None(Insert { trie, nibble, key });
+        let Some(mut cur) = self.root.as_ref() else {
+            return Ok(none(self, Nibble(0)));
+        };
+        Ok(loop {
             match cur {
                 Node::Parent(x) => {
-                    let Some(c) = x.get(key) else { return none(x.nibble) };
+                    let Some(c) = x.get(key) else {
+                        break none(self, x.nibble);
+                    };
                     cur = c;
                 }
-                &Node::Leaf { hash, offset, length } => return differing_nibble(&hash, key)
-                    .map_or(Find::Object { offset, length }, |i| Find::None { different_nibble: i }),
+                &Node::Leaf { hash, ptr } => {
+                    break differing_nibble(&hash, key).map_or(Find::Object(ptr), |x| none(self, x));
+                }
                 &Node::External { id, offset } => todo!(),
             }
-        }
+        })
+    }
+}
+
+impl Insert<'_> {
+    pub fn insert<E, F>(self, ptr: ObjectPointer, dev: F) -> Result<(), E>
+    where
+        F: Fn(SnapshotOffset, &mut [u8]) -> Result<(), E>,
+    {
+        let leaf = Node::Leaf {
+            hash: *self.key,
+            ptr,
+        };
+        let Some(mut cur) = self.trie.root.as_mut() else {
+            self.trie.root = Some(leaf);
+            return Ok(());
+        };
+        todo!();
     }
 }
 
