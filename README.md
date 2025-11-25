@@ -116,7 +116,7 @@ Data past the uncompressed length is assumed to be zero.
 The record pitch is a power of two and must be at least (1 << 1).
 
 
-### 4. Hash to object QP trie
+### 4. Hash to object "QP trie"
 
 Nodes *must not* cross a record boundary.
 
@@ -127,6 +127,12 @@ Objects *should* be stored in records separate from nodes.
 Objects *can* be aligned to an OS page boundary to avoid
 needing an extra copy when memory-mapping,
 but this is not required.
+
+The trie is a variant of QP tries.
+The main difference is the lack of nibble index
+and hence lack of prefix compression.
+This is because, normally, cryptographic hashes have
+high noise and won't share prefixes in a meaningful sense.
 
 !!! note https://dotat.at/prog/qp/blog-2015-10-04.html
 
@@ -143,8 +149,7 @@ but this is not required.
 | bytes | short description |
 | -----:|:----------------- |
 |   1:0 | populated         |
-|   2:2 | nibble            |
-|   7:3 | (zero)            |
+|   7:2 | (zero)            |
 | ...:8 | branches          |
 
 #### External node
