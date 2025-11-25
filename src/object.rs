@@ -68,7 +68,7 @@ struct ParentHead {
 
 #[repr(C)]
 struct ExternalNode {
-    snapshot_id: u64,
+    snapshot_offset: u64,
     offset: u64,
 }
 
@@ -77,8 +77,10 @@ const _: () = assert!(mem::size_of::<ParentHead>() == 8);
 const _: () = assert!(mem::size_of::<ExternalNode>() == 16);
 
 impl ObjectTrie {
-    pub fn reset(&mut self, snapshot: SnapshotRoot, offset: SnapshotOffset) {
-        self.root = Some(Node::External(External { snapshot, offset }));
+    pub fn with_external_root(snapshot: SnapshotRoot, offset: SnapshotOffset) -> Self {
+        Self {
+            root: Some(Node::External(External { snapshot, offset })),
+        }
     }
 
     pub fn find<'a, 'h, E, F>(&'a mut self, key: &'h Hash, dev: F) -> Result<Find<'a, 'h>, E>
@@ -121,6 +123,15 @@ impl ObjectTrie {
     pub fn dirty(&self) -> bool {
         !matches!(&self.root, None | Some(Node::External { .. }))
     }
+
+    pub fn serialize<E, F>(&self, mut f: F) -> Result<SnapshotOffset, E>
+    where
+        F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
+    {
+        self.root
+            .as_ref()
+            .map_or(Ok(SnapshotOffset(u64::MAX)), |x| x.serialize(&mut f))
+    }
 }
 
 impl Find<'_, '_> {
@@ -154,6 +165,19 @@ impl Insert<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+impl Node {
+    fn serialize<E, F>(&self, f: &mut F) -> Result<SnapshotOffset, E>
+    where
+        F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
+    {
+        match self {
+            Node::Parent(x) => x.serialize(f),
+            Node::Leaf(x) => x.serialize(f),
+            Node::External(x) => x.serialize(f),
+        }
     }
 }
 
@@ -210,6 +234,46 @@ impl Parent {
         let bit = 1 << nibble.0;
         (self.population & bit != 0).then(|| (self.population & (bit - 1)).count_ones() as usize)
     }
+
+    fn serialize<E, F>(&self, f: &mut F) -> Result<SnapshotOffset, E>
+    where
+        F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
+    {
+        debug_assert_eq!(self.branches.len(), self.population.count_ones() as usize);
+        let mut buf = [0; 8 * (1 + 16)];
+        buf[..2].copy_from_slice(&self.population.to_le_bytes());
+        for (x, y) in buf[8..].chunks_exact_mut(8).zip(&self.branches) {
+            x.copy_from_slice(&y.serialize(f)?.0.to_le_bytes())
+        }
+        (f)(&buf[..8 * (1 + self.branches.len())])
+    }
+}
+
+impl Leaf {
+    fn serialize<E, F>(&self, f: &mut F) -> Result<SnapshotOffset, E>
+    where
+        F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
+    {
+        (f)(&Leaf2 {
+            hash: self.hash.0,
+            offset: self.ptr.offset.0,
+            length: self.ptr.len,
+        }
+        .into_bytes())
+    }
+}
+
+impl External {
+    fn serialize<E, F>(&self, f: &mut F) -> Result<SnapshotOffset, E>
+    where
+        F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
+    {
+        (f)(&ExternalNode {
+            snapshot_offset: self.snapshot.0,
+            offset: self.offset.0,
+        }
+        .into_bytes())
+    }
 }
 
 impl NibbleIndex {
@@ -245,7 +309,7 @@ impl ParentHead {
 impl ExternalNode {
     fn into_bytes(self) -> [u8; 16] {
         let mut buf = [0; 16];
-        buf[..8].copy_from_slice(&self.snapshot_id.to_le_bytes());
+        buf[..8].copy_from_slice(&self.snapshot_offset.to_le_bytes());
         buf[8..].copy_from_slice(&self.offset.to_le_bytes());
         buf
     }

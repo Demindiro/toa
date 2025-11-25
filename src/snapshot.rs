@@ -1,3 +1,4 @@
+use crate::record;
 use core::mem;
 
 #[repr(C)]
@@ -5,7 +6,7 @@ pub struct Snapshot {
     pub poly1305: u128,
     pub object_trie_root: u64,
     pub timestamp: u64,
-    pub record_trie_root: crate::record::Entry,
+    pub record_trie_root: record::Entry,
 }
 
 const _: () = assert!(mem::size_of::<Snapshot>() == 64);
@@ -19,10 +20,13 @@ impl Snapshot {
         buf[32..].copy_from_slice(&self.record_trie_root.into_bytes());
         buf
     }
-}
 
-fn append_u64(out: &mut [u8], n: u64) -> &mut [u8] {
-    let (x, y) = out.split_at_mut(8);
-    x.copy_from_slice(&n.to_le_bytes());
-    y
+    pub fn from_bytes(b: &[u8; 64]) -> Self {
+        Self {
+            poly1305: u128::from_le_bytes(b[..16].try_into().unwrap()),
+            object_trie_root: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+            timestamp: u64::from_le_bytes(b[24..32].try_into().unwrap()),
+            record_trie_root: record::Entry::from_bytes(b[32..].try_into().unwrap()),
+        }
+    }
 }

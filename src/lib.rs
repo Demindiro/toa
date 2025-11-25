@@ -5,6 +5,7 @@ pub mod snapshot;
 
 use core::fmt;
 use device::Write;
+use std::collections::HashMap;
 
 pub struct Appender<D> {
     device: D,
@@ -13,8 +14,8 @@ pub struct Appender<D> {
     snapshot_len: SnapshotOffset,
     record_pitch: u8,
     record_stack: Vec<record::Entry>,
-    snapshots: Vec<Snapshot>,
-    last_snapshot_offset: u64,
+    snapshots: HashMap<SnapshotRoot, Snapshot>,
+    last_snapshot_root: SnapshotRoot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,7 +42,7 @@ pub enum Error<D> {
 
 #[derive(Clone, Debug)]
 pub struct Unmount {
-    pub root: u64,
+    pub root: SnapshotRoot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,7 +72,7 @@ impl<D> Appender<D> {
             record_pitch,
             record_stack: Default::default(),
             snapshots: Default::default(),
-            last_snapshot_offset: u64::MAX,
+            last_snapshot_root: SnapshotRoot(u64::MAX),
         }
     }
 
@@ -93,6 +94,10 @@ impl<D> Appender<D> {
         self.next_record_remaining() == 0
     }
 
+    fn current_offset(&self) -> SnapshotOffset {
+        self.snapshot_len
+    }
+
     fn offset_to_record(&self, x: SnapshotOffset) -> (u64, usize) {
         let i = x.0 >> self.record_pitch;
         let e = &self.record_stack[usize::try_from(i).unwrap()];
@@ -107,17 +112,32 @@ impl<D> Appender<D>
 where
     D: device::Device,
 {
-    pub fn mount(device: D, root: u64, record_pitch: u8) -> Result<Self, Error<D::Error>> {
-        if root == u64::MAX {
-            return Ok(Self::new(device, record_pitch));
-        }
-        todo!()
-    }
-
     pub fn unmount(mut self) -> Result<(D, Unmount), Error<D::Error>> {
         let offset = self.commit()?;
-        let root = self.last_snapshot_offset;
+        let root = self.last_snapshot_root;
         Ok((self.device, Unmount { root }))
+    }
+
+    pub fn mount(device: D, root: SnapshotRoot, record_pitch: u8) -> Result<Self, Error<D::Error>> {
+        if root == SnapshotRoot(u64::MAX) {
+            return Ok(Self::new(device, record_pitch));
+        }
+        let read = device.read(root.0, 64).map_err(Error::Device)?;
+        let snapshot = snapshot::Snapshot::from_bytes(read.as_ref().try_into().expect("64 bytes"));
+        drop(read);
+        Ok(Self {
+            device,
+            next_record: Default::default(),
+            objects: object::ObjectTrie::with_external_root(
+                root,
+                SnapshotOffset(snapshot.object_trie_root),
+            ),
+            snapshot_len: SnapshotOffset(0),
+            record_pitch,
+            record_stack: Default::default(),
+            snapshots: Default::default(),
+            last_snapshot_root: SnapshotRoot(u64::MAX),
+        })
     }
 
     pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
@@ -234,21 +254,65 @@ where
             .write(snap.len())
             .and_then(|mut x| x.append(&snap).map(|()| x.offset()))
             .and_then(|x| self.device.sync().map(|()| x))
+            .map(SnapshotRoot)
             .map_err(Error::Device)?;
-        self.last_snapshot_offset = offset;
-        self.snapshots.push(Snapshot {
-            object_trie_root,
-            record_trie_root,
-        });
+        self.last_snapshot_root = offset;
+        self.snapshots.insert(
+            offset,
+            Snapshot {
+                object_trie_root,
+                record_trie_root,
+            },
+        );
         Ok(())
     }
 
     fn commit_object_trie(&mut self) -> Result<SnapshotOffset, Error<D::Error>> {
-        todo!();
+        self.record_flush()?;
+        self.objects.serialize(|data| {
+            if (1 << self.record_pitch) - self.next_record.len() < data.len() {
+                //if self.next_record_remaining() < data.len() {
+                {
+                    {
+                        {
+                            let record_len = u32::try_from(self.next_record.len()).unwrap();
+                            let mut x = self
+                                .device
+                                .write(self.next_record.len())
+                                .map_err(Error::Device)?;
+                            x.append(&self.next_record).map_err(Error::Device)?;
+                            let offset = x.offset();
+                            self.record_stack.push(record::Entry {
+                                offset,
+                                compression_info: record::CompressionInfo::new_uncompressed(
+                                    record_len,
+                                )
+                                .unwrap(),
+                                uncompressed_len: record_len,
+                                poly1305: 0,
+                            });
+                            self.next_record.clear();
+                        }
+                    }
+                }
+            }
+            let offt = /* self.current_offset() */ self.snapshot_len;
+            self.next_record.extend_from_slice(data);
+            Ok(offt)
+        })
     }
 
     fn commit_record_trie(&mut self) -> Result<record::Entry, Error<D::Error>> {
-        todo!();
+        self.record_flush()?;
+        //let mut parent = Vec::new();
+        for r in core::mem::take(&mut self.record_stack) {
+            if self.next_record_is_full() {
+                todo!("flush");
+            }
+            self.next_record.extend_from_slice(&r.into_bytes());
+        }
+        self.record_flush()?;
+        Ok(self.record_stack.pop().unwrap())
     }
 }
 

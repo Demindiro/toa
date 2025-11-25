@@ -51,4 +51,13 @@ impl Entry {
         buf[16..].copy_from_slice(&self.poly1305.to_le_bytes());
         buf
     }
+
+    pub fn from_bytes(b: &[u8; 32]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(b[..8].try_into().unwrap()),
+            compression_info: CompressionInfo(u32::from_le_bytes(b[8..12].try_into().unwrap())),
+            uncompressed_len: u32::from_le_bytes(b[12..16].try_into().unwrap()),
+            poly1305: u128::from_le_bytes(b[16..].try_into().unwrap()),
+        }
+    }
 }
