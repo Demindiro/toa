@@ -88,9 +88,9 @@ impl ObjectTrie {
         }
     }
 
-    pub fn find<'a, 'h, E, F>(&'a mut self, key: &'h Hash, dev: F) -> Result<Find<'a, 'h>, E>
+    pub fn find<'a, 'h, E, F>(&'a mut self, key: &'h Hash, mut dev: F) -> Result<Find<'a, 'h>, E>
     where
-        F: Fn(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
     {
         let none = |replace| Find::None(Insert { replace, key });
         let mut cur = &mut self.root;
