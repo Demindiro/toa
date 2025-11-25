@@ -15,7 +15,6 @@ pub struct Appender<D> {
     record_pitch: u8,
     record_stack: Vec<record::Entry>,
     snapshots: HashMap<SnapshotRoot, Snapshot>,
-    last_snapshot_root: SnapshotRoot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -72,8 +71,11 @@ impl<D> Appender<D> {
             record_pitch,
             record_stack: Default::default(),
             snapshots: Default::default(),
-            last_snapshot_root: SnapshotRoot(u64::MAX),
         }
+    }
+
+    pub fn into_device(self) -> D {
+        self.device
     }
 
     fn record_pitch(&self) -> usize {
@@ -112,12 +114,6 @@ impl<D> Appender<D>
 where
     D: device::Device,
 {
-    pub fn unmount(mut self) -> Result<(D, Unmount), Error<D::Error>> {
-        let offset = self.commit()?;
-        let root = self.last_snapshot_root;
-        Ok((self.device, Unmount { root }))
-    }
-
     pub fn mount(device: D, root: SnapshotRoot, record_pitch: u8) -> Result<Self, Error<D::Error>> {
         if root == SnapshotRoot(u64::MAX) {
             return Ok(Self::new(device, record_pitch));
@@ -136,7 +132,6 @@ where
             record_pitch,
             record_stack: Default::default(),
             snapshots: Default::default(),
-            last_snapshot_root: SnapshotRoot(u64::MAX),
         })
     }
 
@@ -234,9 +229,9 @@ where
         Ok(x.into())
     }
 
-    fn commit(&mut self) -> Result<(), Error<D::Error>> {
+    fn commit(&mut self) -> Result<Option<SnapshotRoot>, Error<D::Error>> {
         if !self.objects.dirty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let object_trie_root = self.commit_object_trie()?;
@@ -256,7 +251,6 @@ where
             .and_then(|x| self.device.sync().map(|()| x))
             .map(SnapshotRoot)
             .map_err(Error::Device)?;
-        self.last_snapshot_root = offset;
         self.snapshots.insert(
             offset,
             Snapshot {
@@ -264,7 +258,7 @@ where
                 record_trie_root,
             },
         );
-        Ok(())
+        Ok(Some(offset))
     }
 
     fn commit_object_trie(&mut self) -> Result<SnapshotOffset, Error<D::Error>> {
@@ -395,6 +389,7 @@ mod test {
     use super::*;
 
     struct Test {
+        last_root: SnapshotRoot,
         appender: Appender<std::cell::RefCell<Vec<u8>>>,
     }
 
@@ -406,11 +401,16 @@ mod test {
             assert_eq!(&x, value);
         }
 
-        fn remount(self) -> Self {
-            let (dev, unmount) = self.appender.unmount().unwrap();
-            let Unmount { root } = unmount;
+        fn commit(&mut self) {
+            self.appender.commit().unwrap().map(|x| self.last_root = x);
+        }
+
+        fn remount(mut self) -> Self {
+            self.commit();
+            let dev = self.appender.into_device();
             Self {
-                appender: Appender::mount(dev, root, 12).unwrap(),
+                last_root: self.last_root,
+                appender: Appender::mount(dev, self.last_root, 12).unwrap(),
             }
         }
     }
@@ -431,6 +431,7 @@ mod test {
 
     fn init() -> Test {
         Test {
+            last_root: SnapshotRoot(u64::MAX),
             appender: Appender::new(Default::default(), 12),
         }
     }
