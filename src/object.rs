@@ -1,9 +1,9 @@
 use crate::{Hash, ObjectPointer, SnapshotOffset, SnapshotRoot};
 use core::mem;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ObjectTrie {
-    root: Option<Node>,
+    root: Node,
 }
 
 pub(crate) enum Find<'a, 'h> {
@@ -17,7 +17,6 @@ pub(crate) struct Insert<'a, 'h> {
 }
 
 enum InsertNode<'a> {
-    Root(&'a mut Option<Node>),
     Parent(Nibble, &'a mut Parent),
     Leaf(NibbleIndex, &'a mut Node),
 }
@@ -79,7 +78,13 @@ const _: () = assert!(mem::size_of::<ExternalNode>() == 16);
 impl ObjectTrie {
     pub fn with_external_root(snapshot: SnapshotRoot, offset: SnapshotOffset) -> Self {
         Self {
-            root: Some(Node::External(External { snapshot, offset })),
+            root: Node::External(External { snapshot, offset }),
+        }
+    }
+
+    pub fn with_leaf(key: &Hash, ptr: ObjectPointer) -> Self {
+        Self {
+            root: Node::Leaf(Leaf { hash: *key, ptr }),
         }
     }
 
@@ -88,11 +93,7 @@ impl ObjectTrie {
         F: Fn(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
     {
         let none = |replace| Find::None(Insert { replace, key });
-        // https://github.com/rust-lang/rust/issues/21906
-        if self.root.is_none() {
-            return Ok(none(InsertNode::Root(&mut self.root)));
-        }
-        let mut cur = self.root.as_mut().expect("not None");
+        let mut cur = &mut self.root;
         let mut index = NibbleIndex(0);
         Ok(loop {
             match cur {
@@ -121,16 +122,14 @@ impl ObjectTrie {
     }
 
     pub fn dirty(&self) -> bool {
-        !matches!(&self.root, None | Some(Node::External { .. }))
+        !matches!(&self.root, Node::External { .. })
     }
 
     pub fn serialize<E, F>(&self, mut f: F) -> Result<SnapshotOffset, E>
     where
         F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
     {
-        self.root
-            .as_ref()
-            .map_or(Ok(SnapshotOffset(u64::MAX)), |x| x.serialize(&mut f))
+        self.root.serialize(&mut f)
     }
 }
 
@@ -157,7 +156,6 @@ impl Insert<'_, '_> {
             ptr,
         };
         match self.replace {
-            InsertNode::Root(x) => *x = Some(Node::Leaf(new)),
             InsertNode::Parent(nibble, x) => x.insert(nibble, Node::Leaf(new)),
             InsertNode::Leaf(index, x) => {
                 let Node::Leaf(y) = *x else { unreachable!() };

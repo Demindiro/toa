@@ -62,11 +62,24 @@ struct ObjectPointer {
 }
 
 impl<D> Appender<D> {
-    pub fn new(device: D, record_pitch: u8) -> Self {
+    pub fn init(device: D, record_pitch: u8) -> Self {
+        // always initialize with an empty object
+        //
+        // Having at least one object means we never have to check for
+        // "no objects", which will be the absolutely most common case,
+        // so worth saving instructions in all cases.
+        let key = Hash(blake3::hash(&[]).into());
+        let objects = object::ObjectTrie::with_leaf(
+            &key,
+            ObjectPointer {
+                offset: SnapshotOffset(0),
+                len: 0,
+            },
+        );
         Self {
             device,
             next_record: Default::default(),
-            objects: Default::default(),
+            objects,
             snapshot_len: SnapshotOffset(0),
             record_pitch,
             record_stack: Default::default(),
@@ -115,9 +128,6 @@ where
     D: device::Device,
 {
     pub fn mount(device: D, root: SnapshotRoot, record_pitch: u8) -> Result<Self, Error<D::Error>> {
-        if root == SnapshotRoot(u64::MAX) {
-            return Ok(Self::new(device, record_pitch));
-        }
         let read = device.read(root.0, 64).map_err(Error::Device)?;
         let snapshot = snapshot::Snapshot::from_bytes(read.as_ref().try_into().expect("64 bytes"));
         drop(read);
@@ -432,7 +442,7 @@ mod test {
     fn init() -> Test {
         Test {
             last_root: SnapshotRoot(u64::MAX),
-            appender: Appender::new(Default::default(), 12),
+            appender: Appender::init(Default::default(), 12),
         }
     }
 
