@@ -1,4 +1,4 @@
-use crate::{Hash, ObjectPointer, SnapshotId, SnapshotOffset};
+use crate::{Hash, ObjectPointer, SnapshotOffset, SnapshotRoot};
 use core::mem;
 
 #[derive(Debug, Default)]
@@ -31,10 +31,7 @@ struct NibbleIndex(u8);
 enum Node {
     Parent(Parent),
     Leaf(Leaf),
-    External {
-        id: SnapshotId,
-        offset: SnapshotOffset,
-    },
+    External(External),
 }
 
 #[derive(Debug)]
@@ -47,6 +44,12 @@ struct Parent {
 struct Leaf {
     hash: Hash,
     ptr: ObjectPointer,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct External {
+    snapshot: SnapshotRoot,
+    offset: SnapshotOffset,
 }
 
 #[repr(C)]
@@ -74,13 +77,13 @@ const _: () = assert!(mem::size_of::<ParentHead>() == 8);
 const _: () = assert!(mem::size_of::<ExternalNode>() == 16);
 
 impl ObjectTrie {
-    pub fn reset(&mut self, id: SnapshotId, offset: SnapshotOffset) {
-        self.root = Some(Node::External { id, offset });
+    pub fn reset(&mut self, snapshot: SnapshotRoot, offset: SnapshotOffset) {
+        self.root = Some(Node::External(External { snapshot, offset }));
     }
 
     pub fn find<'a, 'h, E, F>(&'a mut self, key: &'h Hash, dev: F) -> Result<Find<'a, 'h>, E>
     where
-        F: Fn(SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        F: Fn(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
     {
         let none = |replace| Find::None(Insert { replace, key });
         // https://github.com/rust-lang/rust/issues/21906
@@ -136,7 +139,7 @@ impl Find<'_, '_> {
 impl Insert<'_, '_> {
     pub fn insert<E, F>(self, ptr: ObjectPointer, dev: F) -> Result<(), E>
     where
-        F: Fn(SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        F: Fn(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
     {
         let new = Leaf {
             hash: *self.key,

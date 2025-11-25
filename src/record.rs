@@ -1,5 +1,6 @@
 use core::mem;
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Entry {
     pub offset: u64,
@@ -10,9 +11,11 @@ pub struct Entry {
 
 const _: () = assert!(mem::size_of::<Entry>() == 32);
 
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct CompressionInfo(u32);
 
+#[derive(Clone, Copy)]
 pub enum CompressionAlgorithm {
     N1,
     N2,

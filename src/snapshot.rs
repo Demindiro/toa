@@ -1,25 +1,22 @@
 use core::mem;
 
-const SKIPLIST_NUM: usize = 10;
-
 #[repr(C)]
 pub struct Snapshot {
-    pub skiplist: [u64; SKIPLIST_NUM],
-    pub id: u64,
+    pub poly1305: u128,
     pub object_trie_root: u64,
+    pub timestamp: u64,
     pub record_trie_root: crate::record::Entry,
 }
 
-const _: () = assert!(mem::size_of::<Snapshot>() == 128);
+const _: () = assert!(mem::size_of::<Snapshot>() == 64);
 
 impl Snapshot {
-    pub fn into_bytes(self) -> [u8; 128] {
-        let mut buf = [0; 128];
-        self.skiplist
-            .into_iter()
-            .chain([self.id, self.object_trie_root])
-            .fold(&mut buf[..96], append_u64);
-        buf[96..].copy_from_slice(&self.record_trie_root.into_bytes());
+    pub fn into_bytes(self) -> [u8; 64] {
+        let mut buf = [0; 64];
+        buf[..16].copy_from_slice(&self.poly1305.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.object_trie_root.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.timestamp.to_le_bytes());
+        buf[32..].copy_from_slice(&self.record_trie_root.into_bytes());
         buf
     }
 }

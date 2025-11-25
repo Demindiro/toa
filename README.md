@@ -84,10 +84,10 @@ If a password is used, the key is XORed with the password hash.
 
 | bytes   | short description |
 | -------:|:----------------- |
-|    79:0 | skiplist          |
-|   87:80 | ID                |
-|   95:88 | object trie root  |
-|  127:96 | record trie root  |
+|    15:0 | poly1305          |
+|   23:16 | object trie root  |
+|   31:24 | timestamp         |
+|   63:32 | record trie root  |
 
 
 ### 3. Record trie

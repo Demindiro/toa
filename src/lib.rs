@@ -45,13 +45,7 @@ pub struct Unmount {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SnapshotId(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SnapshotRef {
-    pub id: SnapshotId,
-    pub offset: u64,
-}
+pub struct SnapshotRoot(u64);
 
 struct Snapshot {
     object_trie_root: SnapshotOffset,
@@ -65,7 +59,6 @@ struct SnapshotOffset(u64);
 struct ObjectPointer {
     offset: SnapshotOffset,
     len: u64,
-    snapshot: SnapshotId,
 }
 
 impl<D> Appender<D> {
@@ -108,10 +101,6 @@ impl<D> Appender<D> {
             usize::try_from(x.0 - (i << self.record_pitch)).unwrap(),
         )
     }
-
-    fn current_snapshot(&self) -> SnapshotId {
-        SnapshotId(1 + u64::try_from(self.snapshots.len()).expect("usize <= u64"))
-    }
 }
 
 impl<D> Appender<D>
@@ -135,28 +124,20 @@ where
         let key = Hash(blake3::hash(data).into());
         let offset = self.snapshot_len;
         let len = u64::try_from(data.len()).expect("usize <= u64");
-        let snapshot = self.current_snapshot();
-        let dev = |_: SnapshotOffset, _: &mut [u8]| {
+        let dev = |_, _: SnapshotOffset, _: &mut [u8]| {
             todo!();
         };
         let insert = match self.objects.find(&key, dev)? {
             object::Find::Object(_) => return Ok(key),
             object::Find::None(x) => x,
         };
-        insert.insert(
-            ObjectPointer {
-                offset,
-                len,
-                snapshot,
-            },
-            dev,
-        );
+        insert.insert(ObjectPointer { offset, len }, dev);
         self.record_append(data)?;
         Ok(key)
     }
 
     pub fn get(&mut self, key: &Hash) -> Result<Option<Object<'_, D>>, Error<D::Error>> {
-        let dev = |_: SnapshotOffset, _: &mut [u8]| {
+        let dev = |_, _: SnapshotOffset, _: &mut [u8]| {
             todo!();
         };
         self.objects
@@ -171,7 +152,9 @@ where
     }
 
     fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
-        self.objects.find(key, |_, _| todo!()).map(|x| x.is_none())
+        self.objects
+            .find(key, |_, _, _| todo!())
+            .map(|x| x.is_none())
     }
 
     fn record_append(&mut self, data: &[u8]) -> Result<SnapshotOffset, Error<D::Error>> {
@@ -236,14 +219,12 @@ where
             return Ok(());
         }
 
-        let id = self.current_snapshot();
-
         let object_trie_root = self.commit_object_trie()?;
         let record_trie_root = self.commit_record_trie()?;
 
         let snap = snapshot::Snapshot {
-            skiplist: todo!(),
-            id: id.0,
+            poly1305: 0,
+            timestamp: 0,
             object_trie_root: object_trie_root.0,
             record_trie_root,
         };
