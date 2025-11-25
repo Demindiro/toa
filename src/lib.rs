@@ -31,6 +31,7 @@ pub struct IterRead<'a, D> {
 
 pub struct Object<'a, D> {
     appender: &'a mut Appender<D>,
+    snapshot: SnapshotRoot,
     ptr: ObjectPointer,
 }
 
@@ -153,7 +154,7 @@ where
             todo!();
         };
         let insert = match self.objects.find(&key, dev)? {
-            object::Find::Object(_) => return Ok(key),
+            object::Find::Object(_, _) => return Ok(key),
             object::Find::None(x) => x,
         };
         insert.insert(ObjectPointer { offset, len }, dev);
@@ -162,15 +163,56 @@ where
     }
 
     pub fn get(&mut self, key: &Hash) -> Result<Option<Object<'_, D>>, Error<D::Error>> {
-        let dev = |_, _: SnapshotOffset, _: &mut [u8]| {
-            todo!();
+        let dev = |snapshot: SnapshotRoot, offset: SnapshotOffset, out: &mut [u8]| {
+            let mut rd = |o, l| self.device.read(o, l).map_err(Error::Device);
+            let snapshot = snapshot::Snapshot::from_bytes(
+                rd(snapshot.0, 64)?.as_ref().try_into().expect("64 bytes"),
+            );
+            let mut len = snapshot.len;
+            let mut cur = snapshot.record_trie_root;
+            let mask = (1u64 << self.record_pitch) - 1;
+            let mut depth = self.record_pitch;
+            dbg!(depth);
+            while (len - 1) >> depth >= 1 {
+                depth += (mask / 32).trailing_ones() as u8;
+            }
+            dbg!(depth);
+            while depth > self.record_pitch {
+                depth -= (mask / 32).trailing_ones() as u8;
+                let i = (offset.0 >> depth) & (mask / 32);
+                dbg!(&cur, i, cur.offset + 32 * i);
+                cur = record::Entry::from_bytes(
+                    rd(cur.offset + 32 * i, 32)?
+                        .as_ref()
+                        .try_into()
+                        .expect("32 bytes"),
+                );
+            }
+            dbg!((), &cur);
+            dbg!(
+                out.len(),
+                depth,
+                offset.0,
+                offset.0 >> depth,
+                len,
+                len >> depth,
+                self.record_pitch,
+                1 << self.record_pitch,
+                mask,
+                offset.0 & mask
+            );
+            assert!(cur.uncompressed_len as u64 - (offset.0 & mask) >= out.len() as u64);
+            out.copy_from_slice(rd(cur.offset + (offset.0 & mask), out.len())?.as_ref());
+            dbg!(&out);
+            Ok(())
         };
         self.objects
             .find(key, dev)
             .map(|x| x.into_object())
             .map(|x| {
-                x.map(|ptr| Object {
+                x.map(|(snapshot, ptr)| Object {
                     appender: self,
+                    snapshot,
                     ptr,
                 })
             })
@@ -199,6 +241,13 @@ where
     }
 
     fn record_flush(&mut self) -> Result<(), Error<D::Error>> {
+        if self.next_record.is_empty() {
+            return Ok(());
+        }
+
+        let remaining = (1 << self.record_pitch) - self.next_record.len();
+        self.snapshot_len.0 += remaining as u64;
+
         let record_len = u32::try_from(self.next_record.len()).unwrap();
         let mut x = self
             .device
@@ -239,17 +288,69 @@ where
         Ok(x.into())
     }
 
+    fn data(
+        &mut self,
+        snapshot: SnapshotRoot,
+        offset: SnapshotOffset,
+        rdlen: usize,
+    ) -> Result<Read, Error<D::Error>> {
+        if snapshot == SnapshotRoot(u64::MAX) {
+            return self.current_data(offset, rdlen);
+        }
+
+        let mut rd = |o, l| self.device.read(o, l).map_err(Error::Device);
+        let snapshot = snapshot::Snapshot::from_bytes(
+            rd(snapshot.0, 64)?.as_ref().try_into().expect("64 bytes"),
+        );
+        let mut len = snapshot.len;
+        let mut cur = snapshot.record_trie_root;
+        let mask = (1u64 << self.record_pitch) - 1;
+        let mut depth = self.record_pitch;
+        while (len - 1) >> depth >= 1 {
+            depth += (mask / 32).trailing_ones() as u8;
+        }
+        while depth > self.record_pitch {
+            depth -= (mask / 32).trailing_ones() as u8;
+            let i = (offset.0 >> depth) & (mask / 32);
+            dbg!(&cur);
+            cur = record::Entry::from_bytes(
+                rd(cur.offset + 32 * i, 32)?
+                    .as_ref()
+                    .try_into()
+                    .expect("32 bytes"),
+            );
+        }
+        dbg!((), &cur);
+        dbg!(
+            depth,
+            offset.0,
+            offset.0 >> depth,
+            len,
+            len >> depth,
+            self.record_pitch,
+            1 << self.record_pitch,
+            mask,
+            offset.0 & mask
+        );
+        // TODO zeroing??
+        let rdlen =
+            (rdlen as u64).min(u64::from(cur.uncompressed_len) - (offset.0 & mask)) as usize;
+        rd(cur.offset + (offset.0 & mask), rdlen).unwrap_or_else(|_| todo!("WHAUTHEUITHUEHUIF"));
+        rd(cur.offset + (offset.0 & mask), rdlen).map(|x| x.as_ref()[..rdlen].into())
+    }
+
     fn commit(&mut self) -> Result<Option<SnapshotRoot>, Error<D::Error>> {
         if !self.objects.dirty() {
             return Ok(None);
         }
 
         let object_trie_root = self.commit_object_trie()?;
+        let len = self.snapshot_len.0;
         let record_trie_root = self.commit_record_trie()?;
 
         let snap = snapshot::Snapshot {
             poly1305: 0,
-            timestamp: 0,
+            len,
             object_trie_root: object_trie_root.0,
             record_trie_root,
         };
@@ -268,13 +369,15 @@ where
                 record_trie_root,
             },
         );
+        self.snapshot_len = SnapshotOffset(0);
         Ok(Some(offset))
     }
 
     fn commit_object_trie(&mut self) -> Result<SnapshotOffset, Error<D::Error>> {
         self.record_flush()?;
         self.objects.serialize(|data| {
-            if (1 << self.record_pitch) - self.next_record.len() < data.len() {
+            let remaining = (1 << self.record_pitch) - self.next_record.len();
+            if remaining < data.len() {
                 //if self.next_record_remaining() < data.len() {
                 {
                     {
@@ -299,23 +402,29 @@ where
                         }
                     }
                 }
+                self.snapshot_len.0 += remaining as u64;
             }
             let offt = /* self.current_offset() */ self.snapshot_len;
             self.next_record.extend_from_slice(data);
+            self.snapshot_len.0 += data.len() as u64;
             Ok(offt)
         })
     }
 
     fn commit_record_trie(&mut self) -> Result<record::Entry, Error<D::Error>> {
         self.record_flush()?;
-        //let mut parent = Vec::new();
-        for r in core::mem::take(&mut self.record_stack) {
-            if self.next_record_is_full() {
-                todo!("flush");
+        dbg!(&self.record_stack);
+        if self.record_stack.len() > 1 {
+            //let mut parent = Vec::new();
+            for r in core::mem::take(&mut self.record_stack) {
+                if self.next_record_is_full() {
+                    todo!("flush");
+                }
+                self.next_record.extend_from_slice(&r.into_bytes());
             }
-            self.next_record.extend_from_slice(&r.into_bytes());
+            self.record_flush()?;
         }
-        self.record_flush()?;
+        dbg!(&self.record_stack);
         Ok(self.record_stack.pop().unwrap())
     }
 }
@@ -333,7 +442,7 @@ where
             .min(len);
         let offset = SnapshotOffset(self.ptr.offset.0 + offset);
 
-        self.appender.current_data(offset, len)
+        self.appender.data(self.snapshot, offset, len)
     }
 
     pub fn read_exact(
@@ -418,6 +527,7 @@ mod test {
         fn remount(mut self) -> Self {
             self.commit();
             let dev = self.appender.into_device();
+            dbg!(&dev);
             Self {
                 last_root: self.last_root,
                 appender: Appender::mount(dev, self.last_root, 12).unwrap(),
@@ -487,7 +597,23 @@ mod test {
     }
 
     #[test]
-    fn remount() {
+    fn remount_empty() {
+        let mut s = init();
+        let a = s.add(b"").unwrap();
+        let mut s = s.remount();
+        s.assert_eq(&a, b"");
+    }
+
+    #[test]
+    fn remount_one() {
+        let mut s = init();
+        let a = s.add(b"Hello, world!").unwrap();
+        let mut s = s.remount();
+        s.assert_eq(&a, b"Hello, world!");
+    }
+
+    #[test]
+    fn remount_many() {
         let mut s = init();
         let f = |x| format!("A number {x}").into_bytes();
         let keys = (0..1 << 12)

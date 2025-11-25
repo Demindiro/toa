@@ -8,7 +8,7 @@ pub(crate) struct ObjectTrie {
 
 pub(crate) enum Find<'a, 'h> {
     None(Insert<'a, 'h>),
-    Object(ObjectPointer),
+    Object(SnapshotRoot, ObjectPointer),
 }
 
 pub(crate) struct Insert<'a, 'h> {
@@ -55,7 +55,7 @@ struct External {
 struct Leaf2 {
     hash: [u8; 32],
     offset: u64,
-    length: u64,
+    len: u64,
 }
 
 #[repr(C)]
@@ -110,12 +110,50 @@ impl ObjectTrie {
                 }
                 Node::Leaf(Leaf { hash, ptr }) => {
                     break if hash == key {
-                        Find::Object(*ptr)
+                        Find::Object(SnapshotRoot(u64::MAX), *ptr)
                     } else {
                         none(InsertNode::Leaf(index, cur))
                     };
                 }
-                Node::External { .. } => todo!(),
+                &mut Node::External(External {
+                    mut snapshot,
+                    mut offset,
+                }) => loop {
+                    let (offt, ty) = (offset.0 & !7, offset.0 & 7);
+                    let mut f = |o, buf: &mut _| (dev)(snapshot, SnapshotOffset(offt + o), buf);
+                    match ty {
+                        0 => {
+                            let nibble = index.get(key);
+                            let buf = &mut [0; 8];
+                            f(0, buf)?;
+                            let population =
+                                u16::from_le_bytes(buf[..2].try_into().expect("2 bytes"));
+                            let i = (population % (1 << nibble.0)).count_ones();
+                            dbg!(population, nibble.0, i);
+                            f(8 * (1 + u64::from(i)), buf)?;
+                            offset = SnapshotOffset(u64::from_le_bytes(*buf));
+                        }
+                        1 => {
+                            let buf = &mut [0; 48];
+                            f(0, buf)?;
+                            let Leaf2 { hash, offset, len } = Leaf2::from_bytes(buf);
+                            return Ok(if hash == key.0 {
+                                Find::Object(
+                                    snapshot,
+                                    ObjectPointer {
+                                        offset: SnapshotOffset(offset),
+                                        len,
+                                    },
+                                )
+                            } else {
+                                todo!()
+                            });
+                        }
+                        2 => todo!(),
+                        _ => todo!("panic: todo"),
+                    }
+                    index = index.next();
+                },
             }
             index = index.next();
         })
@@ -129,7 +167,10 @@ impl ObjectTrie {
     where
         F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
     {
-        self.root.serialize(&mut f)
+        self.root.serialize(&mut |x| {
+            assert_eq!(x.len() % 8, 0);
+            (f)(x).inspect(|x| assert_eq!(x.0 % 8, 0))
+        })
     }
 }
 
@@ -138,9 +179,9 @@ impl Find<'_, '_> {
         matches!(self, Self::None(_))
     }
 
-    pub fn into_object(self) -> Option<ObjectPointer> {
+    pub fn into_object(self) -> Option<(SnapshotRoot, ObjectPointer)> {
         match self {
-            Self::Object(ptr) => Some(ptr),
+            Self::Object(snapshot, ptr) => Some((snapshot, ptr)),
             _ => None,
         }
     }
@@ -171,11 +212,15 @@ impl Node {
     where
         F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
     {
-        match self {
-            Node::Parent(x) => x.serialize(f),
-            Node::Leaf(x) => x.serialize(f),
-            Node::External(x) => x.serialize(f),
-        }
+        let (mut offt, ty) = match self {
+            Node::Parent(x) => (x.serialize(f)?, 0),
+            Node::Leaf(x) => (x.serialize(f)?, 1),
+            Node::External(x) => (x.serialize(f)?, 2),
+        };
+        dbg!(offt);
+        assert_eq!(offt.0 & 7, 0);
+        offt.0 |= ty;
+        Ok(offt)
     }
 }
 
@@ -255,7 +300,7 @@ impl Leaf {
         (f)(&Leaf2 {
             hash: self.hash.0,
             offset: self.ptr.offset.0,
-            length: self.ptr.len,
+            len: self.ptr.len,
         }
         .into_bytes())
     }
@@ -291,8 +336,16 @@ impl Leaf2 {
         let mut buf = [0; 48];
         buf[..32].copy_from_slice(&self.hash);
         buf[32..40].copy_from_slice(&self.offset.to_le_bytes());
-        buf[40..].copy_from_slice(&self.length.to_le_bytes());
+        buf[40..].copy_from_slice(&self.len.to_le_bytes());
         buf
+    }
+
+    fn from_bytes(b: &[u8; 48]) -> Self {
+        Self {
+            hash: b[..32].try_into().unwrap(),
+            offset: u64::from_le_bytes(b[32..40].try_into().unwrap()),
+            len: u64::from_le_bytes(b[40..].try_into().unwrap()),
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use core::mem;
 pub struct Snapshot {
     pub poly1305: u128,
     pub object_trie_root: u64,
-    pub timestamp: u64,
+    pub len: u64,
     pub record_trie_root: record::Entry,
 }
 
@@ -16,7 +16,7 @@ impl Snapshot {
         let mut buf = [0; 64];
         buf[..16].copy_from_slice(&self.poly1305.to_le_bytes());
         buf[16..24].copy_from_slice(&self.object_trie_root.to_le_bytes());
-        buf[24..32].copy_from_slice(&self.timestamp.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.len.to_le_bytes());
         buf[32..].copy_from_slice(&self.record_trie_root.into_bytes());
         buf
     }
@@ -25,7 +25,7 @@ impl Snapshot {
         Self {
             poly1305: u128::from_le_bytes(b[..16].try_into().unwrap()),
             object_trie_root: u64::from_le_bytes(b[16..24].try_into().unwrap()),
-            timestamp: u64::from_le_bytes(b[24..32].try_into().unwrap()),
+            len: u64::from_le_bytes(b[24..32].try_into().unwrap()),
             record_trie_root: record::Entry::from_bytes(b[32..].try_into().unwrap()),
         }
     }

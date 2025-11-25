@@ -1,6 +1,6 @@
 use core::mem;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct Entry {
     pub offset: u64,
@@ -11,7 +11,7 @@ pub struct Entry {
 
 const _: () = assert!(mem::size_of::<Entry>() == 32);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
 pub struct CompressionInfo(u32);
 
@@ -23,8 +23,8 @@ pub enum CompressionAlgorithm {
 }
 
 impl CompressionInfo {
-    pub fn new_uncompressed(length: u32) -> Option<Self> {
-        (length < 1 << 30).then(|| Self(length << 2))
+    pub fn new_uncompressed(len: u32) -> Option<Self> {
+        (len < 1 << 30).then(|| Self(len << 2))
     }
 
     pub fn algorithm(&self) -> Option<CompressionAlgorithm> {

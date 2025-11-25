@@ -86,7 +86,7 @@ If a password is used, the key is XORed with the password hash.
 | -------:|:----------------- |
 |    15:0 | poly1305          |
 |   23:16 | object trie root  |
-|   31:24 | timestamp         |
+|   31:24 | length            |
 |   63:32 | record trie root  |
 
 
