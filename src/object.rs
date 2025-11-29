@@ -67,7 +67,7 @@ struct ParentHead {
 
 #[repr(C)]
 struct ExternalNode {
-    snapshot_offset: u64,
+    snapshot: u64,
     offset: u64,
 }
 
@@ -149,7 +149,14 @@ impl ObjectTrie {
                                 todo!()
                             });
                         }
-                        2 => todo!(),
+                        2 => {
+                            let buf = &mut [0; 16];
+                            f(0, buf)?;
+                            let node = ExternalNode::from_bytes(buf);
+                            snapshot = SnapshotRoot(node.snapshot);
+                            offset = SnapshotOffset(node.offset);
+                            continue; // don't increment index
+                        }
                         _ => todo!("panic: todo"),
                     }
                     index = index.next();
@@ -312,7 +319,7 @@ impl External {
         F: FnMut(&[u8]) -> Result<SnapshotOffset, E>,
     {
         (f)(&ExternalNode {
-            snapshot_offset: self.snapshot.0,
+            snapshot: self.snapshot.0,
             offset: self.offset.0,
         }
         .into_bytes())
@@ -360,8 +367,15 @@ impl ParentHead {
 impl ExternalNode {
     fn into_bytes(self) -> [u8; 16] {
         let mut buf = [0; 16];
-        buf[..8].copy_from_slice(&self.snapshot_offset.to_le_bytes());
+        buf[..8].copy_from_slice(&self.snapshot.to_le_bytes());
         buf[8..].copy_from_slice(&self.offset.to_le_bytes());
         buf
+    }
+
+    fn from_bytes(b: &[u8; 16]) -> Self {
+        Self {
+            snapshot: u64::from_le_bytes(b[..8].try_into().unwrap()),
+            offset: u64::from_le_bytes(b[8..].try_into().unwrap()),
+        }
     }
 }
