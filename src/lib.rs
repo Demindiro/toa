@@ -5,7 +5,7 @@ pub mod object;
 pub mod record;
 pub mod snapshot;
 
-use core::fmt;
+use core::{fmt, mem};
 use device::Write;
 
 pub struct Appender<D> {
@@ -204,6 +204,13 @@ impl<D> RecordCache<D> {
             usize::try_from(x.0 - (i << self.record_pitch)).unwrap(),
         )
     }
+
+    /// Compress and encrypt `next_record`.
+    fn record_finalize(&mut self) -> Vec<u8> {
+        let remaining = (1 << self.record_pitch) - self.next_record.len();
+        self.snapshot_len.0 += remaining as u64;
+        mem::take(&mut self.next_record)
+    }
 }
 
 impl<D> RecordCache<D>
@@ -299,15 +306,11 @@ where
             return Ok(());
         }
 
-        let remaining = (1 << self.record_pitch) - self.next_record.len();
-        self.snapshot_len.0 += remaining as u64;
+        let record = self.record_finalize();
 
-        let record_len = u32::try_from(self.next_record.len()).unwrap();
-        let mut x = self
-            .device
-            .write(self.next_record.len())
-            .map_err(Error::Device)?;
-        x.append(&self.next_record).map_err(Error::Device)?;
+        let record_len = u32::try_from(record.len()).unwrap();
+        let mut x = self.device.write(record.len()).map_err(Error::Device)?;
+        x.append(&record).map_err(Error::Device)?;
         let offset = x.offset();
         self.record_stack.push(record::Entry {
             offset,
@@ -315,7 +318,6 @@ where
             uncompressed_len: record_len,
             poly1305: 0,
         });
-        self.next_record.clear();
         Ok(())
     }
 
