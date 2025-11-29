@@ -1,4 +1,4 @@
-#![forbid(unsafe_code, unused_must_use)]
+#![forbid(unsafe_code, unused_must_use, elided_named_lifetimes)]
 
 pub mod device;
 pub mod object;
@@ -384,7 +384,7 @@ where
         &'a mut self,
         offset: u64,
         len: usize,
-    ) -> Result<IterRead<D>, Error<D::Error>> {
+    ) -> Result<IterRead<'a, D>, Error<D::Error>> {
         Ok(IterRead {
             object: self,
             offset,
