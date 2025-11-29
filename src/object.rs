@@ -59,20 +59,12 @@ struct Leaf2 {
 }
 
 #[repr(C)]
-struct ParentHead {
-    populated: u16,
-    _zero: [u8; 6],
-    //branches: [u64],
-}
-
-#[repr(C)]
 struct ExternalNode {
     snapshot: u64,
     offset: u64,
 }
 
 const _: () = assert!(mem::size_of::<Leaf2>() == 48);
-const _: () = assert!(mem::size_of::<ParentHead>() == 8);
 const _: () = assert!(mem::size_of::<ExternalNode>() == 16);
 
 impl ObjectTrie {
@@ -353,14 +345,6 @@ impl Leaf2 {
             offset: u64::from_le_bytes(b[32..40].try_into().unwrap()),
             len: u64::from_le_bytes(b[40..].try_into().unwrap()),
         }
-    }
-}
-
-impl ParentHead {
-    fn into_bytes(self) -> [u8; 8] {
-        let mut buf = [0; 8];
-        buf[..2].copy_from_slice(&self.populated.to_le_bytes());
-        buf
     }
 }
 

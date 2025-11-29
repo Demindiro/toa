@@ -7,7 +7,6 @@ pub mod snapshot;
 
 use core::fmt;
 use device::Write;
-use std::collections::HashMap;
 
 pub struct Appender<D> {
     records: RecordCache<D>,
@@ -51,11 +50,6 @@ struct RecordCache<D> {
     next_record: Vec<u8>,
     snapshot_len: SnapshotOffset,
     record_stack: Vec<record::Entry>,
-}
-
-struct Snapshot {
-    object_trie_root: SnapshotOffset,
-    record_trie_root: record::Entry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -202,10 +196,6 @@ impl<D> RecordCache<D> {
         self.next_record_remaining() == 0
     }
 
-    fn current_offset(&self) -> SnapshotOffset {
-        self.snapshot_len
-    }
-
     fn offset_to_record(&self, x: SnapshotOffset) -> (u64, usize) {
         let i = x.0 >> self.record_pitch;
         let e = &self.record_stack[usize::try_from(i).unwrap()];
@@ -253,11 +243,11 @@ where
             return self.current_data(offset, rdlen);
         }
 
-        let mut rd = |o, l| self.device.read(o, l).map_err(Error::Device);
+        let rd = |o, l| self.device.read(o, l).map_err(Error::Device);
         let snapshot = snapshot::Snapshot::from_bytes(
             rd(snapshot.0, 64)?.as_ref().try_into().expect("64 bytes"),
         );
-        let mut len = snapshot.len;
+        let len = snapshot.len;
         let mut cur = snapshot.record_trie_root;
         let mask = (1u64 << self.record_pitch) - 1;
         let mut depth = self.record_pitch;
@@ -397,7 +387,7 @@ impl<'a, D> IterRead<'a, D>
 where
     D: device::Device,
 {
-    fn into_bytes(mut self) -> Result<Vec<u8>, Error<D::Error>> {
+    pub fn into_bytes(self) -> Result<Vec<u8>, Error<D::Error>> {
         let mut v = Vec::new();
         for x in self {
             v.extend_from_slice(&x?);
