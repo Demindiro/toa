@@ -1,3 +1,5 @@
+#![forbid(unsafe_code, unused_must_use)]
+
 pub mod device;
 pub mod object;
 pub mod record;
@@ -119,7 +121,7 @@ where
             object::Find::None(x) => x,
         };
         let offset = self.records.write(data)?;
-        insert.insert(ObjectPointer { offset, len }, dev);
+        insert.insert(ObjectPointer { offset, len }, dev)?;
         Ok(key)
     }
 
