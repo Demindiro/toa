@@ -143,7 +143,7 @@ where
             })
     }
 
-    fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
+    pub fn contains_key(&mut self, key: &Hash) -> Result<bool, Error<D::Error>> {
         self.objects
             .find(key, |_, _, _| todo!())
             .map(|x| x.is_none())
@@ -158,7 +158,7 @@ where
         self.records.read(snapshot, offset, rdlen)
     }
 
-    fn commit(&mut self) -> Result<Option<SnapshotRoot>, Error<D::Error>> {
+    pub fn commit(&mut self) -> Result<Option<SnapshotRoot>, Error<D::Error>> {
         if !self.objects.dirty() {
             return Ok(None);
         }
