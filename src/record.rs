@@ -1,3 +1,4 @@
+use crate::Poly1305;
 use core::mem;
 
 #[derive(Clone, Copy, Debug)]
@@ -6,7 +7,7 @@ pub struct Entry {
     pub offset: u64,
     pub compression_info: CompressionInfo,
     pub uncompressed_len: u32,
-    pub poly1305: u128,
+    pub poly1305: Poly1305,
 }
 
 const _: () = assert!(mem::size_of::<Entry>() == 32);
@@ -48,7 +49,7 @@ impl Entry {
         buf[..8].copy_from_slice(&self.offset.to_le_bytes());
         buf[8..12].copy_from_slice(&self.compression_info.0.to_le_bytes());
         buf[12..16].copy_from_slice(&self.uncompressed_len.to_le_bytes());
-        buf[16..].copy_from_slice(&self.poly1305.to_le_bytes());
+        buf[16..].copy_from_slice(self.poly1305.as_slice());
         buf
     }
 
@@ -57,7 +58,7 @@ impl Entry {
             offset: u64::from_le_bytes(b[..8].try_into().unwrap()),
             compression_info: CompressionInfo(u32::from_le_bytes(b[8..12].try_into().unwrap())),
             uncompressed_len: u32::from_le_bytes(b[12..16].try_into().unwrap()),
-            poly1305: u128::from_le_bytes(b[16..].try_into().unwrap()),
+            poly1305: *Poly1305::from_slice(&b[16..]),
         }
     }
 }

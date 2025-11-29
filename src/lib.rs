@@ -5,6 +5,7 @@ pub mod object;
 pub mod record;
 pub mod snapshot;
 
+use chacha20poly1305::Tag as Poly1305;
 use core::{fmt, mem};
 use device::Write;
 
@@ -316,7 +317,7 @@ where
             offset,
             compression_info: record::CompressionInfo::new_uncompressed(record_len).unwrap(),
             uncompressed_len: record_len,
-            poly1305: 0,
+            poly1305: *Poly1305::from_slice(&[0; 16]),
         });
         Ok(())
     }
@@ -338,7 +339,7 @@ where
             self.flush()?;
         }
         let snap = snapshot::Snapshot {
-            poly1305: 0,
+            poly1305: *Poly1305::from_slice(&[0; 16]),
             len,
             object_trie_root: object_trie_root.0,
             record_trie_root: self.record_stack.pop().unwrap(),
