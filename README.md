@@ -85,9 +85,15 @@ If a password is used, the key is XORed with the password hash.
 | bytes   | short description |
 | -------:|:----------------- |
 |    15:0 | poly1305          |
-|   23:16 | object trie root  |
-|   31:24 | length            |
-|   63:32 | record trie root  |
+|   39:16 | nonce             |
+|   63:40 | (zero)            |
+|   71:64 | object trie root  |
+|   79:72 | length            |
+|   95:80 | (zero)            |
+|  127:96 | record trie root  |
+
+
+poly1305 and nonce are zeroed before encryption and are stored unencrypted.
 
 
 ### 3. Record trie

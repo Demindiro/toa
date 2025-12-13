@@ -93,7 +93,9 @@ where
     D: device::Device,
 {
     pub fn mount(device: D, root: SnapshotRoot, record_pitch: u8) -> Result<Self, Error<D::Error>> {
-        let read = device.read(root.0, 64).map_err(Error::Device)?;
+        let read = device
+            .read(root.0, mem::size_of::<snapshot::Snapshot>())
+            .map_err(Error::Device)?;
         let snapshot = snapshot::Snapshot::from_bytes(read.as_ref().try_into().expect("64 bytes"));
         drop(read);
         Ok(Self {
@@ -253,7 +255,10 @@ where
 
         let rd = |o, l| self.device.read(o, l).map_err(Error::Device);
         let snapshot = snapshot::Snapshot::from_bytes(
-            rd(snapshot.0, 64)?.as_ref().try_into().expect("64 bytes"),
+            rd(snapshot.0, mem::size_of::<snapshot::Snapshot>())?
+                .as_ref()
+                .try_into()
+                .expect("64 bytes"),
         );
         let len = snapshot.len;
         let mut cur = snapshot.record_trie_root;
@@ -340,9 +345,12 @@ where
         }
         let snap = snapshot::Snapshot {
             poly1305: *Poly1305::from_slice(&[0; 16]),
+            nonce: *chacha20poly1305::XNonce::from_slice(&[0; 24]),
             len,
             object_trie_root: object_trie_root.0,
             record_trie_root: self.record_stack.pop().unwrap(),
+            _reserved_0: [0; 3],
+            _reserved_1: [0; 2],
         };
         let snap = snap.into_bytes();
         let offset = self
