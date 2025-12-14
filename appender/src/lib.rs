@@ -1,16 +1,21 @@
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code, unused_must_use, elided_named_lifetimes)]
+
+extern crate alloc;
 
 pub mod device;
 pub mod object;
 pub mod record;
 pub mod snapshot;
 
+pub use chacha20poly1305::Key;
+
+use alloc::vec::Vec;
 use chacha20poly1305::{
-    AeadCore, AeadInPlace, Key, KeyInit, Tag, XChaCha12Poly1305, XNonce,
+    AeadCore, AeadInPlace, KeyInit, Tag, XChaCha12Poly1305, XNonce,
     aead::rand_core::{CryptoRng, RngCore},
 };
 use core::{fmt, mem};
-use device::Write;
 
 pub struct Appender<D> {
     records: RecordCache<D>,
@@ -19,7 +24,7 @@ pub struct Appender<D> {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Hash([u8; 32]);
+pub struct Hash(pub [u8; 32]);
 
 pub type Read = Vec<u8>;
 
@@ -47,7 +52,7 @@ pub struct Unmount {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SnapshotRoot(u64);
+pub struct SnapshotRoot(pub u64);
 
 struct RecordCache<D> {
     device: D,
@@ -89,6 +94,10 @@ impl<D> Appender<D> {
             records: RecordCache::new(device, XChaCha12Poly1305::generate_key(rng), record_pitch),
             objects,
         }
+    }
+
+    pub fn key(&self) -> Key {
+        self.records.key
     }
 
     pub fn into_device_key(self) -> (D, Key) {
@@ -182,6 +191,18 @@ where
         }
         let object_trie_root = self.commit_object_trie(rng)?;
         self.records.commit(object_trie_root, rng).map(Some)
+    }
+
+    pub fn iter_with<F>(&mut self, mut with: F) -> Result<(), Error<D::Error>>
+    where
+        F: FnMut(Hash) -> bool,
+    {
+        let dev = |snapshot, offset, out: &mut [_]| {
+            self.records
+                .read(snapshot, offset, out.len())
+                .map(|x| out.copy_from_slice(x.as_ref()))
+        };
+        self.objects.iter_with(dev, with)
     }
 
     fn commit_object_trie<R>(&mut self, rng: &mut R) -> Result<SnapshotOffset, Error<D::Error>>
@@ -354,9 +375,7 @@ where
         let (nonce, tag, record) = pack_record(&self.key, rng, &record);
         let compressed_len = u32::try_from(record.len()).unwrap();
 
-        let mut x = self.device.write(record.len()).map_err(Error::Device)?;
-        x.append(&record).map_err(Error::Device)?;
-        let offset = x.offset();
+        let offset = self.device.write(&record).map_err(Error::Device)?;
 
         self.record_stack.push(record::Entry {
             poly1305: tag,
@@ -395,8 +414,7 @@ where
         let snap = snap.encrypt(&self.key, rng);
         let offset = self
             .device
-            .write(snap.len())
-            .and_then(|mut x| x.append(&snap).map(|()| x.offset()))
+            .write(&snap)
             .and_then(|x| self.device.sync().map(|()| x))
             .map(SnapshotRoot)
             .map_err(Error::Device)?;
