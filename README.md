@@ -85,9 +85,14 @@ If a password is used, the key is XORed with the password hash.
 | bytes   | short description |
 | -------:|:----------------- |
 |    15:0 | poly1305          |
-|   23:16 | object trie root  |
-|   31:24 | length            |
-|   63:32 | record trie root  |
+|   39:16 | nonce             |
+|   55:40 | object trie root  |
+|   63:56 | length            |
+|  127:64 | record trie root  |
+
+
+Only bytes 127:40 are encrypted.
+poly1305 and nonce are stored unencrypted.
 
 
 ### 3. Record trie
@@ -102,14 +107,12 @@ hence the poly1305 hash.
 
 | bytes | short description     |
 | -----:|:--------------------- |
-|   7:0 | LBA                   |
-|  11:8 | compression info      |
-| 15:12 | uncompressed length   |
-| 31:16 | poly1305              |
-
-Compression info stores the algorithm in the low 2 bits
-and the compressed length in the high 30 bits.
-Algorithm 0 always means no compression.
+|  15:0 | poly1305              |
+| 39:16 | nonce                 |
+| 47:40 | byte offset           |
+| 51:48 | compressed length     |
+| 55:52 | uncompressed length   |
+| 63:56 | (zero)                |
 
 Data past the uncompressed length is assumed to be zero.
 

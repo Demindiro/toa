@@ -6,3 +6,9 @@ edition = "2024"
 [dependencies]
 blake3 = { version = "1.8.2", default-features = false }
 chacha20poly1305 = { version = "0.10.1", features = ["reduced-round"] }
+
+[dev-dependencies]
+rand = { version = "0.8.0" }
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -121,7 +121,6 @@ impl ObjectTrie {
                             let population =
                                 u16::from_le_bytes(buf[..2].try_into().expect("2 bytes"));
                             let i = (population % (1 << nibble.0)).count_ones();
-                            dbg!(population, nibble.0, i);
                             f(8 * (1 + u64::from(i)), buf)?;
                             offset = SnapshotOffset(u64::from_le_bytes(*buf));
                         }
@@ -216,7 +215,6 @@ impl Node {
             Node::Leaf(x) => (x.serialize(f)?, 1),
             Node::External(x) => (x.serialize(f)?, 2),
         };
-        dbg!(offt);
         assert_eq!(offt.0 & 7, 0);
         offt.0 |= ty;
         Ok(offt)
