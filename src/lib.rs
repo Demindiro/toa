@@ -38,6 +38,7 @@ pub struct Object<'a, D> {
 #[derive(Clone, Debug)]
 pub enum Error<D> {
     Device(D),
+    Crypto(chacha20poly1305::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -121,7 +122,10 @@ where
         })
     }
 
-    pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
+    pub fn add<R>(&mut self, rng: &mut R, data: &[u8]) -> Result<Hash, Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
         let key = Hash(blake3::hash(data).into());
         let len = u64::try_from(data.len()).expect("usize <= u64");
         let dev = |_, _: SnapshotOffset, _: &mut [u8]| {
@@ -131,7 +135,7 @@ where
             object::Find::Object(_, _) => return Ok(key),
             object::Find::None(x) => x,
         };
-        let offset = self.records.write(data)?;
+        let offset = self.records.write(rng, data)?;
         insert.insert(ObjectPointer { offset, len }, dev)?;
         Ok(key)
     }
@@ -169,21 +173,24 @@ where
         self.records.read(snapshot, offset, rdlen)
     }
 
-    pub fn commit<R>(&mut self, rng: R) -> Result<Option<SnapshotRoot>, Error<D::Error>>
+    pub fn commit<R>(&mut self, rng: &mut R) -> Result<Option<SnapshotRoot>, Error<D::Error>>
     where
         R: CryptoRng + RngCore,
     {
         if !self.objects.dirty() {
             return Ok(None);
         }
-        let object_trie_root = self.commit_object_trie()?;
+        let object_trie_root = self.commit_object_trie(rng)?;
         self.records.commit(object_trie_root, rng).map(Some)
     }
 
-    fn commit_object_trie(&mut self) -> Result<SnapshotOffset, Error<D::Error>> {
-        self.records.flush()?;
+    fn commit_object_trie<R>(&mut self, rng: &mut R) -> Result<SnapshotOffset, Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
+        self.records.flush(rng)?;
         self.objects
-            .serialize(|data| self.records.write_inside_bounds(data))
+            .serialize(|data| self.records.write_inside_bounds(rng, data))
     }
 }
 
@@ -217,16 +224,13 @@ impl<D> RecordCache<D> {
         self.next_record_remaining() == 0
     }
 
-    fn offset_to_record(&self, x: SnapshotOffset) -> (u64, usize) {
+    fn offset_to_record(&self, x: SnapshotOffset) -> (record::Entry, usize) {
         let i = x.0 >> self.record_pitch;
-        let e = &self.record_stack[usize::try_from(i).unwrap()];
-        (
-            e.offset,
-            usize::try_from(x.0 - (i << self.record_pitch)).unwrap(),
-        )
+        let offt = usize::try_from(x.0 - (i << self.record_pitch)).unwrap();
+        let entry = self.record_stack[usize::try_from(i).unwrap()];
+        (entry, offt)
     }
 
-    /// Compress and encrypt `next_record`.
     fn record_finalize(&mut self) -> Vec<u8> {
         let remaining = (1 << self.record_pitch) - self.next_record.len();
         self.snapshot_len.0 += remaining as u64;
@@ -249,13 +253,9 @@ where
             return Ok(self.next_record[start..start + len].into());
         }
 
-        let (record_addr, record_offset) = self.offset_to_record(offset);
-        let x = self
-            .device
-            .read(record_addr, self.record_pitch())
-            .map_err(Error::Device)?;
-        // TODO decompress
-        let x = &x.as_ref()[record_offset..];
+        let (x, offt) = self.offset_to_record(offset);
+        let x = self.read_record_nocache(&x)?;
+        let x = &x[offt..];
         let x = &x[..len.min(x.len())];
         Ok(x.into())
     }
@@ -290,24 +290,31 @@ where
         while depth > self.record_pitch {
             depth -= (mask / RLEN).trailing_ones() as u8;
             let i = (offset.0 >> depth) & (mask / RLEN);
+            let data = self.read_record_nocache(&cur)?;
+            let stride = record::Entry::LEN;
+            let i = usize::try_from(i).unwrap();
             cur = record::Entry::from_bytes(
-                rd(cur.offset + RLEN * i, record::Entry::LEN)?
-                    .as_ref()
+                &data[stride * i..][..stride]
                     .try_into()
                     .expect("exact bytes"),
             );
         }
         let rdlen =
             (rdlen as u64).min(u64::from(cur.uncompressed_len) - (offset.0 & mask)) as usize;
-        rd(cur.offset + (offset.0 & mask), rdlen).map(|x| x.as_ref()[..rdlen].into())
+        let offt = usize::try_from(offset.0 & mask).unwrap();
+        self.read_record_nocache(&cur)
+            .map(|x| x[offt..][..rdlen].into())
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<SnapshotOffset, Error<D::Error>> {
+    fn write<R>(&mut self, rng: &mut R, data: &[u8]) -> Result<SnapshotOffset, Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
         let mut data = data;
         let offset = self.snapshot_len;
         while !data.is_empty() {
             if self.next_record_is_full() {
-                self.flush()?;
+                self.flush(rng)?;
             }
             let n = data.len().min(self.next_record_remaining());
             let x;
@@ -318,31 +325,45 @@ where
         Ok(offset)
     }
 
-    fn write_inside_bounds(&mut self, data: &[u8]) -> Result<SnapshotOffset, Error<D::Error>> {
+    fn write_inside_bounds<R>(
+        &mut self,
+        rng: &mut R,
+        data: &[u8],
+    ) -> Result<SnapshotOffset, Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
         assert!(data.len() <= self.record_pitch());
         if data.len() > self.next_record_remaining() {
-            self.flush()?;
+            self.flush(rng)?;
         }
-        self.write(data)
+        self.write(rng, data)
     }
 
-    fn flush(&mut self) -> Result<(), Error<D::Error>> {
+    fn flush<R>(&mut self, rng: &mut R) -> Result<(), Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
         if self.next_record.is_empty() {
             return Ok(());
         }
 
         let record = self.record_finalize();
+        let uncompressed_len = u32::try_from(record.len()).unwrap();
 
-        let record_len = u32::try_from(record.len()).unwrap();
+        let (nonce, tag, record) = pack_record(&self.key, rng, &record);
+        let compressed_len = u32::try_from(record.len()).unwrap();
+
         let mut x = self.device.write(record.len()).map_err(Error::Device)?;
         x.append(&record).map_err(Error::Device)?;
         let offset = x.offset();
+
         self.record_stack.push(record::Entry {
-            poly1305: *Tag::from_slice(&[0; 16]),
-            nonce: *XNonce::from_slice(&[0; 24]),
+            poly1305: tag,
+            nonce,
             offset,
-            compressed_len: record_len,
-            uncompressed_len: record_len,
+            compressed_len,
+            uncompressed_len,
         });
         Ok(())
     }
@@ -350,21 +371,21 @@ where
     fn commit<R>(
         &mut self,
         object_trie_root: SnapshotOffset,
-        rng: R,
+        rng: &mut R,
     ) -> Result<SnapshotRoot, Error<D::Error>>
     where
         R: CryptoRng + RngCore,
     {
-        self.flush()?;
+        self.flush(rng)?;
         let len = self.snapshot_len.0;
         while self.record_stack.len() > 1 {
             for r in core::mem::take(&mut self.record_stack) {
                 if self.next_record_is_full() {
-                    self.flush()?;
+                    self.flush(rng)?;
                 }
                 self.next_record.extend_from_slice(&r.into_bytes());
             }
-            self.flush()?;
+            self.flush(rng)?;
         }
         let snap = snapshot::Snapshot {
             len,
@@ -381,6 +402,14 @@ where
             .map_err(Error::Device)?;
         self.snapshot_len = SnapshotOffset(0);
         Ok(offset)
+    }
+
+    fn read_record_nocache(&mut self, entry: &record::Entry) -> Result<Vec<u8>, Error<D::Error>> {
+        let len = usize::try_from(entry.compressed_len).expect("u32 <= usize");
+        let data = self.device.read(entry.offset, len).map_err(Error::Device)?;
+        // TODO avoid copy maybe?
+        let mut data = data.as_ref().to_vec();
+        unpack_record(&self.key, &entry.nonce, &entry.poly1305, &mut data).map_err(Error::Crypto)
     }
 }
 
@@ -458,6 +487,7 @@ impl fmt::Debug for Hash {
     }
 }
 
+#[must_use]
 fn encrypt<R>(key: &Key, rng: R, data: &mut [u8]) -> (XNonce, Tag)
 where
     R: CryptoRng + RngCore,
@@ -468,6 +498,25 @@ where
         .encrypt_in_place_detached(&nonce, &[], data)
         .expect("failed to encrypt snapshot");
     (nonce, tag)
+}
+
+fn pack_record<R>(key: &Key, rng: R, data: &[u8]) -> (XNonce, Tag, Vec<u8>)
+where
+    R: CryptoRng + RngCore,
+{
+    let mut data = data.to_vec();
+    let (nonce, tag) = encrypt(key, rng, &mut data);
+    (nonce, tag, data)
+}
+
+fn unpack_record(
+    key: &Key,
+    nonce: &XNonce,
+    tag: &Tag,
+    data: &mut [u8],
+) -> Result<Vec<u8>, chacha20poly1305::Error> {
+    XChaCha12Poly1305::new(key).decrypt_in_place_detached(nonce, &[], data, tag)?;
+    Ok(data.into())
 }
 
 #[cfg(test)]
@@ -507,6 +556,10 @@ mod test {
                 rng: self.rng,
             }
         }
+
+        fn add(&mut self, data: &[u8]) -> Hash {
+            self.appender.add(&mut self.rng, data).unwrap()
+        }
     }
 
     impl core::ops::Deref for Test {
@@ -535,22 +588,22 @@ mod test {
     #[test]
     fn insert_one_empty() {
         let mut s = init();
-        let key = s.add(b"").unwrap();
+        let key = s.add(b"");
         s.assert_eq(&key, &[]);
     }
 
     #[test]
     fn insert_one() {
         let mut s = init();
-        let key = s.add(b"Hello, world!").unwrap();
+        let key = s.add(b"Hello, world!");
         s.assert_eq(&key, b"Hello, world!");
     }
 
     #[test]
     fn insert_two() {
         let mut s = init();
-        let a = s.add(b"Hello, world!").unwrap();
-        let b = s.add(b"Greetings!").unwrap();
+        let a = s.add(b"Hello, world!");
+        let b = s.add(b"Greetings!");
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Greetings!");
     }
@@ -559,9 +612,7 @@ mod test {
     fn insert_many() {
         let mut s = init();
         let f = |x| format!("A number {x}").into_bytes();
-        let keys = (0..1 << 12)
-            .map(|i| s.add(&f(i)).unwrap())
-            .collect::<Vec<_>>();
+        let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
@@ -575,7 +626,7 @@ mod test {
     #[test]
     fn remount_empty() {
         let mut s = init();
-        let a = s.add(b"").unwrap();
+        let a = s.add(b"");
         let mut s = s.remount();
         s.assert_eq(&a, b"");
     }
@@ -583,7 +634,7 @@ mod test {
     #[test]
     fn remount_one() {
         let mut s = init();
-        let a = s.add(b"Hello, world!").unwrap();
+        let a = s.add(b"Hello, world!");
         let mut s = s.remount();
         s.assert_eq(&a, b"Hello, world!");
     }
@@ -592,9 +643,7 @@ mod test {
     fn remount_many() {
         let mut s = init();
         let f = |x| format!("A number {x}").into_bytes();
-        let keys = (0..1 << 12)
-            .map(|i| s.add(&f(i)).unwrap())
-            .collect::<Vec<_>>();
+        let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
         let mut s = s.remount();
         keys.iter()
             .enumerate()
