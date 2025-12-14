@@ -93,7 +93,8 @@ If a password is used, the key is XORed with the password hash.
 |  127:96 | record trie root  |
 
 
-poly1305 and nonce are zeroed before encryption and are stored unencrypted.
+Only bytes 127:40 are encrypted.
+poly1305 and nonce are stored unencrypted.
 
 
 ### 3. Record trie

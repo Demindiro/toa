@@ -5,7 +5,10 @@ pub mod object;
 pub mod record;
 pub mod snapshot;
 
-use chacha20poly1305::Tag as Poly1305;
+use chacha20poly1305::{
+    Key, KeyInit, Tag as Poly1305, XChaCha12Poly1305,
+    aead::rand_core::{CryptoRng, RngCore},
+};
 use core::{fmt, mem};
 use device::Write;
 
@@ -47,6 +50,7 @@ pub struct SnapshotRoot(u64);
 
 struct RecordCache<D> {
     device: D,
+    key: Key,
     record_pitch: u8,
     next_record: Vec<u8>,
     snapshot_len: SnapshotOffset,
@@ -63,7 +67,10 @@ struct ObjectPointer {
 }
 
 impl<D> Appender<D> {
-    pub fn init(device: D, record_pitch: u8) -> Self {
+    pub fn init<R>(device: D, record_pitch: u8, rng: R) -> Self
+    where
+        R: CryptoRng + RngCore,
+    {
         // always initialize with an empty object
         //
         // Having at least one object means we never have to check for
@@ -78,13 +85,13 @@ impl<D> Appender<D> {
             },
         );
         Self {
-            records: RecordCache::new(device, record_pitch),
+            records: RecordCache::new(device, XChaCha12Poly1305::generate_key(rng), record_pitch),
             objects,
         }
     }
 
-    pub fn into_device(self) -> D {
-        self.records.device
+    pub fn into_device_key(self) -> (D, Key) {
+        (self.records.device, self.records.key)
     }
 }
 
@@ -92,14 +99,21 @@ impl<D> Appender<D>
 where
     D: device::Device,
 {
-    pub fn mount(device: D, root: SnapshotRoot, record_pitch: u8) -> Result<Self, Error<D::Error>> {
+    pub fn mount(
+        device: D,
+        key: Key,
+        root: SnapshotRoot,
+        record_pitch: u8,
+    ) -> Result<Self, Error<D::Error>> {
         let read = device
-            .read(root.0, mem::size_of::<snapshot::Snapshot>())
+            .read(root.0, snapshot::Snapshot::ENCRYPTED_LEN)
             .map_err(Error::Device)?;
-        let snapshot = snapshot::Snapshot::from_bytes(read.as_ref().try_into().expect("64 bytes"));
+        let snapshot =
+            snapshot::Snapshot::decrypt(read.as_ref().try_into().expect("exact bytes"), &key)
+                .unwrap();
         drop(read);
         Ok(Self {
-            records: RecordCache::new(device, record_pitch),
+            records: RecordCache::new(device, key, record_pitch),
             objects: object::ObjectTrie::with_external_root(
                 root,
                 SnapshotOffset(snapshot.object_trie_root),
@@ -155,12 +169,15 @@ where
         self.records.read(snapshot, offset, rdlen)
     }
 
-    pub fn commit(&mut self) -> Result<Option<SnapshotRoot>, Error<D::Error>> {
+    pub fn commit<R>(&mut self, rng: R) -> Result<Option<SnapshotRoot>, Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
         if !self.objects.dirty() {
             return Ok(None);
         }
         let object_trie_root = self.commit_object_trie()?;
-        self.records.commit(object_trie_root).map(Some)
+        self.records.commit(object_trie_root, rng).map(Some)
     }
 
     fn commit_object_trie(&mut self) -> Result<SnapshotOffset, Error<D::Error>> {
@@ -171,9 +188,10 @@ where
 }
 
 impl<D> RecordCache<D> {
-    fn new(device: D, record_pitch: u8) -> Self {
+    fn new(device: D, key: Key, record_pitch: u8) -> Self {
         Self {
             device,
+            key,
             record_pitch,
             next_record: Default::default(),
             snapshot_len: SnapshotOffset(0),
@@ -254,12 +272,14 @@ where
         }
 
         let rd = |o, l| self.device.read(o, l).map_err(Error::Device);
-        let snapshot = snapshot::Snapshot::from_bytes(
-            rd(snapshot.0, mem::size_of::<snapshot::Snapshot>())?
+        let snapshot = snapshot::Snapshot::decrypt(
+            rd(snapshot.0, snapshot::Snapshot::ENCRYPTED_LEN)?
                 .as_ref()
                 .try_into()
-                .expect("64 bytes"),
-        );
+                .expect("exact bytes"),
+            &self.key,
+        )
+        .unwrap();
         let len = snapshot.len;
         let mut cur = snapshot.record_trie_root;
         let mask = (1u64 << self.record_pitch) - 1;
@@ -327,10 +347,14 @@ where
         Ok(())
     }
 
-    fn commit(
+    fn commit<R>(
         &mut self,
         object_trie_root: SnapshotOffset,
-    ) -> Result<SnapshotRoot, Error<D::Error>> {
+        rng: R,
+    ) -> Result<SnapshotRoot, Error<D::Error>>
+    where
+        R: CryptoRng + RngCore,
+    {
         self.flush()?;
         let len = self.snapshot_len.0;
         if self.record_stack.len() > 1 {
@@ -344,15 +368,11 @@ where
             self.flush()?;
         }
         let snap = snapshot::Snapshot {
-            poly1305: *Poly1305::from_slice(&[0; 16]),
-            nonce: *chacha20poly1305::XNonce::from_slice(&[0; 24]),
             len,
             object_trie_root: object_trie_root.0,
             record_trie_root: self.record_stack.pop().unwrap(),
-            _reserved_0: [0; 3],
-            _reserved_1: [0; 2],
         };
-        let snap = snap.into_bytes();
+        let snap = snap.encrypt(&self.key, rng);
         let offset = self
             .device
             .write(snap.len())
@@ -442,10 +462,12 @@ impl fmt::Debug for Hash {
 #[cfg(test)]
 mod test {
     use super::*;
+    use rand::{SeedableRng, rngs::StdRng};
 
     struct Test {
         last_root: SnapshotRoot,
         appender: Appender<std::cell::RefCell<Vec<u8>>>,
+        rng: StdRng,
     }
 
     impl Test {
@@ -457,16 +479,20 @@ mod test {
         }
 
         fn commit(&mut self) {
-            self.appender.commit().unwrap().map(|x| self.last_root = x);
+            self.appender
+                .commit(&mut self.rng)
+                .unwrap()
+                .map(|x| self.last_root = x);
         }
 
         fn remount(mut self) -> Self {
             self.commit();
-            let dev = self.appender.into_device();
+            let (dev, key) = self.appender.into_device_key();
             dbg!(&dev);
             Self {
                 last_root: self.last_root,
-                appender: Appender::mount(dev, self.last_root, 12).unwrap(),
+                appender: Appender::mount(dev, key, self.last_root, 12).unwrap(),
+                rng: self.rng,
             }
         }
     }
@@ -486,9 +512,11 @@ mod test {
     }
 
     fn init() -> Test {
+        let mut rng = StdRng::from_seed([0; 32]);
         Test {
             last_root: SnapshotRoot(u64::MAX),
-            appender: Appender::init(Default::default(), 12),
+            appender: Appender::init(Default::default(), 12, &mut rng),
+            rng,
         }
     }
 
@@ -560,4 +588,6 @@ mod test {
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
     }
+
+    // TODO we need tests to ensure crypto works!
 }
