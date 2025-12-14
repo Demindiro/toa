@@ -8,9 +8,11 @@ pub mod object;
 pub mod record;
 pub mod snapshot;
 
+pub use chacha20poly1305::Key;
+
 use alloc::vec::Vec;
 use chacha20poly1305::{
-    AeadCore, AeadInPlace, Key, KeyInit, Tag, XChaCha12Poly1305, XNonce,
+    AeadCore, AeadInPlace, KeyInit, Tag, XChaCha12Poly1305, XNonce,
     aead::rand_core::{CryptoRng, RngCore},
 };
 use core::{fmt, mem};
@@ -22,7 +24,7 @@ pub struct Appender<D> {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Hash([u8; 32]);
+pub struct Hash(pub [u8; 32]);
 
 pub type Read = Vec<u8>;
 
@@ -50,7 +52,7 @@ pub struct Unmount {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SnapshotRoot(u64);
+pub struct SnapshotRoot(pub u64);
 
 struct RecordCache<D> {
     device: D,
@@ -92,6 +94,10 @@ impl<D> Appender<D> {
             records: RecordCache::new(device, XChaCha12Poly1305::generate_key(rng), record_pitch),
             objects,
         }
+    }
+
+    pub fn key(&self) -> Key {
+        self.records.key
     }
 
     pub fn into_device_key(self) -> (D, Key) {
