@@ -1,0 +1,8 @@
+[package]
+name = "appender-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+appender = { path = "../appender", features = ["std"] }
+rand = { version = "0.8.0" }
