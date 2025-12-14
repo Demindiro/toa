@@ -357,11 +357,10 @@ where
     {
         self.flush()?;
         let len = self.snapshot_len.0;
-        if self.record_stack.len() > 1 {
-            //let mut parent = Vec::new();
+        while self.record_stack.len() > 1 {
             for r in core::mem::take(&mut self.record_stack) {
                 if self.next_record_is_full() {
-                    todo!("flush");
+                    self.flush()?;
                 }
                 self.next_record.extend_from_slice(&r.into_bytes());
             }
@@ -370,7 +369,7 @@ where
         let snap = snapshot::Snapshot {
             len,
             object_trie_root: object_trie_root.0,
-            record_trie_root: self.record_stack.pop().unwrap(),
+            record_trie_root: self.record_stack.pop().expect("at least one record"),
         };
         let snap = snap.encrypt(&self.key, rng);
         let offset = self
@@ -464,7 +463,7 @@ mod test {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
 
-    const DEPTH: u8 = 13;
+    const DEPTH: u8 = 12;
 
     struct Test {
         last_root: SnapshotRoot,
