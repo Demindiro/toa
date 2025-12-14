@@ -16,7 +16,6 @@ pub trait Device {
     fn len(&self) -> u64;
 
     fn sync(&self) -> Result<(), Self::Error>;
-    fn wipe(&self) -> Result<(), Self::Error>;
 }
 
 // retardation
@@ -49,10 +48,6 @@ impl Device for RefCell<Vec<u8>> {
 
     fn len(&self) -> u64 {
         self.borrow().len().try_into().unwrap_or(u64::MAX)
-    }
-
-    fn wipe(&self) -> Result<(), Self::Error> {
-        Ok(self.borrow_mut().fill(0))
     }
 
     fn sync(&self) -> Result<(), Self::Error> {
