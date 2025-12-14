@@ -1,5 +1,4 @@
 use chacha20poly1305::{Tag, XNonce};
-use core::mem;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]

@@ -6,7 +6,7 @@ pub mod record;
 pub mod snapshot;
 
 use chacha20poly1305::{
-    Key, KeyInit, Tag as Poly1305, XChaCha12Poly1305, XNonce,
+    AeadCore, AeadInPlace, Key, KeyInit, Tag, XChaCha12Poly1305, XNonce,
     aead::rand_core::{CryptoRng, RngCore},
 };
 use core::{fmt, mem};
@@ -338,7 +338,7 @@ where
         x.append(&record).map_err(Error::Device)?;
         let offset = x.offset();
         self.record_stack.push(record::Entry {
-            poly1305: *Poly1305::from_slice(&[0; 16]),
+            poly1305: *Tag::from_slice(&[0; 16]),
             nonce: *XNonce::from_slice(&[0; 24]),
             offset,
             compressed_len: record_len,
@@ -456,6 +456,18 @@ impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|x| write!(f, "{x:02x}"))
     }
+}
+
+fn encrypt<R>(key: &Key, rng: R, data: &mut [u8]) -> (XNonce, Tag)
+where
+    R: CryptoRng + RngCore,
+{
+    let cipher = XChaCha12Poly1305::new(key);
+    let nonce = XChaCha12Poly1305::generate_nonce(rng);
+    let tag = cipher
+        .encrypt_in_place_detached(&nonce, &[], data)
+        .expect("failed to encrypt snapshot");
+    (nonce, tag)
 }
 
 #[cfg(test)]

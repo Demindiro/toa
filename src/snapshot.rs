@@ -1,9 +1,8 @@
-use crate::{Poly1305, record};
+use crate::record;
 use chacha20poly1305::{
-    AeadCore, AeadInPlace, Key, KeyInit, XChaCha12Poly1305, XNonce,
+    AeadInPlace, Key, KeyInit, Tag, XChaCha12Poly1305, XNonce,
     aead::rand_core::{CryptoRng, RngCore},
 };
-use core::mem;
 
 pub struct Snapshot {
     pub object_trie_root: u64,
@@ -27,13 +26,10 @@ impl Snapshot {
         buf[48..56].copy_from_slice(&self.len.to_le_bytes());
         buf[64..].copy_from_slice(&self.record_trie_root.into_bytes());
 
-        let cipher = XChaCha12Poly1305::new(key);
-        let nonce = XChaCha12Poly1305::generate_nonce(rng);
-        let tag = cipher
-            .encrypt_in_place_detached(&nonce, &[], &mut buf[40..])
-            .expect("failed to encrypt snapshot");
-        buf[16..40].copy_from_slice(nonce.as_slice());
-        buf[..16].copy_from_slice(tag.as_slice());
+        let (hdr, data) = buf.split_at_mut(40);
+        let (nonce, tag) = crate::encrypt(key, rng, data);
+        hdr[16..40].copy_from_slice(nonce.as_slice());
+        hdr[..16].copy_from_slice(tag.as_slice());
 
         buf
     }
@@ -43,7 +39,7 @@ impl Snapshot {
         key: &Key,
     ) -> Result<Self, chacha20poly1305::Error> {
         let (hdr, data) = b.split_at_mut(40);
-        let tag = Poly1305::from_slice(&hdr[..16]);
+        let tag = Tag::from_slice(&hdr[..16]);
         let nonce = XNonce::from_slice(&hdr[16..40]);
         XChaCha12Poly1305::new(key)
             .decrypt_in_place_detached(nonce, &[], data, tag)
