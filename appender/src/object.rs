@@ -446,7 +446,7 @@ impl External {
 impl NibbleIndex {
     fn get(&self, key: &Hash) -> Nibble {
         debug_assert!(self.0 & 3 == 0, "{}", self.0);
-        let (i, b) = (self.0 >> 3, self.0 & 4);
+        let (i, b) = (self.0 >> 3, (self.0 & 4) ^ 4);
         Nibble((key.0[usize::from(i)] >> b) & 0xf)
     }
 
