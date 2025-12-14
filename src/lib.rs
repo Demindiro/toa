@@ -464,6 +464,8 @@ mod test {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
 
+    const DEPTH: u8 = 13;
+
     struct Test {
         last_root: SnapshotRoot,
         appender: Appender<std::cell::RefCell<Vec<u8>>>,
@@ -491,7 +493,7 @@ mod test {
             dbg!(&dev);
             Self {
                 last_root: self.last_root,
-                appender: Appender::mount(dev, key, self.last_root, 12).unwrap(),
+                appender: Appender::mount(dev, key, self.last_root, DEPTH).unwrap(),
                 rng: self.rng,
             }
         }
@@ -515,7 +517,7 @@ mod test {
         let mut rng = StdRng::from_seed([0; 32]);
         Test {
             last_root: SnapshotRoot(u64::MAX),
-            appender: Appender::init(Default::default(), 12, &mut rng),
+            appender: Appender::init(Default::default(), DEPTH, &mut rng),
             rng,
         }
     }
