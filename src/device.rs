@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::cell::{self, RefCell};
 
 pub trait Device {

@@ -1,4 +1,5 @@
 use crate::{Hash, ObjectPointer, SnapshotOffset, SnapshotRoot};
+use alloc::boxed::Box;
 use core::mem;
 
 #[derive(Debug)]

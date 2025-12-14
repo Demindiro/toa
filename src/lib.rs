@@ -1,10 +1,14 @@
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code, unused_must_use, elided_named_lifetimes)]
+
+extern crate alloc;
 
 pub mod device;
 pub mod object;
 pub mod record;
 pub mod snapshot;
 
+use alloc::vec::Vec;
 use chacha20poly1305::{
     AeadCore, AeadInPlace, Key, KeyInit, Tag, XChaCha12Poly1305, XNonce,
     aead::rand_core::{CryptoRng, RngCore},
