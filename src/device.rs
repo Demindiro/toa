@@ -1,3 +1,6 @@
+#[cfg(feature = "std")]
+mod io;
+
 use alloc::vec::Vec;
 use core::cell::{self, RefCell};
 
