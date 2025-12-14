@@ -158,6 +158,14 @@ impl ObjectTrie {
         })
     }
 
+    pub fn iter_with<'a, E, F, G>(&'a mut self, mut dev: F, mut with: G) -> Result<(), E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        self.root.iter_with(&mut dev, &mut with).map(|_| ())
+    }
+
     pub fn dirty(&self) -> bool {
         !matches!(&self.root, Node::External { .. })
     }
@@ -219,6 +227,18 @@ impl Node {
         assert_eq!(offt.0 & 7, 0);
         offt.0 |= ty;
         Ok(offt)
+    }
+
+    fn iter_with<E, F, G>(&self, dev: &mut F, with: &mut G) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        match self {
+            Node::Parent(x) => x.iter_with(dev, with),
+            Node::Leaf(x) => x.iter_with(with),
+            Node::External(x) => x.iter_with(dev, with),
+        }
     }
 }
 
@@ -288,6 +308,19 @@ impl Parent {
         }
         (f)(&buf[..8 * (1 + self.branches.len())])
     }
+
+    fn iter_with<E, F, G>(&self, dev: &mut F, with: &mut G) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        for x in self.branches.iter() {
+            if x.iter_with(dev, with)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl Leaf {
@@ -302,6 +335,13 @@ impl Leaf {
         }
         .into_bytes())
     }
+
+    fn iter_with<E, G>(&self, with: &mut G) -> Result<bool, E>
+    where
+        G: FnMut(Hash) -> bool,
+    {
+        Ok((with)(self.hash))
+    }
 }
 
 impl External {
@@ -314,6 +354,92 @@ impl External {
             offset: self.offset.0,
         }
         .into_bytes())
+    }
+
+    fn iter_with<E, F, G>(&self, dev: &mut F, with: &mut G) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        Self::iter_with_do(self.snapshot, self.offset, dev, with)
+    }
+
+    fn iter_with_do<E, F, G>(
+        snapshot: SnapshotRoot,
+        offset: SnapshotOffset,
+        dev: &mut F,
+        with: &mut G,
+    ) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        let (offt, ty) = (offset.0 & !7, offset.0 & 7);
+        match ty {
+            0 => Self::iter_with_parent(snapshot, offt, dev, with),
+            1 => Self::iter_with_leaf(snapshot, offt, dev, with),
+            2 => Self::iter_with_external(snapshot, offt, dev, with),
+            x => todo!("bad type {x}"),
+        }
+    }
+
+    fn iter_with_parent<E, F, G>(
+        snapshot: SnapshotRoot,
+        offset: u64,
+        dev: &mut F,
+        with: &mut G,
+    ) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        let mut f = |o, buf: &mut _| (dev)(snapshot, SnapshotOffset(offset + o), buf);
+        let buf = &mut [0; 8];
+        f(0, buf)?;
+        let population = u16::from_le_bytes(buf[..2].try_into().expect("2 bytes"));
+        let len = usize::try_from(population.count_ones()).expect("u32 <= usize");
+        let buf = &mut [0; 8 * 16];
+        let buf = &mut buf[..8 * len];
+        f(8, buf)?;
+        for x in buf.chunks_exact(8) {
+            let offt = u64::from_le_bytes(x.try_into().expect("exactly 8 bytes"));
+            if Self::iter_with_do(snapshot, SnapshotOffset(offt), dev, with)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn iter_with_leaf<E, F, G>(
+        snapshot: SnapshotRoot,
+        offset: u64,
+        dev: &mut F,
+        with: &mut G,
+    ) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        let buf = &mut [0; 48];
+        (dev)(snapshot, SnapshotOffset(offset), buf)?;
+        let Leaf2 { hash, offset, len } = Leaf2::from_bytes(buf);
+        Ok((with)(crate::Hash(hash)))
+    }
+
+    fn iter_with_external<E, F, G>(
+        snapshot: SnapshotRoot,
+        offset: u64,
+        dev: &mut F,
+        with: &mut G,
+    ) -> Result<bool, E>
+    where
+        F: FnMut(SnapshotRoot, SnapshotOffset, &mut [u8]) -> Result<(), E>,
+        G: FnMut(Hash) -> bool,
+    {
+        let buf = &mut [0; 16];
+        (dev)(snapshot, SnapshotOffset(offset), buf)?;
+        let ExternalNode { snapshot, offset } = ExternalNode::from_bytes(buf);
+        Self::iter_with_do(SnapshotRoot(snapshot), SnapshotOffset(offset), dev, with)
     }
 }
 

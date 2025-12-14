@@ -193,6 +193,18 @@ where
         self.records.commit(object_trie_root, rng).map(Some)
     }
 
+    pub fn iter_with<F>(&mut self, mut with: F) -> Result<(), Error<D::Error>>
+    where
+        F: FnMut(Hash) -> bool,
+    {
+        let dev = |snapshot, offset, out: &mut [_]| {
+            self.records
+                .read(snapshot, offset, out.len())
+                .map(|x| out.copy_from_slice(x.as_ref()))
+        };
+        self.objects.iter_with(dev, with)
+    }
+
     fn commit_object_trie<R>(&mut self, rng: &mut R) -> Result<SnapshotOffset, Error<D::Error>>
     where
         R: CryptoRng + RngCore,
