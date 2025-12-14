@@ -6,7 +6,7 @@ pub mod record;
 pub mod snapshot;
 
 use chacha20poly1305::{
-    Key, KeyInit, Tag as Poly1305, XChaCha12Poly1305,
+    Key, KeyInit, Tag as Poly1305, XChaCha12Poly1305, XNonce,
     aead::rand_core::{CryptoRng, RngCore},
 };
 use core::{fmt, mem};
@@ -244,7 +244,6 @@ where
         len: usize,
     ) -> Result<Read, Error<D::Error>> {
         if self.next_record_offset() <= offset {
-            dbg!(offset, self.next_record_offset());
             let start =
                 usize::try_from(offset.0 - self.next_record_offset().0).expect("inside record");
             return Ok(self.next_record[start..start + len].into());
@@ -284,18 +283,18 @@ where
         let mut cur = snapshot.record_trie_root;
         let mask = (1u64 << self.record_pitch) - 1;
         let mut depth = self.record_pitch;
+        const RLEN: u64 = record::Entry::LEN as u64;
         while (len - 1) >> depth >= 1 {
-            depth += (mask / 32).trailing_ones() as u8;
+            depth += (mask / RLEN).trailing_ones() as u8;
         }
         while depth > self.record_pitch {
-            depth -= (mask / 32).trailing_ones() as u8;
-            let i = (offset.0 >> depth) & (mask / 32);
-            dbg!(&cur);
+            depth -= (mask / RLEN).trailing_ones() as u8;
+            let i = (offset.0 >> depth) & (mask / RLEN);
             cur = record::Entry::from_bytes(
-                rd(cur.offset + 32 * i, 32)?
+                rd(cur.offset + RLEN * i, record::Entry::LEN)?
                     .as_ref()
                     .try_into()
-                    .expect("32 bytes"),
+                    .expect("exact bytes"),
             );
         }
         let rdlen =
@@ -339,10 +338,11 @@ where
         x.append(&record).map_err(Error::Device)?;
         let offset = x.offset();
         self.record_stack.push(record::Entry {
-            offset,
-            compression_info: record::CompressionInfo::new_uncompressed(record_len).unwrap(),
-            uncompressed_len: record_len,
             poly1305: *Poly1305::from_slice(&[0; 16]),
+            nonce: *XNonce::from_slice(&[0; 24]),
+            offset,
+            compressed_len: record_len,
+            uncompressed_len: record_len,
         });
         Ok(())
     }
@@ -490,7 +490,6 @@ mod test {
         fn remount(mut self) -> Self {
             self.commit();
             let (dev, key) = self.appender.into_device_key();
-            dbg!(&dev);
             Self {
                 last_root: self.last_root,
                 appender: Appender::mount(dev, key, self.last_root, DEPTH).unwrap(),

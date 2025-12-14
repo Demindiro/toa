@@ -23,9 +23,9 @@ impl Snapshot {
         buf[..16].copy_from_slice(self.poly1305.as_slice());
         buf[16..40].copy_from_slice(self.nonce.as_slice());
         */
-        buf[64..72].copy_from_slice(&self.object_trie_root.to_le_bytes());
-        buf[72..80].copy_from_slice(&self.len.to_le_bytes());
-        buf[96..].copy_from_slice(&self.record_trie_root.into_bytes());
+        buf[40..48].copy_from_slice(&self.object_trie_root.to_le_bytes());
+        buf[48..56].copy_from_slice(&self.len.to_le_bytes());
+        buf[64..].copy_from_slice(&self.record_trie_root.into_bytes());
 
         let cipher = XChaCha12Poly1305::new(key);
         let nonce = XChaCha12Poly1305::generate_nonce(rng);
@@ -48,9 +48,9 @@ impl Snapshot {
         XChaCha12Poly1305::new(key)
             .decrypt_in_place_detached(nonce, &[], data, tag)
             .map(|()| Self {
-                object_trie_root: u64::from_le_bytes(b[64..72].try_into().unwrap()),
-                len: u64::from_le_bytes(b[72..80].try_into().unwrap()),
-                record_trie_root: record::Entry::from_bytes(b[96..].try_into().unwrap()),
+                object_trie_root: u64::from_le_bytes(b[40..48].try_into().unwrap()),
+                len: u64::from_le_bytes(b[48..56].try_into().unwrap()),
+                record_trie_root: record::Entry::from_bytes(b[64..].try_into().unwrap()),
             })
     }
 }
