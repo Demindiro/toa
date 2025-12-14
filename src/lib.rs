@@ -14,7 +14,6 @@ use chacha20poly1305::{
     aead::rand_core::{CryptoRng, RngCore},
 };
 use core::{fmt, mem};
-use device::Write;
 
 pub struct Appender<D> {
     records: RecordCache<D>,
@@ -358,9 +357,7 @@ where
         let (nonce, tag, record) = pack_record(&self.key, rng, &record);
         let compressed_len = u32::try_from(record.len()).unwrap();
 
-        let mut x = self.device.write(record.len()).map_err(Error::Device)?;
-        x.append(&record).map_err(Error::Device)?;
-        let offset = x.offset();
+        let offset = self.device.write(&record).map_err(Error::Device)?;
 
         self.record_stack.push(record::Entry {
             poly1305: tag,
@@ -399,8 +396,7 @@ where
         let snap = snap.encrypt(&self.key, rng);
         let offset = self
             .device
-            .write(snap.len())
-            .and_then(|mut x| x.append(&snap).map(|()| x.offset()))
+            .write(&snap)
             .and_then(|x| self.device.sync().map(|()| x))
             .map(SnapshotRoot)
             .map_err(Error::Device)?;
