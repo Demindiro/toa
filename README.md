@@ -30,96 +30,74 @@ in preparation of a partition wipe.
 
 ## On-disk format
 
-There are several structures:
+Objects are grouped in packs.
+Each pack is committed atomically.
+Each pack is independent of other packs.
 
-1. An external file pointing to the latest snapshot.
-2. A skiplist of snapshots, from new to old.
-3. A trie of compressed records.
-4. A QP trie mapping hashes to objects.
+A pack consists of several structures:
+
+- A plain list of objects
+- A HAMT mapping keys to objects (Hash Array Mapped Trie)
+- A record trie of compressed, encrypted strips of data
 
 All cryptographic hashes use BLAKE3 except when noted otherwise.
 
-### 1. External file
+### Key & encryption
 
-The exact format is OS-dependent, but the following structure is recommended:
+All data is always encrypted by default.
+This enabled the option to password-protect the data later without needing
+re-encryption.
 
-| bytes   | short description        |
-| -------:|:------------------------ |
-|    15:0 | magic "Appender 2025/11" |
-|   19:16 | argon2id memory (KiB)    |
-|   20:20 | argon2id parallelism     |
-|   21:21 | argon2id iterations      |
-|   22:22 | block size               |
-|   23:23 | (zero)                   |
-|   27:24 | argon2id hash            |
-|   30:28 | (zero)                   |
-|   39:31 | head LBA                 |
-|   47:40 | (zero)                   |
-|   63:48 | argon2id salt            |
-|   95:64 | head hash                |
-|  127:96 | encryption key           |
-| ...:128 | path                     |
+The key is stored externally by a platform-specific mechanism.
 
-The magic must always have the value "Appender 2025/11".
 
-The password is optional.
-If any argon2id parameter is non-zero, it is enabled.
-The hash is derived from the low 32-bits of the BLAKE3
-hash of the password hash.
-The password validity can be checked with the hash
-before attempting decryption.
-The salt is always 16 bytes.
-
-The head LBA points to the latest snapshot,
-which is always at most 512 bytes and aligned to LBA.
-The hash is used to ensure integrity of the 512 bytes.
-
-The encryption key is used with ChaCha12.
-Encryption is always enabled.
-If a password is used, the key is XORed with the password hash.
-
-!!! note Forcing encryption allows a password to be enabled at a later time.
-
-### 2. Snapshots
+### Pack
 
 | bytes   | short description |
 | -------:|:----------------- |
-|    15:0 | poly1305          |
-|   39:16 | nonce             |
-|   55:40 | object trie root  |
-|   63:56 | length            |
-|  127:64 | record trie root  |
+|    15:0 | poly1305 tag      |
+|   23:16 | object trie root  |
+|   31:24 | (zero)            |
+|   63:32 | record trie root  |
+
+Only bytes 16:63 are encrypted.
+The tag is stored unencrypted.
+
+The nonce is all ones.
 
 
-Only bytes 127:40 are encrypted.
-poly1305 and nonce are stored unencrypted.
-
-
-### 3. Record trie
+### Record trie
 
 A record trie represents an address spase containing arbitrary data.
 
 Leaf records consist only of plain data.
 Parent records consist of pointers to other nodes.
 
+Records have a maximum uncompressed length of 256KiB.
+The trie always has a depth of 3.
+
+!!! note `18 + (18 - 5) * 3 = 57`,
+    i.e. a single pack can contain up to 128PiB of data.
+
 Keep in mind that records are encrypted,
 hence the poly1305 hash.
 
 | bytes | short description     |
 | -----:|:--------------------- |
-|  15:0 | poly1305              |
-| 39:16 | nonce                 |
-| 47:40 | byte offset           |
-| 51:48 | compressed length     |
-| 55:52 | uncompressed length   |
-| 63:56 | (zero)                |
+|  15:0 | poly1305 tag          |
+| 23:16 | byte offset           |
+| 24:24 | compression algorithm |
+| 27:25 | compressed length     |
+| 28:28 | (zero)                |
+| 31:29 | uncompressed length   |
 
-Data past the uncompressed length is assumed to be zero.
+The low 64 bits of the nonce is the record index in little-endian.
+The high 32 bits of the nonce is the depth in little-endian,
+starting from 0 for the leaf record.
 
-The record pitch is a power of two and must be at least (1 << 1).
+!!! note `record_index = byte_offset >> depth`.
 
-
-### 4. Hash to object "QP trie"
+### Hash to object trie (HAMT)
 
 Nodes *must not* cross a record boundary.
 
@@ -131,13 +109,8 @@ Objects *can* be aligned to an OS page boundary to avoid
 needing an extra copy when memory-mapping,
 but this is not required.
 
-The trie is a variant of QP tries.
-The main difference is the lack of nibble index
-and hence lack of prefix compression.
-This is because, normally, cryptographic hashes have
-high noise and won't share prefixes in a meaningful sense.
-
 !!! note https://dotat.at/prog/qp/blog-2015-10-04.html
+    This is about QP tries, but are strongly related to HAMT.
 
 #### Leaf
 
@@ -155,16 +128,16 @@ high noise and won't share prefixes in a meaningful sense.
 |   7:2 | (zero)            |
 | ...:8 | branches          |
 
-#### External node
-
-| bytes | short description |
-| -----:|:----------------- |
-|   7:0 | snapshot ID       |
-|  15:8 | offset            |
-
 
 ## OS integration
 
-### Linux
+### Plain files
 
-TODO
+When using an existing file system,
+each file contains a single pack.
+Packs start with a 32-byte magic "Appender with a lot of objects!\0"
+
+The pack entry structure is at the end of the file.
+
+For UNIX OSes, the key should be provided by an environment variable
+to prevent leakage.

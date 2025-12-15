@@ -1,4 +1,7 @@
-use std::{io::{self, Read}, cell::{Cell, RefCell}};
+use std::{
+    cell::{Cell, RefCell},
+    io::{self, Read},
+};
 
 pub struct IoDevice<T, F> {
     dev: RefCell<T>,
@@ -8,7 +11,11 @@ pub struct IoDevice<T, F> {
 
 impl<T, F> IoDevice<T, F> {
     pub fn new(device: T, len: u64, sync: F) -> Self {
-        Self { dev: RefCell::new(device), len: Cell::new(len), sync }
+        Self {
+            dev: RefCell::new(device),
+            len: Cell::new(len),
+            sync,
+        }
     }
 }
 
@@ -17,7 +24,8 @@ where
     T: io::Read + io::Write + io::Seek,
     F: Fn(&mut T) -> io::Result<()>,
 {
-    type Read<'a> = Box<[u8]>
+    type Read<'a>
+        = Box<[u8]>
     where
         Self: 'a;
     type Error = io::Error;
@@ -38,7 +46,8 @@ where
         let mut dev = self.dev.borrow_mut();
         let offset = self.len.get();
         let data_len = u64::try_from(data.len()).expect("usize <= u64");
-        self.len.set(offset.checked_add(data_len).expect("file length overflow"));
+        self.len
+            .set(offset.checked_add(data_len).expect("file length overflow"));
         dev.seek(io::SeekFrom::Start(offset))?;
         dev.write_all(data).map(|()| offset)
     }
