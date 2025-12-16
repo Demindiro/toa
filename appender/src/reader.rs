@@ -1,25 +1,30 @@
+pub mod cache;
+
 use crate::{
     DEPTH, Hash, Key, ObjectPointer, PITCH, PackOffset, PackRef, device, object, pack, record,
 };
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use cache::{Cache, MicroLru};
 use chacha20poly1305::{AeadInPlace, ChaCha12Poly1305, KeyInit, Tag};
 
-pub struct Reader<D> {
+pub struct Reader<D, C> {
     pack: pack::Pack,
     device: D,
     key: Key,
+    cache: C,
 }
 
 pub type Read = Vec<u8>;
 
-pub struct IterRead<'a, D> {
-    object: &'a mut Object<'a, D>,
+pub struct IterRead<'a, D, C> {
+    object: &'a mut Object<'a, D, C>,
     offset: u64,
     remaining: usize,
 }
 
-pub struct Object<'a, D> {
-    reader: &'a Reader<D>,
+pub struct Object<'a, D, C> {
+    reader: &'a Reader<D, C>,
     ptr: ObjectPointer,
 }
 
@@ -29,22 +34,28 @@ pub enum Error<D> {
     Crypto(chacha20poly1305::Error),
 }
 
-impl<D> Reader<D> {
+impl<D, C> Reader<D, C> {
     pub fn into_device_key(self) -> (D, Key) {
         (self.device, self.key)
     }
 }
 
-impl<D> Reader<D>
+impl<D, C> Reader<D, C>
 where
     D: device::Read,
+    C: Cache<Box<[u8]>>,
 {
-    pub fn new(device: D, key: Key, pack: PackRef) -> Result<Self, Error<D::Error>> {
+    pub fn new(device: D, cache: C, key: Key, pack: PackRef) -> Result<Self, Error<D::Error>> {
         let pack = pack::Pack::decrypt(pack.0, &key).unwrap();
-        Ok(Self { pack, device, key })
+        Ok(Self {
+            pack,
+            cache,
+            device,
+            key,
+        })
     }
 
-    pub fn get(&self, key: &Hash) -> Result<Option<Object<'_, D>>, Error<D::Error>> {
+    pub fn get(&self, key: &Hash) -> Result<Option<Object<'_, D, C>>, Error<D::Error>> {
         let x = object::reader::find(self.pack.object_trie_root, key, self.reader())?;
         Ok(x.map(|ptr| Object { reader: self, ptr }))
     }
@@ -67,7 +78,7 @@ where
         const RLEN_P2: u8 = record::Entry::LEN.trailing_zeros() as u8;
         let index = |d| offset.0 >> (PITCH + d * (PITCH - RLEN_P2));
         for d in (1..=DEPTH).rev() {
-            let data = self.read_record_nocache(d.into(), index(d), &cur)?;
+            let data = self.read_record(d, index(d), &cur)?;
             let i = usize::try_from(index(d - 1) & RECORD_MASK).expect("1<<PITCH < usize");
             cur = record::Entry::from_bytes(
                 &data[record::Entry::LEN * i..][..record::Entry::LEN]
@@ -76,10 +87,25 @@ where
             );
         }
         let offset = usize::try_from(offset.0 & MASK).expect("1<<PITCH < usize");
-        let x = self.read_record_nocache(0, index(0), &cur)?;
+        let x = self.read_record(0, index(0), &cur)?;
         let x = &x[offset..];
         let x = &x[..len.min(x.len())];
         Ok(x.into())
+    }
+
+    fn read_record<'s>(
+        &'s self,
+        depth: u8,
+        index: u64,
+        entry: &record::Entry,
+    ) -> Result<C::Get<'s>, Error<D::Error>> {
+        let key = cache::Key::from_depth_index(depth, index);
+        if let Some(x) = self.cache.get(key) {
+            Ok(x)
+        } else {
+            let x = self.read_record_nocache(depth.into(), index, entry)?;
+            Ok(self.cache.insert(key, x.into()))
+        }
     }
 
     fn read_record_nocache(
@@ -107,9 +133,10 @@ where
     }
 }
 
-impl<'a, D> Object<'a, D>
+impl<'a, D, C> Object<'a, D, C>
 where
     D: device::Read,
+    C: Cache<Box<[u8]>>,
 {
     pub fn read(&mut self, offset: u64, len: usize) -> Result<Read, Error<D::Error>> {
         if self.ptr.len <= offset {
@@ -127,7 +154,7 @@ where
         &'a mut self,
         offset: u64,
         len: usize,
-    ) -> Result<IterRead<'a, D>, Error<D::Error>> {
+    ) -> Result<IterRead<'a, D, C>, Error<D::Error>> {
         Ok(IterRead {
             object: self,
             offset,
@@ -136,9 +163,10 @@ where
     }
 }
 
-impl<'a, D> IterRead<'a, D>
+impl<'a, D, C> IterRead<'a, D, C>
 where
     D: device::Read,
+    C: Cache<Box<[u8]>>,
 {
     pub fn into_bytes(self) -> Result<Vec<u8>, Error<D::Error>> {
         let mut v = Vec::new();
@@ -149,9 +177,10 @@ where
     }
 }
 
-impl<'a, D> Iterator for IterRead<'a, D>
+impl<'a, D, C> Iterator for IterRead<'a, D, C>
 where
     D: device::Read,
+    C: Cache<Box<[u8]>>,
 {
     type Item = Result<Read, Error<D::Error>>;
 
@@ -173,4 +202,9 @@ where
     }
 }
 
-impl<'a, D> core::iter::FusedIterator for IterRead<'a, D> where D: device::Read {}
+impl<'a, D, C> core::iter::FusedIterator for IterRead<'a, D, C>
+where
+    D: device::Read,
+    C: Cache<Box<[u8]>>,
+{
+}

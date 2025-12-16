@@ -12,7 +12,7 @@ pub mod record;
 
 pub use builder::Builder;
 pub use chacha20poly1305::Key;
-pub use reader::Reader;
+pub use reader::{Reader, cache};
 
 use chacha20poly1305::Nonce;
 use core::fmt;
@@ -60,14 +60,14 @@ mod test {
     }
 
     struct TestRead {
-        reader: Reader<Vec<u8>>,
+        reader: Reader<Vec<u8>, cache::MicroLru<Box<[u8]>>>,
     }
 
     impl TestBuild {
         fn finish(self) -> TestRead {
             let (dev, key, pack) = self.builder.finish().expect("build finish failure");
             let pack = pack.expect("no objects committed");
-            let reader = Reader::new(dev, key, pack).expect("corrupt pack");
+            let reader = Reader::new(dev, Default::default(), key, pack).expect("corrupt pack");
             TestRead { reader }
         }
 
