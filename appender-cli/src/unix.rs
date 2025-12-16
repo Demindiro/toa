@@ -180,7 +180,14 @@ where
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    todo!();
+    let (dev, dir) = new_reader(&store).unwrap();
+    let file = traverse_path(&dev, &path, dir)?;
+    let mut file = dev.get(&file).unwrap().unwrap();
+    let mut io = std::io::stdout().lock();
+    for x in file.read_exact(0, usize::MAX).unwrap() {
+        let x = x.unwrap();
+        io.write_all(&x).unwrap();
+    }
 
     Ok(())
 }
@@ -194,20 +201,8 @@ where
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
-    let (dev, mut dir) = new_reader(&store).unwrap();
-
-    for p in path.split("/").filter(|x| !x.is_empty()) {
-        let Some(x) = DirIter::new(&dev, &dir).find(|x| x.name == p) else {
-            eprintln!("directory not found");
-            return Err(1);
-        };
-        if !matches!(&x.ty, DirItemType::Dir) {
-            eprintln!("not a directory");
-            return Err(1);
-        }
-        dir = x.key;
-    }
-
+    let (dev, dir) = new_reader(&store).unwrap();
+    let dir = traverse_path(&dev, path, dir)?;
     DirIter::new(&dev, &dir).for_each(|e| println!("{e}"));
 
     Ok(())
@@ -326,4 +321,21 @@ fn new_reader(store: &str) -> io::Result<(Reader, Hash)> {
     dev.read_exact(&mut packref.0)?;
     let dev = Reader::new(dev, Default::default(), packref).unwrap();
     Ok((dev, key))
+}
+
+fn traverse_path(dev: &Reader, path: &str, mut start: Hash) -> Result<Hash, i32> {
+    let mut is_dir = true;
+    for p in path.split("/").filter(|x| !x.is_empty()) {
+        if !is_dir {
+            eprintln!("not a directory");
+            return Err(1);
+        }
+        let Some(x) = DirIter::new(&dev, &start).find(|x| x.name == p) else {
+            eprintln!("directory not found");
+            return Err(1);
+        };
+        is_dir = matches!(&x.ty, DirItemType::Dir);
+        start = x.key;
+    }
+    Ok(start)
 }
