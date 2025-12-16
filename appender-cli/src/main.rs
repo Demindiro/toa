@@ -1,3 +1,5 @@
+mod unix;
+
 use std::{
     fs,
     fs::File,
@@ -23,6 +25,9 @@ usage: {procname} <add|get|list>
         dump object data to stdout (may contain raw bytes!)
     list <pack>
         list all known objects
+    unix new <pack> <directory>
+    unix get <pack> <path>
+    unix ls <pack> [path]
 "
     );
     1
@@ -162,6 +167,7 @@ fn start() -> Result<(), i32> {
         "new" => cmd_new(procname, args),
         "get" => cmd_get(procname, args),
         "list" => cmd_list(procname, args),
+        "unix" => unix::cmd(procname, args),
         _ => Err(usage(procname)),
     }
 }
