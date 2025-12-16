@@ -12,7 +12,6 @@ use chacha20poly1305::{AeadInPlace, ChaCha12Poly1305, KeyInit, Tag};
 pub struct Reader<D, C> {
     pack: pack::Pack,
     device: D,
-    key: Key,
     cache: C,
 }
 
@@ -40,8 +39,8 @@ pub enum Error<D> {
 struct CorruptedCompression;
 
 impl<D, C> Reader<D, C> {
-    pub fn into_device_key(self) -> (D, Key) {
-        (self.device, self.key)
+    pub fn into_device(self) -> D {
+        self.device
     }
 }
 
@@ -50,13 +49,12 @@ where
     D: device::Read,
     C: Cache<Box<[u8]>>,
 {
-    pub fn new(device: D, cache: C, key: Key, pack: PackRef) -> Result<Self, Error<D::Error>> {
-        let pack = pack::Pack::decrypt(pack.0, &key).map_err(Error::Crypto)?;
+    pub fn new(device: D, cache: C, pack: PackRef) -> Result<Self, Error<D::Error>> {
+        let pack = pack::Pack::from_bytes(pack.0);
         Ok(Self {
             pack,
             cache,
             device,
-            key,
         })
     }
 
@@ -125,7 +123,7 @@ where
             .read(entry.offset, &mut data)
             .map_err(Error::Device)?;
         let nonce = crate::record_nonce(depth, index);
-        ChaCha12Poly1305::new(&self.key)
+        ChaCha12Poly1305::new(&self.pack.key)
             .decrypt_in_place_detached(&nonce, &[], &mut data, &entry.tag)
             .map_err(Error::Crypto)?;
         let len = usize::try_from(entry.uncompressed_len).expect("u32 <= usize");

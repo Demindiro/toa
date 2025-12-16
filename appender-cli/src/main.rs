@@ -23,8 +23,6 @@ usage: {procname} <add|get|list>
         dump object data to stdout (may contain raw bytes!)
     list <pack>
         list all known objects
-environment:
-    APPENDER_CLI_KEY=<64 hex bytes>
 "
     );
     1
@@ -68,13 +66,11 @@ fn new_builder(store: &str) -> io::Result<Builder> {
 }
 
 fn new_reader(store: &str) -> io::Result<Reader> {
-    let key = std::env::var("APPENDER_CLI_KEY").unwrap();
-    let key = parse_hex::<32>(&key).unwrap().into();
     let mut dev = fs::OpenOptions::new().read(true).open(store)?;
-    dev.seek(io::SeekFrom::End(-64)).unwrap();
-    let mut packref = appender::PackRef([0; 64]);
+    dev.seek(io::SeekFrom::End(-72)).unwrap();
+    let mut packref = appender::PackRef([0; 72]);
     dev.read_exact(&mut packref.0).unwrap();
-    let dev = Reader::new(dev, Default::default(), key, packref).unwrap();
+    let dev = Reader::new(dev, Default::default(), packref).unwrap();
     Ok(dev)
 }
 
@@ -101,11 +97,9 @@ where
 
     let mut dev = new_builder(&store).unwrap();
     let stat = add_files(&mut dev, args)?;
-    let (mut dev, key, packref) = dev.finish().unwrap();
+    let (mut dev, packref) = dev.finish().unwrap();
     let packref = packref.unwrap();
     dev.write_all(&packref.0).unwrap();
-
-    println!("APPENDER_CLI_KEY={key:064x}");
 
     let pack_size = dev.metadata().unwrap().len();
     let Stat { size_sum } = stat;

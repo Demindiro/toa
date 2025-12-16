@@ -51,19 +51,16 @@ re-encryption.
 The key is stored externally by a platform-specific mechanism.
 
 
-### Pack
+### Pack reference
 
 | bytes   | short description |
 | -------:|:----------------- |
-|    15:0 | poly1305 tag      |
-|   23:16 | object trie root  |
-|   31:24 | (zero)            |
+|    31:0 | key               |
 |   63:32 | record trie root  |
+|   71:64 | object trie root  |
 
-Only bytes 16:63 are encrypted.
-The tag is stored unencrypted.
-
-The nonce is all ones.
+If the pack content's must be secret,
+encrypt the pack reference.
 
 
 ### Record trie

@@ -26,7 +26,7 @@ pub struct Hash(pub [u8; 32]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct PackRef(pub [u8; pack::Pack::ENCRYPTED_LEN]);
+pub struct PackRef(pub [u8; pack::Pack::LEN]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PackOffset(u64);
@@ -65,9 +65,9 @@ mod test {
 
     impl TestBuild {
         fn finish(self) -> TestRead {
-            let (dev, key, pack) = self.builder.finish().expect("build finish failure");
+            let (dev, pack) = self.builder.finish().expect("build finish failure");
             let pack = pack.expect("no objects committed");
-            let reader = Reader::new(dev, Default::default(), key, pack).expect("corrupt pack");
+            let reader = Reader::new(dev, Default::default(), pack).expect("corrupt pack");
             TestRead { reader }
         }
 
