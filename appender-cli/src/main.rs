@@ -7,6 +7,8 @@ use std::{
     io::{Read, Seek, Write},
 };
 
+const MAGIC: [u8; 16] = *b"Plainey Appender";
+
 type Builder = appender::Builder<File>;
 type Reader = appender::Reader<File, appender::cache::MicroLru<Box<[u8]>>>;
 
@@ -62,16 +64,22 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N], &'static str> {
 }
 
 fn new_builder(store: &str) -> io::Result<Builder> {
-    let dev = fs::OpenOptions::new()
+    let mut dev = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(store)?;
+    dev.write_all(&MAGIC)?;
     let dev = Builder::new(dev, rand::thread_rng());
     Ok(dev)
 }
 
 fn new_reader(store: &str) -> io::Result<Reader> {
     let mut dev = fs::OpenOptions::new().read(true).open(store)?;
+    let mut buf = [0; 16];
+    dev.read_exact(&mut buf)?;
+    if buf != MAGIC {
+        todo!("bad magic");
+    }
     dev.seek(io::SeekFrom::End(-72)).unwrap();
     let mut packref = appender::PackRef([0; 72]);
     dev.read_exact(&mut packref.0).unwrap();
