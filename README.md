@@ -51,19 +51,16 @@ re-encryption.
 The key is stored externally by a platform-specific mechanism.
 
 
-### Pack
+### Pack reference
 
 | bytes   | short description |
 | -------:|:----------------- |
-|    15:0 | poly1305 tag      |
-|   23:16 | object trie root  |
-|   31:24 | (zero)            |
+|    31:0 | key               |
 |   63:32 | record trie root  |
+|   71:64 | object trie root  |
 
-Only bytes 16:63 are encrypted.
-The tag is stored unencrypted.
-
-The nonce is all ones.
+If the pack content's must be secret,
+encrypt the pack reference.
 
 
 ### Record trie
@@ -129,15 +126,75 @@ but this is not required.
 | ...:8 | branches          |
 
 
-## OS integration
+## Containers
 
-### Plain files
+Objects by themselves likely aren't useful for common tasks.
+A few container formats are defined to integrate with existing systems.
 
-When using an existing file system,
-each file contains a single pack.
-Packs start with a 32-byte magic "Appender with a lot of objects!\0"
+### Plain container
 
-The pack entry structure is at the end of the file.
+The plain container starts with the magic string "Plainey Appender".
+It ends with a metadata table and an unencrypted pack reference.
 
-For UNIX OSes, the key should be provided by an environment variable
-to prevent leakage.
+To support various usecases, it provides a table of key-value pairs.
+Keys must be valid UTF-8.
+Keys are prefixed with a 8-bit length in bytes.
+Values may be any arbitrary data.
+Values are prefixed with a 16-bit length in bytes.
+The table is suffixed with a 32-bit length in bytes.
+
+### UNIX container
+
+The UNIX container is designed as an equivalent to TAR files.
+It supports basic attributes common to all UNIX systems:
+UID, GID, file
+
+- UID
+- GID
+- file permissions
+- modified time
+
+Only regular files, directories and symbolic links are supported.
+
+The UNIX container reuses the plain container,
+but stores the hash of the root directory right before the pack reference.
+
+#### Directory format
+
+As directories are primarily read by programs,
+it is in a binary format.
+The format starts with the magic "Appender UNIX directory\0",
+followed by a 64-bit entry count.
+It is immediately followed by `entry-count` entries:
+
+| bytes | short description |
+| -----:|:----------------- |
+|   1:0 | type+permissions  |
+|   2:2 | name length       |
+|   7:3 | (zero)            |
+|  11:8 | UID               |
+| 15:12 | GID               |
+| 23:16 | name offset       |
+| 31:24 | modified time     |
+| 63:32 | hash              |
+
+
+| bits | short description |
+| ----:|:----------------- |
+|  8:0 | permissions       |
+| 10:9 | type              |
+
+Type 0 is a regular file, type 1 is a directory and type 2 is a symbolic link.
+
+Names are stored after the entry array.
+
+Modified time is in terms of microseconds.
+
+Entries MUST be sorted by name.
+Names blob MUST be in order of the entries.
+
+!!! note This increases the chances of identical directories being deduplicated.
+
+The paths MUST be valid UTF-8.
+
+The special entries `.` and `..` are never included.

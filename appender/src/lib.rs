@@ -12,7 +12,7 @@ pub mod record;
 
 pub use builder::Builder;
 pub use chacha20poly1305::Key;
-pub use reader::{Reader, cache};
+pub use reader::{Object, Reader, cache};
 
 use chacha20poly1305::Nonce;
 use core::fmt;
@@ -26,7 +26,7 @@ pub struct Hash(pub [u8; 32]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct PackRef(pub [u8; pack::Pack::ENCRYPTED_LEN]);
+pub struct PackRef(pub [u8; pack::Pack::LEN]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PackOffset(u64);
@@ -65,9 +65,9 @@ mod test {
 
     impl TestBuild {
         fn finish(self) -> TestRead {
-            let (dev, key, pack) = self.builder.finish().expect("build finish failure");
+            let (dev, pack) = self.builder.finish().expect("build finish failure");
             let pack = pack.expect("no objects committed");
-            let reader = Reader::new(dev, Default::default(), key, pack).expect("corrupt pack");
+            let reader = Reader::new(dev, Default::default(), pack).expect("corrupt pack");
             TestRead { reader }
         }
 
@@ -81,7 +81,8 @@ mod test {
             let mut x = self.reader.get(&key).unwrap().unwrap();
             let x = x.read_exact(0, usize::MAX).unwrap();
             let x = x.into_bytes().unwrap();
-            assert_eq!(&x, value);
+            let f = String::from_utf8_lossy;
+            assert!(&x == value, "{} <> {}", f(&x), f(value));
         }
     }
 
@@ -126,6 +127,18 @@ mod test {
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
+    }
+
+    /// This test crosses record boundaries and is used in particular to test crypto nonce errors.
+    #[test]
+    fn insert_one_large() {
+        let mut s = init();
+        let v = (0..1 << 19)
+            .fold(String::new(), |s, _| s + "x")
+            .into_bytes();
+        let k = s.add(&v);
+        let s = s.finish();
+        s.assert_eq(&k, &v);
     }
 
     // TODO we need tests to ensure crypto works!

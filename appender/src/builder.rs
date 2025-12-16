@@ -57,13 +57,17 @@ where
 
     fn add_with_key(&mut self, key: Hash, data: &[u8]) -> Result<Hash, Error<D::Error>> {
         let len = u64::try_from(data.len()).expect("usize <= u64");
+        // TODO avoid take(). We do this because self.write() is a pain with lifetimes.
         let Some(mut objects) = self.objects.take() else {
             let offset = self.write(data)?;
             self.objects = Some(ObjectTrie::with_leaf(&key, ObjectPointer { offset, len }));
             return Ok(key);
         };
         let insert = match objects.find(&key) {
-            Find::Object(_) => return Ok(key),
+            Find::Object(_) => {
+                self.objects = Some(objects);
+                return Ok(key);
+            }
             Find::None(x) => x,
         };
         let offset = match self.write(data) {
@@ -78,25 +82,26 @@ where
         Ok(key)
     }
 
-    pub fn finish(mut self) -> Result<(D, Key, Option<PackRef>), Error<D::Error>> {
+    pub fn finish(mut self) -> Result<(D, Option<PackRef>), Error<D::Error>> {
         self.flush_leaf()?;
         let Some(objects) = self.objects.take() else {
-            return Ok((self.device, self.key, None));
+            return Ok((self.device, None));
         };
         let object_trie_root = objects.serialize(|data| self.write_inside_bounds(data))?;
         let record_trie_root = self.flush_all()?.expect("at least one object");
         let pack = pack::Pack {
+            key: self.key,
             object_trie_root,
             record_trie_root,
         };
-        let pack = PackRef(pack.encrypt(&self.key));
+        let pack = PackRef(pack.into_bytes());
         self.device.sync().map_err(Error::Device)?;
-        Ok((self.device, self.key, Some(pack)))
+        Ok((self.device, Some(pack)))
     }
 
     fn write(&mut self, data: &[u8]) -> Result<PackOffset, Error<D::Error>> {
         // TODO risk of desynchronization
-        append_record(&mut self.device, &self.key, 1, &mut self.writers, data)?;
+        append_record(&mut self.device, &self.key, 0, &mut self.writers, data)?;
         let offset = self.pack_len;
         self.pack_len.0 += data.len() as u64;
         Ok(offset)

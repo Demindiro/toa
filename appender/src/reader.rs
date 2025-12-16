@@ -12,20 +12,19 @@ use chacha20poly1305::{AeadInPlace, ChaCha12Poly1305, KeyInit, Tag};
 pub struct Reader<D, C> {
     pack: pack::Pack,
     device: D,
-    key: Key,
     cache: C,
 }
 
 pub type Read = Vec<u8>;
 
-pub struct IterRead<'a, D, C> {
-    object: &'a mut Object<'a, D, C>,
+pub struct IterRead<'o, 'r, T> {
+    object: &'o mut Object<'r, T>,
     offset: u64,
     remaining: usize,
 }
 
-pub struct Object<'a, D, C> {
-    reader: &'a Reader<D, C>,
+pub struct Object<'a, T> {
+    reader: &'a T,
     ptr: ObjectPointer,
 }
 
@@ -40,8 +39,8 @@ pub enum Error<D> {
 struct CorruptedCompression;
 
 impl<D, C> Reader<D, C> {
-    pub fn into_device_key(self) -> (D, Key) {
-        (self.device, self.key)
+    pub fn into_device(self) -> D {
+        self.device
     }
 }
 
@@ -50,17 +49,16 @@ where
     D: device::Read,
     C: Cache<Box<[u8]>>,
 {
-    pub fn new(device: D, cache: C, key: Key, pack: PackRef) -> Result<Self, Error<D::Error>> {
-        let pack = pack::Pack::decrypt(pack.0, &key).map_err(Error::Crypto)?;
+    pub fn new(device: D, cache: C, pack: PackRef) -> Result<Self, Error<D::Error>> {
+        let pack = pack::Pack::from_bytes(pack.0);
         Ok(Self {
             pack,
             cache,
             device,
-            key,
         })
     }
 
-    pub fn get(&self, key: &Hash) -> Result<Option<Object<'_, D, C>>, Error<D::Error>> {
+    pub fn get(&self, key: &Hash) -> Result<Option<Object<'_, Self>>, Error<D::Error>> {
         let x = object::reader::find(self.pack.object_trie_root, key, self.reader())?;
         Ok(x.map(|ptr| Object { reader: self, ptr }))
     }
@@ -125,7 +123,7 @@ where
             .read(entry.offset, &mut data)
             .map_err(Error::Device)?;
         let nonce = crate::record_nonce(depth, index);
-        ChaCha12Poly1305::new(&self.key)
+        ChaCha12Poly1305::new(&self.pack.key)
             .decrypt_in_place_detached(&nonce, &[], &mut data, &entry.tag)
             .map_err(Error::Crypto)?;
         let len = usize::try_from(entry.uncompressed_len).expect("u32 <= usize");
@@ -140,7 +138,7 @@ where
     }
 }
 
-impl<'a, D, C> Object<'a, D, C>
+impl<'a, D, C> Object<'a, Reader<D, C>>
 where
     D: device::Read,
     C: Cache<Box<[u8]>>,
@@ -157,11 +155,11 @@ where
     }
 
     // TODO len shouldn't be usize but u64
-    pub fn read_exact(
-        &'a mut self,
+    pub fn read_exact<'o>(
+        &'o mut self,
         offset: u64,
         len: usize,
-    ) -> Result<IterRead<'a, D, C>, Error<D::Error>> {
+    ) -> Result<IterRead<'o, 'a, Reader<D, C>>, Error<D::Error>> {
         Ok(IterRead {
             object: self,
             offset,
@@ -170,7 +168,7 @@ where
     }
 }
 
-impl<'a, D, C> IterRead<'a, D, C>
+impl<'o, 'r, D, C> IterRead<'o, 'r, Reader<D, C>>
 where
     D: device::Read,
     C: Cache<Box<[u8]>>,
@@ -184,7 +182,7 @@ where
     }
 }
 
-impl<'a, D, C> Iterator for IterRead<'a, D, C>
+impl<'o, 'r, D, C> Iterator for IterRead<'o, 'r, Reader<D, C>>
 where
     D: device::Read,
     C: Cache<Box<[u8]>>,
@@ -209,7 +207,7 @@ where
     }
 }
 
-impl<'a, D, C> core::iter::FusedIterator for IterRead<'a, D, C>
+impl<'o, 'r, D, C> core::iter::FusedIterator for IterRead<'o, 'r, Reader<D, C>>
 where
     D: device::Read,
     C: Cache<Box<[u8]>>,
@@ -246,7 +244,7 @@ fn decompress_zstd(
     data: Vec<u8>,
     uncompressed_len: usize,
 ) -> Result<Vec<u8>, CorruptedCompression> {
-    let mut b = vec![0; uncompressed_len];
+    let mut b = alloc::vec![0; uncompressed_len];
     let real_len = zstd_safe::decompress(&mut *b, &data).map_err(|_| CorruptedCompression)?;
     (real_len == b.len())
         .then_some(b)
