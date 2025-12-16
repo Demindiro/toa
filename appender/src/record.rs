@@ -1,10 +1,20 @@
 use chacha20poly1305::Tag;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Entry {
+pub enum CompressionAlgorithm {
+    None = 0,
+    Lz4 = 1,
+    Zstd = 2,
+}
+
+#[derive(Clone, Debug)]
+pub struct UnknownCompressionAlgorithm(pub u8);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Entry {
     pub tag: Tag,
     pub offset: u64,
-    pub compression_algorithm: u8,
+    pub compression_algorithm: CompressionAlgorithm,
     pub compressed_len: u32,
     pub uncompressed_len: u32,
 }
@@ -18,20 +28,33 @@ impl Entry {
         let mut buf = [0; Self::LEN];
         buf[0..16].copy_from_slice(self.tag.as_slice());
         buf[16..24].copy_from_slice(&self.offset.to_le_bytes());
-        buf[24] = self.compression_algorithm;
+        buf[24] = self.compression_algorithm as u8;
         buf[25..28].copy_from_slice(&self.compressed_len.to_le_bytes()[..3]);
         buf[28] = 0;
         buf[29..32].copy_from_slice(&self.uncompressed_len.to_le_bytes()[..3]);
         buf
     }
 
-    pub fn from_bytes(b: &[u8; Self::LEN]) -> Self {
-        Self {
+    pub fn from_bytes(b: &[u8; Self::LEN]) -> Result<Self, UnknownCompressionAlgorithm> {
+        Ok(Self {
             tag: *Tag::from_slice(&b[0..16]),
             offset: u64::from_le_bytes(b[16..24].try_into().unwrap()),
-            compression_algorithm: b[24],
+            compression_algorithm: b[24].try_into()?,
             compressed_len: u32::from_le_bytes(b[24..28].try_into().unwrap()) >> 8,
             uncompressed_len: u32::from_le_bytes(b[28..32].try_into().unwrap()) >> 8,
-        }
+        })
+    }
+}
+
+impl TryFrom<u8> for CompressionAlgorithm {
+    type Error = UnknownCompressionAlgorithm;
+
+    fn try_from(x: u8) -> Result<Self, Self::Error> {
+        Ok(match x {
+            0 => Self::None,
+            1 => Self::Lz4,
+            2 => Self::Zstd,
+            x => return Err(UnknownCompressionAlgorithm(x)),
+        })
     }
 }

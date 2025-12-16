@@ -34,7 +34,7 @@ impl Pack {
         ChaCha12Poly1305::new(key).decrypt_in_place_detached(nonce, &[], data, tag)?;
         Ok(Self {
             object_trie_root: PackOffset(u64::from_le_bytes(data[..8].try_into().unwrap())),
-            record_trie_root: record::Entry::from_bytes(data[16..].try_into().unwrap()),
+            record_trie_root: record::Entry::from_bytes(data[16..].try_into().unwrap()).unwrap(),
         })
     }
 }
