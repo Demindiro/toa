@@ -115,9 +115,10 @@ where
         entry: &record::Entry,
     ) -> Result<Vec<u8>, Error<D::Error>> {
         let len = usize::try_from(entry.compressed_len).expect("u32 <= usize");
-        let data = self.device.read(entry.offset, len).map_err(Error::Device)?;
-        // TODO avoid copy maybe?
-        let mut data = data.as_ref().to_vec();
+        let mut data = alloc::vec![0; len];
+        self.device
+            .read(entry.offset, &mut data)
+            .map_err(Error::Device)?;
         let nonce = crate::record_nonce(depth, index);
         ChaCha12Poly1305::new(&self.key)
             .decrypt_in_place_detached(&nonce, &[], &mut data, &entry.tag)

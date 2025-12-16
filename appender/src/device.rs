@@ -1,13 +1,10 @@
 #[cfg(feature = "std")]
-pub mod io;
+pub mod fs;
 
 pub trait Read {
-    type Read<'a>: AsRef<[u8]>
-    where
-        Self: 'a;
     type Error;
 
-    fn read<'a>(&'a self, offset: u64, len: usize) -> Result<Self::Read<'a>, Self::Error>;
+    fn read<'a>(&'a self, offset: u64, out: &mut [u8]) -> Result<(), Self::Error>;
 }
 
 pub trait Write {
@@ -18,27 +15,19 @@ pub trait Write {
 }
 
 impl Read for &[u8] {
-    type Read<'a>
-        = &'a [u8]
-    where
-        Self: 'a;
     type Error = &'static str;
 
-    fn read<'a>(&'a self, offset: u64, len: usize) -> Result<Self::Read<'a>, Self::Error> {
-        read_slice(self, offset, len)
+    fn read<'a>(&'a self, offset: u64, out: &mut [u8]) -> Result<(), Self::Error> {
+        read_slice(self, offset, out)
     }
 }
 
 #[cfg(any(feature = "alloc", test))]
 impl Read for alloc::vec::Vec<u8> {
-    type Read<'a>
-        = &'a [u8]
-    where
-        Self: 'a;
     type Error = <&'static [u8] as Read>::Error;
 
-    fn read<'a>(&'a self, offset: u64, len: usize) -> Result<Self::Read<'a>, Self::Error> {
-        read_slice(self, offset, len)
+    fn read<'a>(&'a self, offset: u64, out: &mut [u8]) -> Result<(), Self::Error> {
+        read_slice(self, offset, out)
     }
 }
 
@@ -57,11 +46,12 @@ impl Write for alloc::vec::Vec<u8> {
     }
 }
 
-// rust is doing somethign very stupid with lifetimes.
-fn read_slice(data: &[u8], offset: u64, len: usize) -> Result<&[u8], &'static str> {
+// rust is doing something very stupid with lifetimes.
+fn read_slice(data: &[u8], offset: u64, out: &mut [u8]) -> Result<(), &'static str> {
     usize::try_from(offset)
         .ok()
-        .and_then(|x| x.checked_add(len).map(|y| x..y))
+        .and_then(|x| x.checked_add(out.len()).map(|y| x..y))
         .and_then(|x| data.get(x))
         .ok_or("out of bounds")
+        .map(|x| out.copy_from_slice(x))
 }
