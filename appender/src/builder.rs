@@ -57,13 +57,17 @@ where
 
     fn add_with_key(&mut self, key: Hash, data: &[u8]) -> Result<Hash, Error<D::Error>> {
         let len = u64::try_from(data.len()).expect("usize <= u64");
+        // TODO avoid take(). We do this because self.write() is a pain with lifetimes.
         let Some(mut objects) = self.objects.take() else {
             let offset = self.write(data)?;
             self.objects = Some(ObjectTrie::with_leaf(&key, ObjectPointer { offset, len }));
             return Ok(key);
         };
         let insert = match objects.find(&key) {
-            Find::Object(_) => return Ok(key),
+            Find::Object(_) => {
+                self.objects = Some(objects);
+                return Ok(key);
+            }
             Find::None(x) => x,
         };
         let offset = match self.write(data) {
