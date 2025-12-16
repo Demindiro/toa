@@ -97,7 +97,7 @@ where
 
     fn write(&mut self, data: &[u8]) -> Result<PackOffset, Error<D::Error>> {
         // TODO risk of desynchronization
-        append_record(&mut self.device, &self.key, 1, &mut self.writers, data)?;
+        append_record(&mut self.device, &self.key, 0, &mut self.writers, data)?;
         let offset = self.pack_len;
         self.pack_len.0 += data.len() as u64;
         Ok(offset)

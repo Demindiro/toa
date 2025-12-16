@@ -81,7 +81,8 @@ mod test {
             let mut x = self.reader.get(&key).unwrap().unwrap();
             let x = x.read_exact(0, usize::MAX).unwrap();
             let x = x.into_bytes().unwrap();
-            assert_eq!(&x, value);
+            let f = String::from_utf8_lossy;
+            assert!(&x == value, "{} <> {}", f(&x), f(value));
         }
     }
 
@@ -126,6 +127,18 @@ mod test {
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
+    }
+
+    /// This test crosses record boundaries and is used in particular to test crypto nonce errors.
+    #[test]
+    fn insert_one_large() {
+        let mut s = init();
+        let v = (0..1 << 19)
+            .fold(String::new(), |s, _| s + "x")
+            .into_bytes();
+        let k = s.add(&v);
+        let s = s.finish();
+        s.assert_eq(&k, &v);
     }
 
     // TODO we need tests to ensure crypto works!
