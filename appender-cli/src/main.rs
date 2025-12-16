@@ -1,29 +1,25 @@
-use appender::{SnapshotRoot, device::io::IoDevice};
-use rand::{CryptoRng, RngCore};
-use std::{fs, fs::File, io};
+use std::{
+    fs,
+    fs::File,
+    io,
+    io::{Read, Seek, Write},
+};
 
-struct Meta {
-    store: String,
-    key: appender::Key,
-    pitch: u8,
-    root: SnapshotRoot,
-}
-
-// TODO avoid Box
-type Appender = appender::Appender<IoDevice<File, Box<dyn Fn(&mut File) -> io::Result<()>>>>;
+type Builder = appender::Builder<File>;
+type Reader = appender::Reader<File, appender::cache::MicroLru<Box<[u8]>>>;
 
 fn usage(procname: &str) -> i32 {
     eprint!(
         "\
 usage: {procname} <add|get|list>
-    init <meta> <store> <pitch> [files...]
-        initialize a new store
-    add  <meta> [files...]
-        read data from files and store as objects
-    get  <meta> <key>
+    new <pack> [files...]
+        initialize a new pack
+    get <pack> <key>
         dump object data to stdout (may contain raw bytes!)
-    list <meta>
+    list <pack>
         list all known objects
+environment:
+    APPENDER_CLI_KEY=<64 hex bytes>
 "
     );
     1
@@ -57,152 +53,52 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N], &'static str> {
     Ok(k)
 }
 
-fn read_meta(path: &str) -> io::Result<Meta> {
-    let meta = fs::read_to_string(path)?;
-
-    let mut store = None;
-    let mut key = None;
-    let mut pitch = None;
-    let mut root = None;
-
-    for line in meta.lines() {
-        let (k, v) = line.split_once(" ").unwrap();
-        let [k, v] = [k, v].map(|x| x.trim());
-        let value = match k {
-            "store" => &mut store,
-            "key" => &mut key,
-            "pitch" => &mut pitch,
-            "root" => &mut root,
-            x if x.starts_with("#") => continue,
-            x => todo!("bad key {x:?}"),
-        };
-        // if only we had unwrap_none...
-        let prev = value.replace(v);
-        assert!(prev.is_none(), "duplicate definition of {key:?}");
-    }
-
-    let store = store.expect("no \"store\" defined");
-    let key = key.expect("no \"key\" defined");
-    let pitch = pitch.expect("no \"pitch\" defined");
-    let root = root.expect("no \"root\" defined");
-
-    Ok(Meta {
-        store: store.into(),
-        key: parse_hex::<32>(&key).unwrap().into(),
-        pitch: pitch.parse().unwrap(),
-        root: root.parse().map(SnapshotRoot).unwrap(),
-    })
-}
-
-fn open(meta_path: &str, write: bool) -> io::Result<(Appender, Meta)> {
-    let meta = read_meta(meta_path)?;
-    let rng = &mut rand::thread_rng();
-    let sync = Box::new(|x: &mut File| x.sync_all()) as Box<dyn Fn(&mut _) -> _>;
+fn new_builder(store: &str) -> io::Result<Builder> {
     let dev = fs::OpenOptions::new()
-        .read(true)
-        .write(write)
-        .open(&meta.store)?;
-    let len = dev.metadata()?.len();
-    let dev = IoDevice::new(dev, len, sync);
-    let dev = Appender::mount(dev, meta.key, meta.root, meta.pitch).unwrap();
-    Ok((dev, meta))
+        .write(true)
+        .create_new(true)
+        .open(store)?;
+    let dev = Builder::new(dev, rand::thread_rng());
+    Ok(dev)
 }
 
-fn add_files<A, R>(dev: &mut Appender, mut args: A, rng: &mut R) -> Result<(), i32>
+fn new_reader(store: &str) -> io::Result<Reader> {
+    let key = std::env::var("APPENDER_CLI_KEY").unwrap();
+    let key = parse_hex::<32>(&key).unwrap().into();
+    let mut dev = fs::OpenOptions::new().read(true).open(store)?;
+    dev.seek(io::SeekFrom::End(-64)).unwrap();
+    let mut packref = appender::PackRef([0; 64]);
+    dev.read_exact(&mut packref.0).unwrap();
+    let dev = Reader::new(dev, Default::default(), key, packref).unwrap();
+    Ok(dev)
+}
+
+fn add_files<A>(dev: &mut Builder, args: A) -> Result<(), i32>
 where
     A: Iterator<Item = String>,
-    R: CryptoRng + RngCore,
 {
     for file in args {
         // TODO don't read huge files in one go
         let data = fs::read(&file).unwrap();
-        let key = dev.add(rng, &data).unwrap();
+        let key = dev.add(&data).unwrap();
         println!("{key:?} {file}");
     }
     Ok(())
 }
 
-fn cmd_init<A>(procname: &str, mut args: A) -> Result<(), i32>
+fn cmd_new<A>(procname: &str, mut args: A) -> Result<(), i32>
 where
     A: Iterator<Item = String>,
 {
-    let meta = args.next().ok_or_else(|| usage(procname))?;
     let store = args.next().ok_or_else(|| usage(procname))?;
-    let pitch = args.next().ok_or_else(|| usage(procname))?;
 
-    let pitch = pitch.parse::<u8>().unwrap();
+    let mut dev = new_builder(&store).unwrap();
+    add_files(&mut dev, args)?;
+    let (mut dev, key, packref) = dev.finish().unwrap();
+    let packref = packref.unwrap();
+    dev.write_all(&packref.0).unwrap();
 
-    let mut meta = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(meta)
-        .unwrap();
-
-    let rng = &mut rand::thread_rng();
-    let sync = Box::new(|x: &mut File| x.sync_all()) as Box<dyn Fn(&mut _) -> _>;
-    let dev = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open(&store)
-        .unwrap();
-    let dev = IoDevice::new(dev, 0, sync);
-    let mut dev = Appender::init(dev, pitch, &mut *rng);
-
-    add_files(&mut dev, args, rng)?;
-
-    let SnapshotRoot(root) = dev.commit(rng).unwrap().unwrap();
-    let key = dev.key();
-
-    let cfg = format!(
-        "\
-store {store}
-key   {key:064x}
-pitch {pitch}
-root  {root}
-"
-    );
-    use io::Write;
-    meta.write_all(cfg.as_bytes()).unwrap();
-
-    Ok(())
-}
-
-fn cmd_add<A>(procname: &str, mut args: A) -> Result<(), i32>
-where
-    A: Iterator<Item = String>,
-{
-    let meta_n = args.next().ok_or_else(|| usage(procname))?;
-
-    let new_meta_n = meta_n.clone() + "~";
-    let mut new_meta = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&new_meta_n)
-        .unwrap();
-
-    let (mut dev, meta) = open(&meta_n, true).unwrap();
-    let rng = &mut rand::thread_rng();
-    add_files(&mut dev, args, rng)?;
-
-    let Meta {
-        store, key, pitch, ..
-    } = meta;
-    let root = dev.commit(rng).unwrap().unwrap().0;
-
-    let cfg = format!(
-        "\
-store {store}
-key   {key:064x}
-pitch {pitch}
-root  {root}
-"
-    );
-    use io::Write;
-    new_meta.write_all(cfg.as_bytes()).unwrap();
-
-    fs::rename(new_meta_n, meta_n).unwrap();
+    println!("APPENDER_CLI_KEY={key:064x}");
 
     Ok(())
 }
@@ -211,13 +107,12 @@ fn cmd_get<A>(procname: &str, mut args: A) -> Result<(), i32>
 where
     A: Iterator<Item = String>,
 {
-    let meta = args.next().ok_or_else(|| usage(procname))?;
+    let store = args.next().ok_or_else(|| usage(procname))?;
     let key = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let key = appender::Hash(parse_hex::<32>(&key).unwrap());
-    let (mut dev, _) = open(&meta, false).unwrap();
-
+    let key = appender::Hash(parse_hex(&key).unwrap());
+    let dev = new_reader(&store).unwrap();
     match dev.get(&key).unwrap() {
         None => {
             eprintln!("no object with key {key:?}");
@@ -239,15 +134,15 @@ fn cmd_list<A>(procname: &str, mut args: A) -> Result<(), i32>
 where
     A: Iterator<Item = String>,
 {
-    let meta = args.next().ok_or_else(|| usage(procname))?;
+    let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (mut dev, _) = open(&meta, false).unwrap();
-
+    let dev = new_reader(&store).unwrap();
     dev.iter_with(|key| {
         println!("{key:?}");
         false
-    });
+    })
+    .unwrap();
 
     Ok(())
 }
@@ -258,8 +153,7 @@ fn start() -> Result<(), i32> {
     let procname = procname.as_deref().unwrap_or("appender-cli");
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
-        "init" => cmd_init(procname, args),
-        "add" => cmd_add(procname, args),
+        "new" => cmd_new(procname, args),
         "get" => cmd_get(procname, args),
         "list" => cmd_list(procname, args),
         _ => Err(usage(procname)),
