@@ -134,7 +134,14 @@ A few container formats are defined to integrate with existing systems.
 ### Plain container
 
 The plain container starts with the magic string "Plainey Appender".
-It ends with an unencrypted pack reference.
+It ends with a metadata table and an unencrypted pack reference.
+
+To support various usecases, it provides a table of key-value pairs.
+Keys must be valid UTF-8.
+Keys are prefixed with a 8-bit length in bytes.
+Values may be any arbitrary data.
+Values are prefixed with a 16-bit length in bytes.
+The table is suffixed with a 32-bit length in bytes.
 
 ### UNIX container
 

@@ -1,4 +1,4 @@
-use crate::{args_end, new_builder, usage};
+use crate::{Meta, args_end, finish, new_builder, usage};
 use appender::{Hash, Object};
 use chrono::prelude::*;
 use std::{
@@ -159,10 +159,9 @@ where
     let mut stat = Stat::default();
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
     println!("d {root_key:?} {root}");
-    let (mut dev, packref) = dev.finish().unwrap();
-    let packref = packref.unwrap();
-    dev.write_all(&root_key.0).unwrap();
-    dev.write_all(&packref.0).unwrap();
+    let mut meta = Meta::default();
+    meta.map.insert("unix.root".into(), root_key.0.into());
+    let mut dev = finish(dev, meta).unwrap();
 
     let pack_size = dev.metadata().unwrap().len();
     let Stat { size_sum } = stat;
@@ -313,13 +312,9 @@ fn add_symlink(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i
 }
 
 fn new_reader(store: &str) -> io::Result<(Reader, Hash)> {
-    let mut dev = fs::OpenOptions::new().read(true).open(store)?;
-    dev.seek(io::SeekFrom::End(-72 - 32)).unwrap();
-    let mut key = Hash([0; 32]);
-    let mut packref = appender::PackRef([0; 72]);
-    dev.read_exact(&mut key.0)?;
-    dev.read_exact(&mut packref.0)?;
-    let dev = Reader::new(dev, Default::default(), packref).unwrap();
+    let (dev, meta) = super::new_reader(store)?;
+    let key = &meta.map["unix.root"];
+    let key = Hash((&**key).try_into().unwrap());
     Ok((dev, key))
 }
 
