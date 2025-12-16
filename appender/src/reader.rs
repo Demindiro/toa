@@ -46,7 +46,7 @@ where
     C: Cache<Box<[u8]>>,
 {
     pub fn new(device: D, cache: C, key: Key, pack: PackRef) -> Result<Self, Error<D::Error>> {
-        let pack = pack::Pack::decrypt(pack.0, &key).unwrap();
+        let pack = pack::Pack::decrypt(pack.0, &key).map_err(Error::Crypto)?;
         Ok(Self {
             pack,
             cache,
