@@ -12,7 +12,7 @@ pub mod record;
 
 pub use builder::Builder;
 pub use chacha20poly1305::Key;
-pub use reader::{Reader, cache};
+pub use reader::{Object, Reader, cache};
 
 use chacha20poly1305::Nonce;
 use core::fmt;
