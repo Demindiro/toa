@@ -1,7 +1,7 @@
 use super::{Leaf2, Nibble, NibbleIndex};
 use crate::{Hash, ObjectPointer, PackOffset};
 use alloc::boxed::Box;
-use core::mem;
+use core::{fmt, mem};
 
 #[derive(Debug)]
 pub(crate) struct ObjectTrie {
@@ -23,19 +23,17 @@ enum InsertNode<'a> {
     Leaf(NibbleIndex, &'a mut Node),
 }
 
-#[derive(Debug)]
 enum Node {
     Parent(Parent),
     Leaf(Leaf),
 }
 
-#[derive(Debug)]
 struct Parent {
     population: u16,
     branches: Box<[Node]>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Leaf {
     hash: Hash,
     ptr: ObjectPointer,
@@ -214,5 +212,44 @@ impl Leaf {
             len: self.ptr.len,
         }
         .into_bytes())
+    }
+}
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Leaf(x) => x.fmt(f),
+            Self::Parent(x) => x.fmt(f),
+        }
+    }
+}
+
+impl fmt::Debug for Parent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_map();
+        // to panic or not to?
+        // probably not, given Debug is especially useful when panicking
+        let mut it = self.branches.iter();
+        for i in (0..16).filter(|i| self.population >> i & 1 != 0) {
+            let Some(x) = it.next() else {
+                let _ = f.entry(&format_args!("{:x}", i), &"<???>");
+                continue;
+            };
+            f.entry(&format_args!("{:x}", i), &x);
+        }
+        for x in it {
+            f.entry(&"<???>", &x);
+        }
+        f.finish()
+    }
+}
+
+impl fmt::Debug for Leaf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?} -> {:#x}+{}",
+            self.hash, self.ptr.offset.0, self.ptr.len
+        )
     }
 }
