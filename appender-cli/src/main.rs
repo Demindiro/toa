@@ -8,6 +8,11 @@ use std::{
 type Builder = appender::Builder<File>;
 type Reader = appender::Reader<File, appender::cache::MicroLru<Box<[u8]>>>;
 
+#[derive(Default)]
+struct Stat {
+    size_sum: u64,
+}
+
 fn usage(procname: &str) -> i32 {
     eprint!(
         "\
@@ -73,17 +78,19 @@ fn new_reader(store: &str) -> io::Result<Reader> {
     Ok(dev)
 }
 
-fn add_files<A>(dev: &mut Builder, args: A) -> Result<(), i32>
+fn add_files<A>(dev: &mut Builder, args: A) -> Result<Stat, i32>
 where
     A: Iterator<Item = String>,
 {
+    let mut stat = Stat::default();
     for file in args {
         // TODO don't read huge files in one go
         let data = fs::read(&file).unwrap();
         let key = dev.add(&data).unwrap();
         println!("{key:?} {file}");
+        stat.size_sum += u64::try_from(data.len()).unwrap();
     }
-    Ok(())
+    Ok(stat)
 }
 
 fn cmd_new<A>(procname: &str, mut args: A) -> Result<(), i32>
@@ -93,12 +100,17 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
 
     let mut dev = new_builder(&store).unwrap();
-    add_files(&mut dev, args)?;
+    let stat = add_files(&mut dev, args)?;
     let (mut dev, key, packref) = dev.finish().unwrap();
     let packref = packref.unwrap();
     dev.write_all(&packref.0).unwrap();
 
     println!("APPENDER_CLI_KEY={key:064x}");
+
+    let pack_size = dev.metadata().unwrap().len();
+    let Stat { size_sum } = stat;
+    let ratio = size_sum as f64 / pack_size as f64;
+    println!("pack size: {pack_size}, files size: {size_sum}, ratio: {ratio}");
 
     Ok(())
 }
