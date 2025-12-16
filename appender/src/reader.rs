@@ -2,6 +2,7 @@ pub mod cache;
 
 use crate::{
     DEPTH, Hash, Key, ObjectPointer, PITCH, PackOffset, PackRef, device, object, pack, record,
+    record::{CompressionAlgorithm, UnknownCompressionAlgorithm},
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -32,7 +33,11 @@ pub struct Object<'a, D, C> {
 pub enum Error<D> {
     Device(D),
     Crypto(chacha20poly1305::Error),
+    UnknownCompressionAlgorithm,
+    CorruptedCompression,
 }
+
+struct CorruptedCompression;
 
 impl<D, C> Reader<D, C> {
     pub fn into_device_key(self) -> (D, Key) {
@@ -84,7 +89,7 @@ where
                 &data[record::Entry::LEN * i..][..record::Entry::LEN]
                     .try_into()
                     .expect("exact bytes"),
-            );
+            )?;
         }
         let offset = usize::try_from(offset.0 & MASK).expect("1<<PITCH < usize");
         let x = self.read_record(0, index(0), &cur)?;
@@ -122,8 +127,9 @@ where
         let nonce = crate::record_nonce(depth, index);
         ChaCha12Poly1305::new(&self.key)
             .decrypt_in_place_detached(&nonce, &[], &mut data, &entry.tag)
-            .map(|()| data.into())
-            .map_err(Error::Crypto)
+            .map_err(Error::Crypto)?;
+        let len = usize::try_from(entry.uncompressed_len).expect("u32 <= usize");
+        Ok(decompress(data, len, entry.compression_algorithm)?)
     }
 
     fn reader(&self) -> impl FnMut(PackOffset, &mut [u8]) -> Result<(), Error<D::Error>> + '_ {
@@ -208,4 +214,41 @@ where
     D: device::Read,
     C: Cache<Box<[u8]>>,
 {
+}
+
+impl<D> From<UnknownCompressionAlgorithm> for Error<D> {
+    fn from(_: UnknownCompressionAlgorithm) -> Self {
+        Self::UnknownCompressionAlgorithm
+    }
+}
+
+impl<D> From<CorruptedCompression> for Error<D> {
+    fn from(_: CorruptedCompression) -> Self {
+        Self::CorruptedCompression
+    }
+}
+
+fn decompress<'a>(
+    data: Vec<u8>,
+    uncompressed_len: usize,
+    algorithm: CompressionAlgorithm,
+) -> Result<Vec<u8>, CorruptedCompression> {
+    match algorithm {
+        // TODO should we allow trimming trailing zeros?
+        CompressionAlgorithm::None if data.len() != uncompressed_len => Err(CorruptedCompression),
+        CompressionAlgorithm::None => Ok(data),
+        CompressionAlgorithm::Lz4 => todo!("lz4"),
+        CompressionAlgorithm::Zstd => decompress_zstd(data, uncompressed_len),
+    }
+}
+
+fn decompress_zstd(
+    data: Vec<u8>,
+    uncompressed_len: usize,
+) -> Result<Vec<u8>, CorruptedCompression> {
+    let mut b = vec![0; uncompressed_len];
+    let real_len = zstd_safe::decompress(&mut *b, &data).map_err(|_| CorruptedCompression)?;
+    (real_len == b.len())
+        .then_some(b)
+        .ok_or(CorruptedCompression)
 }

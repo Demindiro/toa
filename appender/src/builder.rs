@@ -2,6 +2,7 @@ use crate::{
     DEPTH, Hash, ObjectPointer, PITCH, PackOffset, PackRef, device,
     object::builder::{Find, ObjectTrie},
     pack, record,
+    record::CompressionAlgorithm,
 };
 use alloc::vec::Vec;
 use chacha20poly1305::{
@@ -175,13 +176,19 @@ impl RecordWriter {
     }
 }
 
-fn pack_record(key: &Key, depth: u32, index: u64, data: &mut [u8]) -> (Tag, Vec<u8>) {
-    let mut data = data.to_vec();
+fn compress<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> (&'a mut [u8], CompressionAlgorithm) {
+    match compress_zstd(data, buf) {
+        Ok(()) => (buf, CompressionAlgorithm::Zstd),
+        Err(()) => (data, CompressionAlgorithm::None),
+    }
+}
+
+fn encrypt(key: &Key, depth: u32, index: u64, data: &mut [u8]) -> Tag {
     let nonce = crate::record_nonce(depth, index);
     let tag = ChaCha12Poly1305::new(key)
-        .encrypt_in_place_detached(&nonce, &[], &mut data)
+        .encrypt_in_place_detached(&nonce, &[], data)
         .expect("failed to encrypt data");
-    (tag, data)
+    tag
 }
 
 fn write_record<D>(
@@ -194,15 +201,17 @@ fn write_record<D>(
 where
     D: device::Write,
 {
+    let mut compress_buf = Vec::new();
     let uncompressed_len = u32::try_from(buf.len()).unwrap();
-    let (tag, record) = pack_record(key, depth, index, buf);
-    let compressed_len = u32::try_from(record.len()).unwrap();
-    let offset = dev.append(&record).map_err(Error::Device)?;
+    let (data, compression_algorithm) = compress(buf, &mut compress_buf);
+    let compressed_len = u32::try_from(data.len()).unwrap();
+    let tag = encrypt(key, depth, index, data);
+    let offset = dev.append(data).map_err(Error::Device)?;
     buf.clear();
     Ok(record::Entry {
         tag,
         offset,
-        compression_algorithm: 0,
+        compression_algorithm,
         compressed_len,
         uncompressed_len,
     })
@@ -243,4 +252,15 @@ where
         .flush()
         .map(|(buf, index)| write_record(dev, key, depth, index, buf))
         .transpose()
+}
+
+fn compress_zstd<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> Result<(), ()> {
+    // TODO make compression level configurable
+    buf.clear();
+    buf.resize(data.len(), 0);
+    let len =
+        zstd_safe::compress(&mut **buf, data, zstd_safe::CompressionLevel::MAX).map_err(|_| ())?;
+    // if only Vec had a separate shrink method...
+    buf.resize_with(len, || unreachable!());
+    Ok(())
 }
