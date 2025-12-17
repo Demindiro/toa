@@ -70,11 +70,11 @@ A record trie represents an address spase containing arbitrary data.
 Leaf records consist only of plain data.
 Parent records consist of pointers to other nodes.
 
-Records have a maximum uncompressed length of 256KiB.
+Records have a maximum uncompressed length of 128KiB.
 The trie always has a depth of 3.
 
-!!! note `18 + (18 - 5) * 3 = 57`,
-    i.e. a single pack can contain up to 128PiB of data.
+!!! note `17 + (17 - 5) * 3 = 53`,
+    i.e. a single pack can contain up to 8PiB of data.
 
 Keep in mind that records are encrypted,
 hence the poly1305 hash.
@@ -83,10 +83,13 @@ hence the poly1305 hash.
 | -----:|:--------------------- |
 |  15:0 | poly1305 tag          |
 | 23:16 | byte offset           |
-| 24:24 | compression algorithm |
-| 27:25 | compressed length     |
-| 28:28 | (zero)                |
-| 31:29 | uncompressed length   |
+| 27:24 | compressed info   (1) |
+| 31:28 | uncompressed info (2) |
+
+| bits  | description                |
+| -----:|:-------------------------- |
+|  13:0 | algorithm (1) / (zero) (2) |
+| 31:14 | length in bytes            |
 
 The low 64 bits of the nonce is the record index in little-endian.
 The high 32 bits of the nonce is the depth in little-endian,

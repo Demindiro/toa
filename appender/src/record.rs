@@ -8,7 +8,7 @@ pub enum CompressionAlgorithm {
 }
 
 #[derive(Clone, Debug)]
-pub struct UnknownCompressionAlgorithm(pub u8);
+pub struct UnknownCompressionAlgorithm(pub u32);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Entry {
@@ -23,33 +23,38 @@ impl Entry {
     pub const LEN: usize = 32;
 
     pub fn into_bytes(self) -> [u8; Self::LEN] {
-        assert!(self.compressed_len < 1 << 24);
-        assert!(self.uncompressed_len < 1 << 24);
+        assert!(self.compressed_len <= 1 << 18);
+        assert!(self.uncompressed_len <= 1 << 18);
         let mut buf = [0; Self::LEN];
         buf[0..16].copy_from_slice(self.tag.as_slice());
         buf[16..24].copy_from_slice(&self.offset.to_le_bytes());
-        buf[24] = self.compression_algorithm as u8;
-        buf[25..28].copy_from_slice(&self.compressed_len.to_le_bytes()[..3]);
-        buf[28] = 0;
-        buf[29..32].copy_from_slice(&self.uncompressed_len.to_le_bytes()[..3]);
+        let x = self.compressed_len << 14 | self.compression_algorithm as u32;
+        let y = self.uncompressed_len << 14;
+        buf[24..28].copy_from_slice(&x.to_le_bytes());
+        buf[28..32].copy_from_slice(&y.to_le_bytes());
         buf
     }
 
     pub fn from_bytes(b: &[u8; Self::LEN]) -> Result<Self, UnknownCompressionAlgorithm> {
+        let x = u32::from_le_bytes(b[24..28].try_into().unwrap());
+        let y = u32::from_le_bytes(b[28..32].try_into().unwrap());
+        let compression_algorithm = (x & 0x3fff).try_into()?;
+        let compressed_len = x >> 14;
+        let uncompressed_len = y >> 14;
         Ok(Self {
             tag: *Tag::from_slice(&b[0..16]),
             offset: u64::from_le_bytes(b[16..24].try_into().unwrap()),
-            compression_algorithm: b[24].try_into()?,
-            compressed_len: u32::from_le_bytes(b[24..28].try_into().unwrap()) >> 8,
-            uncompressed_len: u32::from_le_bytes(b[28..32].try_into().unwrap()) >> 8,
+            compression_algorithm,
+            compressed_len,
+            uncompressed_len,
         })
     }
 }
 
-impl TryFrom<u8> for CompressionAlgorithm {
+impl TryFrom<u32> for CompressionAlgorithm {
     type Error = UnknownCompressionAlgorithm;
 
-    fn try_from(x: u8) -> Result<Self, Self::Error> {
+    fn try_from(x: u32) -> Result<Self, Self::Error> {
         Ok(match x {
             0 => Self::None,
             1 => Self::Lz4,

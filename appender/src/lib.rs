@@ -18,7 +18,7 @@ use chacha20poly1305::Nonce;
 use core::fmt;
 
 const DEPTH: u8 = 3;
-const PITCH: u8 = 18;
+const PITCH: u8 = 17;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
