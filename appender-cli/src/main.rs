@@ -139,6 +139,7 @@ fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32>
     // SAFETY: other processes cannot modify CoW mappings
     let data = unsafe {
         memmap2::MmapOptions::new()
+            .populate()
             .map_copy_read_only(&data)
             .unwrap()
     };
