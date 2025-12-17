@@ -1,7 +1,7 @@
-use crate::{Builder, Meta, Reader, Stat, add_file, args_end, finish, new_builder, usage};
+use crate::{Builder, Meta, Reader, Result, Stat, add_file, args_end, finish, new_builder, usage};
 use appender::{Hash, Object};
 use chrono::prelude::*;
-use std::{fmt, fs, io, io::Write};
+use std::{fmt, fs, io::Write};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
 
@@ -118,7 +118,7 @@ impl fmt::Display for DirItem {
     }
 }
 
-pub fn cmd<A>(procname: &str, mut args: A) -> Result<(), i32>
+pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
@@ -131,7 +131,7 @@ where
     }
 }
 
-fn cmd_new<A>(procname: &str, mut args: A) -> Result<(), i32>
+fn cmd_new<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
@@ -155,7 +155,7 @@ where
     Ok(())
 }
 
-fn cmd_get<A>(procname: &str, mut args: A) -> Result<(), i32>
+fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
@@ -175,7 +175,7 @@ where
     Ok(())
 }
 
-fn cmd_ls<A>(procname: &str, mut args: A) -> Result<(), i32>
+fn cmd_ls<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
@@ -191,7 +191,7 @@ where
     Ok(())
 }
 
-fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> {
+fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
     // TODO support other platforms
     use std::os::unix::fs::MetadataExt;
 
@@ -281,30 +281,28 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> 
     Ok(dev.add(&buf).unwrap())
 }
 
-fn add_symlink(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> {
+fn add_symlink(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
     let link = fs::read_link(path).unwrap();
     let link = link.to_str().unwrap_or_else(|| todo!("invalid UTF-8 path"));
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
     Ok(dev.add(link.as_bytes()).unwrap())
 }
 
-fn new_reader(store: &str) -> io::Result<(Reader, Hash)> {
+fn new_reader(store: &str) -> Result<(Reader, Hash)> {
     let (dev, meta) = super::new_reader(store)?;
     let key = &meta.map["unix.root"];
     let key = Hash((&**key).try_into().unwrap());
     Ok((dev, key))
 }
 
-fn traverse_path(dev: &Reader, path: &str, mut start: Hash) -> Result<Hash, i32> {
+fn traverse_path(dev: &Reader, path: &str, mut start: Hash) -> Result<Hash> {
     let mut is_dir = true;
     for p in path.split("/").filter(|x| !x.is_empty()) {
         if !is_dir {
-            eprintln!("not a directory");
-            return Err(1);
+            return Err("not a directory".into());
         }
         let Some(x) = DirIter::new(&dev, &start).find(|x| x.name == p) else {
-            eprintln!("directory not found");
-            return Err(1);
+            return Err("directory not found".into());
         };
         is_dir = matches!(&x.ty, DirItemType::Dir);
         start = x.key;
