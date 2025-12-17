@@ -1,5 +1,6 @@
 mod unix;
 
+use appender::Hash;
 use std::{
     collections::BTreeMap,
     fs,
@@ -127,13 +128,22 @@ where
 {
     let mut stat = Stat::default();
     for file in args {
-        // TODO don't read huge files in one go
-        let data = fs::read(&file).unwrap();
-        let key = dev.add(&data).unwrap();
+        let key = add_file(dev, &file, &mut stat)?;
         println!("{key:?} {file}");
-        stat.size_sum += u64::try_from(data.len()).unwrap();
     }
     Ok(stat)
+}
+
+fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> {
+    let data = fs::OpenOptions::new().read(true).open(path).unwrap();
+    // SAFETY: other processes cannot modify CoW mappings
+    let data = unsafe {
+        memmap2::MmapOptions::new()
+            .map_copy_read_only(&data)
+            .unwrap()
+    };
+    stat.size_sum += u64::try_from(data.len()).unwrap();
+    Ok(dev.add(&data).unwrap())
 }
 
 fn finish(dev: Builder, meta: Meta) -> io::Result<fs::File> {

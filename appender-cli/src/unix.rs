@@ -1,17 +1,9 @@
-use crate::{Meta, args_end, finish, new_builder, usage};
+use crate::{Builder, Meta, Reader, Stat, add_file, args_end, finish, new_builder, usage};
 use appender::{Hash, Object};
 use chrono::prelude::*;
-use std::{fmt, fs, fs::File, io, io::Write};
+use std::{fmt, fs, io, io::Write};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
-
-type Builder = appender::Builder<File>;
-type Reader = appender::Reader<File, appender::cache::MicroLru<Box<[u8]>>>;
-
-#[derive(Default)]
-struct Stat {
-    size_sum: u64,
-}
 
 struct DirIter<'a> {
     object: Object<'a, Reader>,
@@ -197,13 +189,6 @@ where
     DirIter::new(&dev, &dir).for_each(|e| println!("{e}"));
 
     Ok(())
-}
-
-fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> {
-    // TODO don't read huge files in one go
-    let data = fs::read(path).unwrap();
-    stat.size_sum += u64::try_from(data.len()).unwrap();
-    Ok(dev.add(&data).unwrap())
 }
 
 fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> {
