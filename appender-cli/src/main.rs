@@ -147,16 +147,23 @@ where
 }
 
 fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
-    let data = fs::OpenOptions::new().read(true).open(path).unwrap();
-    // SAFETY: other processes cannot modify CoW mappings
+    let data = fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| format!("failed to open {path:?}: {e}"))?;
+    // FIXME other processes *can* modify "CoW" mappings,
+    // so that's a very big problem...
     let data = unsafe {
         memmap2::MmapOptions::new()
             .populate()
             .map_copy_read_only(&data)
-            .unwrap()
+            .map_err(|e| format!("failed to memory-map {path:?}: {e}"))?
     };
-    stat.size_sum += u64::try_from(data.len()).unwrap();
-    Ok(dev.add(&data).unwrap())
+    stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
+    let key = dev
+        .add(&data)
+        .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
+    Ok(key)
 }
 
 fn finish(dev: Builder, meta: Meta) -> Result<fs::File> {
