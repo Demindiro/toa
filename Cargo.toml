@@ -4,3 +4,7 @@ members = ["appender", "appender-cli"]
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
