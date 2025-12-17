@@ -8,11 +8,6 @@ pub(crate) struct ObjectTrie {
     root: Node,
 }
 
-pub(crate) enum Find<'a, 'h> {
-    None(Insert<'a, 'h>),
-    Object(ObjectPointer),
-}
-
 pub(crate) struct Insert<'a, 'h> {
     replace: InsertNode<'a>,
     key: &'h Hash,
@@ -46,8 +41,7 @@ impl ObjectTrie {
         }
     }
 
-    pub fn find<'a, 'h>(&'a mut self, key: &'h Hash) -> Find<'a, 'h> {
-        let none = |replace| Find::None(Insert { replace, key });
+    pub fn try_insert<'a, 'h>(&'a mut self, key: &'h Hash) -> Option<Insert<'a, 'h>> {
         let mut cur = &mut self.root;
         let mut index = NibbleIndex(0);
         loop {
@@ -56,18 +50,19 @@ impl ObjectTrie {
                     let nibble = index.get(key);
                     // https://github.com/rust-lang/rust/issues/21906
                     if !x.contains_nibble(nibble) {
-                        break Find::None(Insert {
+                        break Some(Insert {
                             replace: InsertNode::Parent(nibble, x),
                             key,
                         });
                     }
                     cur = x.get_mut(nibble).expect("contains nibble");
                 }
-                Node::Leaf(Leaf { hash, ptr }) => {
+                Node::Leaf(Leaf { hash, .. }) => {
                     break if hash == key {
-                        Find::Object(*ptr)
+                        None
                     } else {
-                        none(InsertNode::Leaf(index, cur))
+                        let replace = InsertNode::Leaf(index, cur);
+                        Some(Insert { replace, key })
                     };
                 }
             }
@@ -83,19 +78,6 @@ impl ObjectTrie {
             assert_eq!(x.len() % 8, 0);
             (f)(x).inspect(|x| assert_eq!(x.0 % 8, 0))
         })
-    }
-}
-
-impl Find<'_, '_> {
-    pub fn is_none(&self) -> bool {
-        matches!(self, Self::None(_))
-    }
-
-    pub fn into_object(self) -> Option<ObjectPointer> {
-        match self {
-            Self::Object(ptr) => Some(ptr),
-            _ => None,
-        }
     }
 }
 
@@ -169,10 +151,6 @@ impl Parent {
 
     fn contains_nibble(&self, nibble: Nibble) -> bool {
         self.nibble_to_index(nibble).is_some()
-    }
-
-    fn get(&self, nibble: Nibble) -> Option<&Node> {
-        self.nibble_to_index(nibble).map(|i| &self.branches[i])
     }
 
     fn get_mut(&mut self, nibble: Nibble) -> Option<&mut Node> {

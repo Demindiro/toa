@@ -1,14 +1,7 @@
 use crate::{Meta, args_end, finish, new_builder, usage};
 use appender::{Hash, Object};
 use chrono::prelude::*;
-use std::{
-    collections::HashMap,
-    fmt, fs,
-    fs::File,
-    io,
-    io::{Read, Seek, Write},
-    path::PathBuf,
-};
+use std::{fmt, fs, fs::File, io, io::Write};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
 
@@ -126,7 +119,6 @@ impl fmt::Display for DirItem {
         let permissions = [g(b >> 6), g(b >> 3), g(b)];
         let permissions = core::str::from_utf8(permissions.as_flattened()).expect("ascii");
         let modified: DateTime<Utc> = DateTime::from_timestamp_micros(*modified).expect("in range");
-        use fmt::Write;
         write!(
             f,
             "{key:?} {ty}{permissions} {uid}:{gid} {modified:?} {name}"
@@ -161,7 +153,7 @@ where
     println!("d {root_key:?} {root}");
     let mut meta = Meta::default();
     meta.map.insert("unix.root".into(), root_key.0.into());
-    let mut dev = finish(dev, meta).unwrap();
+    let dev = finish(dev, meta).unwrap();
 
     let pack_size = dev.metadata().unwrap().len();
     let Stat { size_sum } = stat;
@@ -216,7 +208,7 @@ fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32>
 
 fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash, i32> {
     // TODO support other platforms
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::MetadataExt;
 
     struct Entry {
         type_perms: u16,

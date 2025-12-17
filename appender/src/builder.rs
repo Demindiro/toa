@@ -1,19 +1,15 @@
 use crate::{
-    DEPTH, Hash, ObjectPointer, PITCH, PackOffset, PackRef, device,
-    object::builder::{Find, ObjectTrie},
-    pack, record,
-    record::CompressionAlgorithm,
+    DEPTH, Hash, ObjectPointer, PITCH, PackOffset, PackRef, device, object::builder::ObjectTrie,
+    pack, record, record::CompressionAlgorithm,
 };
 use alloc::vec::Vec;
 use chacha20poly1305::{
     AeadInPlace, ChaCha12Poly1305, Key, KeyInit, Tag,
     aead::rand_core::{CryptoRng, RngCore},
 };
-use core::mem;
 
 pub struct Builder<D> {
     key: Key,
-    next_record: Vec<u8>,
     pack_len: PackOffset,
     writers: [RecordWriter; 1 + DEPTH as usize],
     objects: Option<ObjectTrie>,
@@ -38,7 +34,6 @@ impl<D> Builder<D> {
     {
         Self {
             key: ChaCha12Poly1305::generate_key(rng),
-            next_record: Default::default(),
             pack_len: PackOffset(0),
             writers: Default::default(),
             objects: None,
@@ -63,12 +58,12 @@ where
             self.objects = Some(ObjectTrie::with_leaf(&key, ObjectPointer { offset, len }));
             return Ok(key);
         };
-        let insert = match objects.find(&key) {
-            Find::Object(_) => {
+        let insert = match objects.try_insert(&key) {
+            None => {
                 self.objects = Some(objects);
                 return Ok(key);
             }
-            Find::None(x) => x,
+            Some(x) => x,
         };
         let offset = match self.write(data) {
             Ok(x) => x,
@@ -174,10 +169,6 @@ impl RecordWriter {
 
     fn remaining(&self) -> usize {
         (1 << PITCH) - self.data.len()
-    }
-
-    fn is_full(&self) -> bool {
-        self.remaining() == 0
     }
 }
 

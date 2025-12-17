@@ -136,7 +136,7 @@ where
     Ok(stat)
 }
 
-fn finish(mut dev: Builder, meta: Meta) -> io::Result<fs::File> {
+fn finish(dev: Builder, meta: Meta) -> io::Result<fs::File> {
     let (mut dev, packref) = dev.finish().unwrap();
     let packref = packref.unwrap();
     let mut meta_size = 0;
@@ -164,7 +164,7 @@ where
 
     let mut dev = new_builder(&store).unwrap();
     let stat = add_files(&mut dev, args)?;
-    let mut dev = finish(dev, Meta::default()).unwrap();
+    let dev = finish(dev, Meta::default()).unwrap();
 
     let pack_size = dev.metadata().unwrap().len();
     let Stat { size_sum } = stat;

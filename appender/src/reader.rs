@@ -1,13 +1,13 @@
 pub mod cache;
 
 use crate::{
-    DEPTH, Hash, Key, ObjectPointer, PITCH, PackOffset, PackRef, device, object, pack, record,
+    DEPTH, Hash, ObjectPointer, PITCH, PackOffset, PackRef, device, object, pack, record,
     record::{CompressionAlgorithm, UnknownCompressionAlgorithm},
 };
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use cache::{Cache, MicroLru};
-use chacha20poly1305::{AeadInPlace, ChaCha12Poly1305, KeyInit, Tag};
+use cache::Cache;
+use chacha20poly1305::{AeadInPlace, ChaCha12Poly1305, KeyInit};
 
 pub struct Reader<D, C> {
     pack: pack::Pack,
