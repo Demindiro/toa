@@ -35,15 +35,17 @@ impl Entry {
         buf
     }
 
-    pub fn from_bytes(b: &[u8; Self::LEN]) -> Result<Self, UnknownCompressionAlgorithm> {
-        let x = u32::from_le_bytes(b[24..28].try_into().unwrap());
-        let y = u32::from_le_bytes(b[28..32].try_into().unwrap());
+    pub fn from_bytes(data: &[u8; Self::LEN]) -> Result<Self, UnknownCompressionAlgorithm> {
+        let [data @ .., a, b, c, d, e, f, g, h] = *data;
+        let [x, y] = [[a, b, c, d], [e, f, g, h]].map(u32::from_le_bytes);
+        let [tag @ .., a, b, c, d, e, f, g, h] = data;
+        let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let compression_algorithm = (x & 0x3fff).try_into()?;
         let compressed_len = x >> 14;
         let uncompressed_len = y >> 14;
         Ok(Self {
-            tag: *Tag::from_slice(&b[0..16]),
-            offset: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+            tag: *Tag::from_slice(&tag),
+            offset,
             compression_algorithm,
             compressed_len,
             uncompressed_len,

@@ -27,12 +27,12 @@ impl Leaf2 {
         buf
     }
 
-    fn from_bytes(b: &[u8; 48]) -> Self {
-        Self {
-            hash: b[..32].try_into().unwrap(),
-            offset: u64::from_le_bytes(b[32..40].try_into().unwrap()),
-            len: u64::from_le_bytes(b[40..].try_into().unwrap()),
-        }
+    fn from_bytes(data: &[u8; 48]) -> Self {
+        let [data @ .., a, b, c, d, e, f, g, h] = *data;
+        let len = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let [hash @ .., a, b, c, d, e, f, g, h] = data;
+        let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        Self { hash, offset, len }
     }
 }
 

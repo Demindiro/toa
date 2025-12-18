@@ -50,7 +50,7 @@ where
     C: Cache<Box<[u8]>>,
 {
     pub fn new(device: D, cache: C, pack: PackRef) -> Result<Self, Error<D::Error>> {
-        let pack = pack::Pack::from_bytes(pack.0);
+        let pack = pack::Pack::from_bytes(pack.0)?;
         Ok(Self {
             pack,
             cache,
