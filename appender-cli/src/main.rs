@@ -226,7 +226,7 @@ fn finish(dev: Builder, meta: Meta) -> Result<fs::File> {
 }
 
 fn dump_object(dev: &Reader, key: &Hash) -> Result<()> {
-    let mut obj = dev.get(&key)?;
+    let obj = dev.get(&key)?;
     let mut out = io::stdout().lock();
     let e = |e| format!("failed to read object: {e:?}");
     for data in obj.read_exact(0, usize::MAX).map_err(e)? {

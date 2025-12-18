@@ -32,7 +32,7 @@ enum DirItemType {
 
 impl<'a> DirIter<'a> {
     fn new(dev: &'a Reader, key: &Hash) -> Result<Self> {
-        let mut object = dev.get(key)?;
+        let object = dev.get(key)?;
         let hdr = object
             .read_exact(0, 32)
             .and_then(|x| x.into_bytes())

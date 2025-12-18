@@ -18,7 +18,7 @@ pub struct Reader<D, C> {
 pub type Read = Vec<u8>;
 
 pub struct IterRead<'o, 'r, T> {
-    object: &'o mut Object<'r, T>,
+    object: &'o Object<'r, T>,
     offset: u64,
     remaining: usize,
 }
@@ -153,7 +153,7 @@ where
     D: device::Read,
     C: Cache<Box<[u8]>>,
 {
-    pub fn read(&mut self, offset: u64, len: usize) -> Result<Read, Error<D::Error>> {
+    pub fn read(&self, offset: u64, len: usize) -> Result<Read, Error<D::Error>> {
         if self.ptr.len <= offset {
             return Ok([].into());
         }
@@ -166,7 +166,7 @@ where
 
     // TODO len shouldn't be usize but u64
     pub fn read_exact<'o>(
-        &'o mut self,
+        &'o self,
         offset: u64,
         len: usize,
     ) -> Result<IterRead<'o, 'a, Reader<D, C>>, Error<D::Error>> {
