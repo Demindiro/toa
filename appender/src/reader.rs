@@ -80,17 +80,22 @@ where
         const RECORD_MASK: u64 = MASK / record::Entry::LEN as u64;
         const RLEN_P2: u8 = record::Entry::LEN.trailing_zeros() as u8;
         let index = |d| offset.0 >> (PITCH + d * (PITCH - RLEN_P2));
-        for d in (1..=DEPTH).rev() {
-            let data = self.read_record(d, index(d), &cur)?;
-            let i = usize::try_from(index(d - 1) & RECORD_MASK).expect("1<<PITCH < usize");
-            cur = record::Entry::from_bytes(
-                &data[record::Entry::LEN * i..][..record::Entry::LEN]
-                    .try_into()
-                    .expect("exact bytes"),
-            )?;
-        }
+
         let offset = usize::try_from(offset.0 & MASK).expect("1<<PITCH < usize");
-        let x = self.read_record(0, index(0), &cur)?;
+        let x = if let Some(x) = self.read_record_cache(0, index(0)) {
+            x
+        } else {
+            for d in (1..=DEPTH).rev() {
+                let data = self.read_record(d, index(d), &cur)?;
+                let i = usize::try_from(index(d - 1) & RECORD_MASK).expect("1<<PITCH < usize");
+                cur = record::Entry::from_bytes(
+                    &data[record::Entry::LEN * i..][..record::Entry::LEN]
+                        .try_into()
+                        .expect("exact bytes"),
+                )?;
+            }
+            self.read_record(0, index(0), &cur)?
+        };
         let x = &x[offset..];
         let x = &x[..len.min(x.len())];
         Ok(x.into())
@@ -109,6 +114,11 @@ where
             let x = self.read_record_nocache(depth.into(), index, entry)?;
             Ok(self.cache.insert(key, x.into()))
         }
+    }
+
+    fn read_record_cache<'s>(&'s self, depth: u8, index: u64) -> Option<C::Get<'s>> {
+        let key = cache::Key::from_depth_index(depth, index);
+        self.cache.get(key)
     }
 
     fn read_record_nocache(
