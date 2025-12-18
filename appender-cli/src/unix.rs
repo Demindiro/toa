@@ -1,12 +1,15 @@
-use crate::{Builder, Meta, Reader, Result, Stat, add_file, args_end, finish, new_builder, usage};
+use crate::{
+    Builder, InnerReader, Meta, Reader, Result, Stat, add_file, args_end, finish, new_builder,
+    usage,
+};
 use appender::{Hash, Object};
 use chrono::prelude::*;
-use std::{fmt, fs, io::Write};
+use std::{fmt, fs, path::Path};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
 
 struct DirIter<'a> {
-    object: Object<'a, Reader>,
+    object: Object<'a, InnerReader>,
     total: u64,
     cur: u64,
 }
@@ -28,56 +31,63 @@ enum DirItemType {
 }
 
 impl<'a> DirIter<'a> {
-    fn new(dev: &'a Reader, key: &Hash) -> Self {
-        let mut object = dev.get(key).unwrap().unwrap();
-        let hdr = object.read_exact(0, 32).unwrap().into_bytes().unwrap();
-        if hdr[..24] != MAGIC {
-            todo!("bad dir magic");
+    fn new(dev: &'a Reader, key: &Hash) -> Result<Self> {
+        let mut object = dev.get(key)?;
+        let hdr = object
+            .read_exact(0, 32)
+            .and_then(|x| x.into_bytes())
+            .map_err(|e| format!("failed to get directory header of {key:?}: {e:?}"))?;
+        let hdr: [u8; 32] = hdr
+            .try_into()
+            .map_err(|_| format!("{key:?} has truncated (or invalid) directory header"))?;
+        let [magic @ .., a, b, c, d, e, f, g, h] = hdr;
+        if magic != MAGIC {
+            return Err(format!("{key:?} has bad dir magic").into());
         }
-        let total = u64::from_le_bytes(hdr[24..].try_into().unwrap());
-        Self {
-            object,
-            total,
-            cur: 0,
-        }
+        let total = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let cur = 0;
+        Ok(Self { object, total, cur })
     }
-}
 
-impl Iterator for DirIter<'_> {
-    type Item = DirItem;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn try_next(&mut self) -> Result<Option<DirItem>> {
         if self.cur >= self.total {
-            return None;
+            return Ok(None);
         }
         let x = self
             .object
             .read_exact(32 + self.cur * 64, 64)
-            .unwrap()
-            .into_bytes()
-            .unwrap();
+            .and_then(|x| x.into_bytes())
+            .map_err(|e| format!("failed to get directory entry: {e:?}"))?;
+        let x: [u8; 64] = x.try_into().map_err(|_| "directory entry is truncated")?;
         self.cur += 1;
-        let ty_perms = u16::from_le_bytes(x[..2].try_into().unwrap());
+        let [a, b, x @ ..] = x;
+        let ty_perms = u16::from_le_bytes([a, b]);
         let ty = match ty_perms >> 9 {
             0 => DirItemType::File,
             1 => DirItemType::Dir,
             2 => DirItemType::SymLink,
-            _ => todo!("{ty_perms:o}"),
+            x => return Err(format!("invalid type {x} for directory entry"))?,
         };
-        let name_len = x[2];
-        let uid = u32::from_le_bytes(x[8..12].try_into().unwrap());
-        let gid = u32::from_le_bytes(x[12..16].try_into().unwrap());
-        let name_offset = u64::from_le_bytes(x[16..24].try_into().unwrap());
-        let modified = i64::from_le_bytes(x[24..32].try_into().unwrap());
-        let key = Hash(x[32..64].try_into().unwrap());
+        let [name_len, x @ ..] = x;
+        let [_, _, _, _, _, x @ ..] = x;
+        let [a, b, c, d, x @ ..] = x;
+        let uid = u32::from_le_bytes([a, b, c, d]);
+        let [a, b, c, d, x @ ..] = x;
+        let gid = u32::from_le_bytes([a, b, c, d]);
+        let [a, b, c, d, e, f, g, h, x @ ..] = x;
+        let name_offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let [a, b, c, d, e, f, g, h, x @ ..] = x;
+        let modified = i64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let key = Hash(x);
         let name = self
             .object
             .read_exact(name_offset, name_len.into())
-            .unwrap()
-            .into_bytes()
-            .unwrap();
+            .and_then(|x| x.into_bytes())
+            .map_err(|e| format!("failed to get name of directory entry: {e:?}"))?;
+        // TODO length check
+        // also use a pretty-printer like BStr
         let name = String::from_utf8_lossy(&name).to_string();
-        Some(DirItem {
+        Ok(Some(DirItem {
             ty,
             permissions: ty_perms & 0o777,
             uid,
@@ -85,7 +95,15 @@ impl Iterator for DirIter<'_> {
             name,
             modified,
             key,
-        })
+        }))
+    }
+}
+
+impl Iterator for DirIter<'_> {
+    type Item = Result<DirItem>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.try_next().transpose()
     }
 }
 
@@ -139,18 +157,15 @@ where
     let root = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let mut dev = new_builder(&store).unwrap();
+    let mut dev = new_builder(&store)?;
     let mut stat = Stat::default();
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
     println!("d {root_key:?} {root}");
     let mut meta = Meta::default();
     meta.map.insert("unix.root".into(), root_key.0.into());
-    let dev = finish(dev, meta).unwrap();
+    let dev = finish(dev, meta)?;
 
-    let pack_size = dev.metadata().unwrap().len();
-    let Stat { size_sum } = stat;
-    let ratio = size_sum as f64 / pack_size as f64;
-    println!("pack size: {pack_size}, files size: {size_sum}, ratio: {ratio}");
+    stat.summarize(&dev)?;
 
     Ok(())
 }
@@ -163,14 +178,9 @@ where
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, dir) = new_reader(&store).unwrap();
+    let (dev, dir) = new_reader(&store)?;
     let file = traverse_path(&dev, &path, dir)?;
-    let mut file = dev.get(&file).unwrap().unwrap();
-    let mut io = std::io::stdout().lock();
-    for x in file.read_exact(0, usize::MAX).unwrap() {
-        let x = x.unwrap();
-        io.write_all(&x).unwrap();
-    }
+    crate::dump_object(&dev, &file)?;
 
     Ok(())
 }
@@ -184,9 +194,9 @@ where
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
-    let (dev, dir) = new_reader(&store).unwrap();
+    let (dev, dir) = new_reader(&store)?;
     let dir = traverse_path(&dev, path, dir)?;
-    DirIter::new(&dev, &dir).for_each(|e| println!("{e}"));
+    DirIter::new(&dev, &dir)?.try_for_each(|e| e.map(|e| println!("{e}")))?;
 
     Ok(())
 }
@@ -206,11 +216,14 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
 
     let mut entries = Vec::new();
 
-    for entry in fs::read_dir(path).unwrap() {
-        let entry = entry.unwrap();
+    let e = |e| format!("failed to traverse {path:?}: {e}");
+    for entry in fs::read_dir(path).map_err(e)? {
+        let entry = entry.map_err(e)?;
         let path = entry.path();
-        let path = path.to_str().unwrap_or_else(|| todo!("invalid UTF-8 path"));
-        let ty = entry.file_type().unwrap();
+        let path = path_to_utf8(&path)?;
+        let ty = entry
+            .file_type()
+            .map_err(|e| format!("failed to get file type of {path:?}: {e}"))?;
         let (ty_s, ty_n, key) = if ty.is_file() {
             ("f", 0, add_file(dev, path, stat)?)
         } else if ty.is_dir() {
@@ -225,15 +238,17 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
         let name = entry
             .file_name()
             .to_str()
-            .unwrap()
+            .expect("already validated before")
             .to_string()
             .into_boxed_str();
         if name.len() > usize::from(u8::MAX) {
-            todo!("name too long");
+            return Err(format!("entry name {name:?} too long").into());
         }
         // rough estimate
         stat.size_sum += u64::from(2 + 2 * 4 + 8 + name.len() as u8);
-        let meta = entry.metadata().unwrap();
+        let meta = entry
+            .metadata()
+            .map_err(|e| format!("failed to get metadata of {path:?}: {e}"))?;
         let modified = i128::from(meta.mtime()) * 1_000_000 + i128::from(meta.mtime_nsec() / 1000);
         // not my problem
         let modified = i64::try_from(modified)
@@ -278,20 +293,29 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
         buf.extend(e.name.as_bytes());
     }
 
-    Ok(dev.add(&buf).unwrap())
+    dev.add(&buf)
+        .map_err(|e| format!("failed to add : {e:?}").into())
 }
 
 fn add_symlink(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
-    let link = fs::read_link(path).unwrap();
-    let link = link.to_str().unwrap_or_else(|| todo!("invalid UTF-8 path"));
+    let link =
+        fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
+    let link = path_to_utf8(&link)?;
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
-    Ok(dev.add(link.as_bytes()).unwrap())
+    dev.add(link.as_bytes())
+        .map_err(|e| format!("failed to add symbolic link: {e:?}").into())
 }
 
 fn new_reader(store: &str) -> Result<(Reader, Hash)> {
     let (dev, meta) = super::new_reader(store)?;
-    let key = &meta.map["unix.root"];
-    let key = Hash((&**key).try_into().unwrap());
+    let key = meta
+        .map
+        .get("unix.root")
+        .ok_or("meta key \"unix.root\" not found")?;
+    let key = (&**key)
+        .try_into()
+        .map(Hash)
+        .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     Ok((dev, key))
 }
 
@@ -299,13 +323,21 @@ fn traverse_path(dev: &Reader, path: &str, mut start: Hash) -> Result<Hash> {
     let mut is_dir = true;
     for p in path.split("/").filter(|x| !x.is_empty()) {
         if !is_dir {
-            return Err("not a directory".into());
+            return Err(format!("{p:?} is not a directory").into());
         }
-        let Some(x) = DirIter::new(&dev, &start).find(|x| x.name == p) else {
-            return Err("directory not found".into());
+        let Some(x) = DirIter::new(&dev, &start)?
+            .find(|x| x.is_err() || x.as_ref().is_ok_and(|x| x.name == p))
+        else {
+            return Err(format!("entry {p:?} not found").into());
         };
+        let x = x?;
         is_dir = matches!(&x.ty, DirItemType::Dir);
         start = x.key;
     }
     Ok(start)
+}
+
+fn path_to_utf8(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| format!("{path:?} is invalid UTF-8").into())
 }

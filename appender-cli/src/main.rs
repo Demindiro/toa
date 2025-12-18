@@ -1,6 +1,6 @@
 mod unix;
 
-use appender::Hash;
+use appender::{Hash, cache::MicroLru};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -8,13 +8,18 @@ use std::{
     fs::File,
     io,
     io::{Read, Seek, Write},
+    ops,
 };
 
 const MAGIC: [u8; 16] = *b"Plainey Appender";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Builder = appender::Builder<File>;
-type Reader = appender::Reader<File, appender::cache::MicroLru<Box<[u8]>>>;
+type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
+
+struct Reader {
+    inner: InnerReader,
+}
 
 #[derive(Default)]
 struct Stat {
@@ -24,6 +29,68 @@ struct Stat {
 #[derive(Default)]
 struct Meta {
     map: BTreeMap<Box<str>, Box<[u8]>>,
+}
+
+impl Reader {
+    fn new(path: &str) -> Result<(Self, Meta)> {
+        let mut dev = fs::OpenOptions::new().read(true).open(path)?;
+        let mut buf = [0; 16];
+        dev.read_exact(&mut buf)?;
+        if buf != MAGIC {
+            return Err("bad magic".into());
+        }
+
+        let mut buf = [0; 76];
+        dev.seek(io::SeekFrom::End(-76))
+            .map_err(|e| format!("seek to trailer failed: {e}"))?;
+        dev.read_exact(&mut buf)
+            .map_err(|e| format!("read of trailer failed: {e}"))?;
+
+        let [a, b, c, d, buf @ ..] = buf;
+        let len = u32::from_le_bytes([a, b, c, d]);
+        dev.seek(io::SeekFrom::End(-76 - i64::from(len)))
+            .map_err(|e| format!("seek to meta table failed: {e}"))?;
+        let mut meta = Vec::new();
+        (&mut dev)
+            .take(u64::from(len))
+            .read_to_end(&mut meta)
+            .map_err(|e| format!("seek of meta table failed: {e}"))?;
+
+        let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
+
+        let packref = appender::PackRef(buf);
+        let inner = InnerReader::new(dev, Default::default(), packref)
+            .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
+        Ok((Reader { inner }, meta))
+    }
+
+    fn get(&self, key: &Hash) -> Result<appender::Object<'_, InnerReader>> {
+        self.inner
+            .get(&key)
+            .map_err(|e| format!("failed to query store: {e:?}"))?
+            .ok_or_else(|| format!("no object with key {key:?}").into())
+    }
+}
+
+impl ops::Deref for Reader {
+    type Target = InnerReader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Stat {
+    fn summarize(self, dev: &File) -> Result<()> {
+        let pack_size = dev
+            .metadata()
+            .map_err(|e| format!("failed to get store size: {e:?}"))?
+            .len();
+        let Self { size_sum } = self;
+        let ratio = size_sum as f64 / pack_size as f64;
+        println!("pack size: {pack_size}, files size: {size_sum}, ratio: {ratio}");
+        Ok(())
+    }
 }
 
 fn usage(procname: &str) -> Box<dyn Error> {
@@ -83,40 +150,8 @@ fn new_builder(store: &str) -> Result<Builder> {
     Ok(dev)
 }
 
-fn new_reader_inner(store: &str) -> Result<(Reader, Meta)> {
-    let mut dev = fs::OpenOptions::new().read(true).open(store)?;
-    let mut buf = [0; 16];
-    dev.read_exact(&mut buf)?;
-    if buf != MAGIC {
-        return Err("bad magic".into());
-    }
-
-    let mut buf = [0; 76];
-    dev.seek(io::SeekFrom::End(-76))
-        .map_err(|e| format!("seek to trailer failed: {e}"))?;
-    dev.read_exact(&mut buf)
-        .map_err(|e| format!("read of trailer failed: {e}"))?;
-
-    let [a, b, c, d, buf @ ..] = buf;
-    let len = u32::from_le_bytes([a, b, c, d]);
-    dev.seek(io::SeekFrom::End(-76 - i64::from(len)))
-        .map_err(|e| format!("seek to meta table failed: {e}"))?;
-    let mut meta = Vec::new();
-    (&mut dev)
-        .take(u64::from(len))
-        .read_to_end(&mut meta)
-        .map_err(|e| format!("seek of meta table failed: {e}"))?;
-
-    let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
-
-    let packref = appender::PackRef(buf);
-    let dev = Reader::new(dev, Default::default(), packref)
-        .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
-    Ok((dev, meta))
-}
-
 fn new_reader(store: &str) -> Result<(Reader, Meta)> {
-    new_reader_inner(store).map_err(|e| format!("failed to open store {store:?}: {e}").into())
+    Reader::new(store).map_err(|e| format!("failed to open store {store:?}: {e}").into())
 }
 
 fn parse_meta(mut buf: &[u8]) -> Result<Meta> {
@@ -167,23 +202,39 @@ fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
 }
 
 fn finish(dev: Builder, meta: Meta) -> Result<fs::File> {
-    let (mut dev, packref) = dev.finish().unwrap();
-    let packref = packref.unwrap();
+    let (mut dev, packref) = dev
+        .finish()
+        .map_err(|e| format!("failed to finalize store builder: {e:?}"))?;
+    let packref = packref.ok_or("no objects added to store")?;
     let mut meta_size = 0;
     for (k, v) in meta.map.iter() {
-        let kl = u8::try_from(k.len()).expect("meta key too large");
+        let kl = u8::try_from(k.len()).map_err(|_| "meta key too large")?;
         dev.write_all(&kl.to_le_bytes())?;
         dev.write_all(k.as_bytes())?;
-        let vl = u16::try_from(v.len()).expect("meta value too large");
+        let vl = u16::try_from(v.len()).map_err(|_| "meta value too large")?;
         dev.write_all(&vl.to_le_bytes())?;
         dev.write_all(v)?;
         meta_size += 1 + k.len() + 2 + v.len();
     }
-    let meta_size = u32::try_from(meta_size).expect("meta table too large");
-    dev.write_all(&meta_size.to_le_bytes())?;
-    dev.write_all(&packref.0)?;
-    dev.sync_all()?;
+    let meta_size = u32::try_from(meta_size).map_err(|_| "meta table too large")?;
+    dev.write_all(&meta_size.to_le_bytes())
+        .and_then(|()| dev.write_all(&packref.0))
+        .map_err(|e| format!("failed to append trailer: {e}"))?;
+    dev.sync_all()
+        .map_err(|e| format!("failed to synchronize data: {e}"))?;
     Ok(dev)
+}
+
+fn dump_object(dev: &Reader, key: &Hash) -> Result<()> {
+    let mut obj = dev.get(&key)?;
+    let mut out = io::stdout().lock();
+    let e = |e| format!("failed to read object: {e:?}");
+    for data in obj.read_exact(0, usize::MAX).map_err(e)? {
+        let data = data.map_err(e)?;
+        out.write_all(&data)
+            .map_err(|e| format!("failed to write to stdout: {e:?}"))?;
+    }
+    Ok(())
 }
 
 fn cmd_new<A>(procname: &str, mut args: A) -> Result<()>
@@ -192,14 +243,13 @@ where
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
 
-    let mut dev = new_builder(&store).unwrap();
+    let mut dev =
+        new_builder(&store).map_err(|e| format!("failed to create store builder: {e}"))?;
     let stat = add_files(&mut dev, args)?;
-    let dev = finish(dev, Meta::default()).unwrap();
+    let dev = finish(dev, Meta::default())
+        .map_err(|e| format!("failed to finalize store builder: {e:?}"))?;
 
-    let pack_size = dev.metadata().unwrap().len();
-    let Stat { size_sum } = stat;
-    let ratio = size_sum as f64 / pack_size as f64;
-    println!("pack size: {pack_size}, files size: {size_sum}, ratio: {ratio}");
+    stat.summarize(&dev)?;
 
     Ok(())
 }
@@ -214,18 +264,9 @@ where
 
     let key = appender::Hash(parse_hex(&key)?);
     let (dev, _meta) = new_reader(&store)?;
-    match dev.get(&key).unwrap() {
-        None => Err(format!("no object with key {key:?}").into()),
-        Some(mut obj) => {
-            let mut out = io::stdout().lock();
-            for data in obj.read_exact(0, usize::MAX).unwrap() {
-                let data = data.unwrap();
-                use io::Write;
-                out.write_all(&data).unwrap();
-            }
-            Ok(())
-        }
-    }
+    dump_object(&dev, &key)?;
+
+    Ok(())
 }
 
 fn cmd_list<A>(procname: &str, mut args: A) -> Result<()>
@@ -235,12 +276,12 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, _meta) = new_reader(&store).unwrap();
+    let (dev, _meta) = new_reader(&store)?;
     dev.iter_with(|key| {
         println!("{key:?}");
         false
     })
-    .unwrap();
+    .map_err(|e| format!("failure during store iteration: {e:?}"))?;
 
     Ok(())
 }
@@ -252,7 +293,7 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (_dev, meta) = new_reader(&store).unwrap();
+    let (_dev, meta) = new_reader(&store)?;
     let plural = if meta.map.len() == 1 {
         "entry"
     } else {
