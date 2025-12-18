@@ -148,6 +148,24 @@ where
     }
 }
 
+impl<'a, T> Object<'a, T> {
+    pub fn to_raw(&self) -> ObjectRaw {
+        self.ptr
+    }
+
+    /// # Warning
+    ///
+    /// `ObjectRaw` with the same pack is always valid,
+    /// but mixing up with different packs is a logic error.
+    pub fn from_raw(ptr: ObjectRaw, reader: &'a T) -> Self {
+        Self { reader, ptr }
+    }
+
+    pub fn len(&self) -> u64 {
+        self.ptr.len
+    }
+}
+
 impl<'a, D, C> Object<'a, Reader<D, C>>
 where
     D: device::Read,

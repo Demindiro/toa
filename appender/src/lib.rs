@@ -37,6 +37,16 @@ pub struct ObjectRaw {
     len: u64,
 }
 
+impl ObjectRaw {
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset.0
+    }
+}
+
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.iter().try_for_each(|x| write!(f, "{x:02x}"))
