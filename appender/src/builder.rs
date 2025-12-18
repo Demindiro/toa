@@ -1,6 +1,6 @@
 use crate::{
-    DEPTH, Hash, ObjectPointer, PITCH, PackOffset, PackRef, device, object::builder::ObjectTrie,
-    pack, record, record::CompressionAlgorithm,
+    DEPTH, Hash, ObjectRaw, PITCH, PackOffset, PackRef, device, object::builder::ObjectTrie, pack,
+    record, record::CompressionAlgorithm,
 };
 use alloc::vec::Vec;
 use chacha20poly1305::{
@@ -55,7 +55,7 @@ where
         // TODO avoid take(). We do this because self.write() is a pain with lifetimes.
         let Some(mut objects) = self.objects.take() else {
             let offset = self.write(data)?;
-            self.objects = Some(ObjectTrie::with_leaf(&key, ObjectPointer { offset, len }));
+            self.objects = Some(ObjectTrie::with_leaf(&key, ObjectRaw { offset, len }));
             return Ok(key);
         };
         let insert = match objects.try_insert(&key) {
@@ -72,7 +72,7 @@ where
                 return Err(e);
             }
         };
-        insert.insert(ObjectPointer { offset, len });
+        insert.insert(ObjectRaw { offset, len });
         self.objects = Some(objects);
         Ok(key)
     }

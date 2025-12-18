@@ -32,7 +32,7 @@ pub struct PackRef(pub [u8; pack::Pack::LEN]);
 struct PackOffset(u64);
 
 #[derive(Clone, Copy, Debug)]
-struct ObjectPointer {
+pub struct ObjectRaw {
     offset: PackOffset,
     len: u64,
 }

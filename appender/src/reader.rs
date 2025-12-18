@@ -1,7 +1,7 @@
 pub mod cache;
 
 use crate::{
-    DEPTH, Hash, ObjectPointer, PITCH, PackOffset, PackRef, device, object, pack, record,
+    DEPTH, Hash, ObjectRaw, PITCH, PackOffset, PackRef, device, object, pack, record,
     record::{CompressionAlgorithm, UnknownCompressionAlgorithm},
 };
 use alloc::boxed::Box;
@@ -25,7 +25,7 @@ pub struct IterRead<'o, 'r, T> {
 
 pub struct Object<'a, T> {
     reader: &'a T,
-    ptr: ObjectPointer,
+    ptr: ObjectRaw,
 }
 
 #[derive(Clone, Debug)]

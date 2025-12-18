@@ -1,5 +1,5 @@
 use super::{Leaf2, Nibble, NibbleIndex};
-use crate::{Hash, ObjectPointer, PackOffset};
+use crate::{Hash, ObjectRaw, PackOffset};
 use alloc::boxed::Box;
 use core::{fmt, mem};
 
@@ -31,11 +31,11 @@ struct Parent {
 #[derive(Clone, Copy)]
 struct Leaf {
     hash: Hash,
-    ptr: ObjectPointer,
+    ptr: ObjectRaw,
 }
 
 impl ObjectTrie {
-    pub fn with_leaf(key: &Hash, ptr: ObjectPointer) -> Self {
+    pub fn with_leaf(key: &Hash, ptr: ObjectRaw) -> Self {
         Self {
             root: Node::Leaf(Leaf { hash: *key, ptr }),
         }
@@ -82,7 +82,7 @@ impl ObjectTrie {
 }
 
 impl Insert<'_, '_> {
-    pub fn insert(self, ptr: ObjectPointer) {
+    pub fn insert(self, ptr: ObjectRaw) {
         let new = Leaf {
             hash: *self.key,
             ptr,
