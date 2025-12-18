@@ -1,14 +1,10 @@
 use super::{Leaf2, NibbleIndex};
-use crate::{Hash, ObjectPointer, PackOffset};
+use crate::{Hash, ObjectRaw, PackOffset};
 use core::mem;
 
 const _: () = assert!(mem::size_of::<Leaf2>() == 48);
 
-pub(crate) fn find<E, F>(
-    root: PackOffset,
-    key: &Hash,
-    mut dev: F,
-) -> Result<Option<ObjectPointer>, E>
+pub(crate) fn find<E, F>(root: PackOffset, key: &Hash, mut dev: F) -> Result<Option<ObjectRaw>, E>
 where
     F: FnMut(PackOffset, &mut [u8]) -> Result<(), E>,
 {
@@ -29,7 +25,7 @@ where
             let buf = &mut [0; 48];
             f(0, buf)?;
             let Leaf2 { hash, offset, len } = Leaf2::from_bytes(buf);
-            return Ok((hash == key.0).then_some(ObjectPointer {
+            return Ok((hash == key.0).then_some(ObjectRaw {
                 offset: PackOffset(offset),
                 len,
             }));

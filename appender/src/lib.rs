@@ -32,9 +32,19 @@ pub struct PackRef(pub [u8; pack::Pack::LEN]);
 struct PackOffset(u64);
 
 #[derive(Clone, Copy, Debug)]
-struct ObjectPointer {
+pub struct ObjectRaw {
     offset: PackOffset,
     len: u64,
+}
+
+impl ObjectRaw {
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset.0
+    }
 }
 
 impl fmt::Debug for Hash {
