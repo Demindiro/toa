@@ -37,6 +37,7 @@ struct Fs {
 
 #[derive(Clone, Copy)]
 struct Node {
+    parent_ino: u64,
     obj: ObjectRaw,
     refcount: u64,
     ty: unix::DirItemType,
@@ -94,6 +95,7 @@ impl ops::Deref for Reader {
 impl Fs {
     fn root_ino(&self) -> Node {
         Node {
+            parent_ino: 0,
             obj: self.root,
             refcount: 1,
             ty: unix::DirItemType::Dir,
@@ -106,28 +108,32 @@ impl Fs {
             .or_else(|| self.nodes.get(&ino).copied())
     }
 
-    fn get_ino_dir(&self, ino: u64) -> Option<unix::Dir<'_>> {
+    fn get_ino_dir(&self, ino: u64) -> Option<(Node, unix::Dir<'_>)> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::Dir)
-            .map(|x| unix::Dir::new(Object::from_raw(x.obj, &self.dev)).unwrap())
+            .map(|x| {
+                let d = unix::Dir::new(Object::from_raw(x.obj, &self.dev)).unwrap();
+                (x, d)
+            })
     }
 
-    fn get_ino_file(&self, ino: u64) -> Option<Object<'_, InnerReader>> {
+    fn get_ino_file(&self, ino: u64) -> Option<(Node, Object<'_, InnerReader>)> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::File)
-            .map(|x| Object::from_raw(x.obj, &*self.dev))
+            .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
     }
 
     /// # Returns
     ///
     /// The current (or new) inode number of the object.
-    fn increase_ref(&mut self, obj: ObjectRaw, ty: unix::DirItemType) -> u64 {
+    fn increase_ref(&mut self, parent_ino: u64, obj: ObjectRaw, ty: unix::DirItemType) -> u64 {
         let ino = *self.nodes_rev.entry(obj.offset()).or_insert_with(|| {
             let ino = self.ino_counter;
             self.ino_counter += 1;
             ino
         });
         let node = self.nodes.entry(ino).or_insert_with(|| Node {
+            parent_ino,
             obj,
             refcount: 0,
             ty,
@@ -179,14 +185,14 @@ impl fuser::Filesystem for Fs {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let Some(dir) = self.get_ino_dir(ino) else {
+        let Some((node, dir)) = self.get_ino_dir(ino) else {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
         for i in offset.. {
             let end = match i as u64 {
                 0 => reply.add(ino, 1, fuser::FileType::Directory, "."),
-                1 => reply.add(0, 2, fuser::FileType::Directory, ".."),
+                1 => reply.add(node.parent_ino, 2, fuser::FileType::Directory, ".."),
                 2.. => {
                     let Some(e) = dir.get((i - 2) as u64).unwrap() else {
                         break;
@@ -213,7 +219,7 @@ impl fuser::Filesystem for Fs {
         name: &OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        let Some(dir) = self.get_ino_dir(parent) else {
+        let Some((_, dir)) = self.get_ino_dir(parent) else {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
@@ -226,7 +232,7 @@ impl fuser::Filesystem for Fs {
                 continue;
             }
             let obj = self.dev.get(&e.key).unwrap().to_raw();
-            let ino = self.increase_ref(obj, e.ty);
+            let ino = self.increase_ref(parent, obj, e.ty);
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
                 ..0 => mtime - Duration::from_micros(-e.modified as u64),
@@ -249,7 +255,7 @@ impl fuser::Filesystem for Fs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        let Some(file) = self.get_ino_file(ino) else {
+        let Some((_, file)) = self.get_ino_file(ino) else {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
