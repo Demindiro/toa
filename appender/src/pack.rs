@@ -17,11 +17,15 @@ impl Pack {
         buf
     }
 
-    pub fn from_bytes(data: [u8; Self::LEN]) -> Self {
-        Self {
-            key: *Key::from_slice(&data[..32]),
-            record_trie_root: record::Entry::from_bytes(data[32..64].try_into().unwrap()).unwrap(),
-            object_trie_root: PackOffset(u64::from_le_bytes(data[64..].try_into().unwrap())),
-        }
+    pub fn from_bytes(data: [u8; Self::LEN]) -> Result<Self, record::UnknownCompressionAlgorithm> {
+        let [data @ .., a, b, c, d, e, f, g, h] = data;
+        let object_trie_root = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        let record_trie_root = data[32..].try_into().expect("exactly 32 bytes");
+        let key = data[..32].try_into().expect("exactly 32 bytes");
+        Ok(Self {
+            key: *Key::from_slice(key),
+            record_trie_root: record::Entry::from_bytes(record_trie_root)?,
+            object_trie_root: PackOffset(object_trie_root),
+        })
     }
 }

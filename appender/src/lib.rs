@@ -72,15 +72,19 @@ mod test {
         }
 
         fn add(&mut self, data: &[u8]) -> Hash {
-            self.builder.add(data).unwrap()
+            self.builder.add(data).expect("add failed")
         }
     }
 
     impl TestRead {
         fn assert_eq(&self, key: &Hash, value: &[u8]) {
-            let mut x = self.reader.get(&key).unwrap().unwrap();
-            let x = x.read_exact(0, usize::MAX).unwrap();
-            let x = x.into_bytes().unwrap();
+            let mut x = self
+                .reader
+                .get(&key)
+                .expect("get failed")
+                .expect("object does not exist");
+            let x = x.read_exact(0, usize::MAX).expect("read_exact failed");
+            let x = x.into_bytes().expect("into_bytes failed");
             let f = String::from_utf8_lossy;
             assert!(&x == value, "{} <> {}", f(&x), f(value));
         }

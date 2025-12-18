@@ -172,10 +172,13 @@ impl RecordWriter {
     }
 }
 
+/// # Returns
+///
+/// A buffer that is guaranteed to be no larger than `data`.
 fn compress<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> (&'a mut [u8], CompressionAlgorithm) {
     match compress_zstd(data, buf) {
-        Ok(()) => (buf, CompressionAlgorithm::Zstd),
-        Err(()) => (data, CompressionAlgorithm::None),
+        true => (buf, CompressionAlgorithm::Zstd),
+        false => (data, CompressionAlgorithm::None),
     }
 }
 
@@ -197,10 +200,18 @@ fn write_record<D>(
 where
     D: device::Write,
 {
+    assert!(
+        buf.len() <= 1 << PITCH,
+        "buffer exceeds maximum record size"
+    );
     let mut compress_buf = Vec::new();
-    let uncompressed_len = u32::try_from(buf.len()).unwrap();
+    let uncompressed_len = u32::try_from(buf.len()).expect("already checked buf.len()");
     let (data, compression_algorithm) = compress(buf, &mut compress_buf);
-    let compressed_len = u32::try_from(data.len()).unwrap();
+    assert!(
+        data.len() <= 1 << PITCH,
+        "data is guaranteed to be smaller than buf"
+    );
+    let compressed_len = u32::try_from(data.len()).expect("already checked data.len()");
     let tag = encrypt(key, depth, index, data);
     let offset = dev.append(data).map_err(Error::Device)?;
     buf.clear();
@@ -250,13 +261,19 @@ where
         .transpose()
 }
 
-fn compress_zstd<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> Result<(), ()> {
+/// # Returns
+///
+/// `true` if the data got successfully compressed and is less than the original length.
+fn compress_zstd<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> bool {
     // TODO make compression level configurable
     buf.clear();
     buf.resize(data.len(), 0);
-    let len =
-        zstd_safe::compress(&mut **buf, data, zstd_safe::CompressionLevel::MAX).map_err(|_| ())?;
+    let len = zstd_safe::compress(&mut **buf, data, zstd_safe::CompressionLevel::MAX)
+        .unwrap_or(usize::MAX);
+    if len >= data.len() {
+        return false;
+    }
     // if only Vec had a separate shrink method...
     buf.resize_with(len, || unreachable!());
-    Ok(())
+    true
 }
