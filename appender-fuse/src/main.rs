@@ -2,7 +2,7 @@ mod unix;
 
 use appender::{Hash, Object, ObjectRaw, cache::MicroLru};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map},
     error::Error,
     ffi::OsStr,
     fs,
@@ -141,6 +141,20 @@ impl Fs {
         node.refcount += 1;
         ino
     }
+
+    fn decrease_ref(&mut self, ino: u64, num: u64) {
+        match self.nodes.entry(ino) {
+            btree_map::Entry::Occupied(mut e) => {
+                let x = e.get_mut();
+                x.refcount = x.refcount.saturating_sub(num);
+                if x.refcount == 0 {
+                    e.remove();
+                }
+            }
+            // just ignore, whatever
+            btree_map::Entry::Vacant(_) => {}
+        }
+    }
 }
 
 impl fuser::Filesystem for Fs {
@@ -242,6 +256,10 @@ impl fuser::Filesystem for Fs {
             return reply.entry(&Duration::MAX, &attr, 0);
         }
         reply.error(libc::ENOENT)
+    }
+
+    fn forget(&mut self, _: &fuser::Request<'_>, ino: u64, nlookup: u64) {
+        self.decrease_ref(ino, nlookup);
     }
 
     fn read(
