@@ -88,7 +88,7 @@ mod test {
 
     impl TestRead {
         fn assert_eq(&self, key: &Hash, value: &[u8]) {
-            let mut x = self
+            let x = self
                 .reader
                 .get(&key)
                 .expect("get failed")
@@ -150,6 +150,15 @@ mod test {
         let v = (0..1 << 19)
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
+        let k = s.add(&v);
+        let s = s.finish();
+        s.assert_eq(&k, &v);
+    }
+
+    #[test]
+    fn insert_one_large_zeros() {
+        let mut s = init();
+        let v = vec![0; 1 << 20];
         let k = s.add(&v);
         let s = s.finish();
         s.assert_eq(&k, &v);

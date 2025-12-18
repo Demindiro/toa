@@ -176,6 +176,13 @@ impl RecordWriter {
 ///
 /// A buffer that is guaranteed to be no larger than `data`.
 fn compress<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> (&'a mut [u8], CompressionAlgorithm) {
+    let end = data
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|x| *x.1 != 0)
+        .map_or(0, |x| x.0 + 1);
+    let data = &mut data[..end];
     match compress_zstd(data, buf) {
         true => (buf, CompressionAlgorithm::Zstd),
         false => (data, CompressionAlgorithm::None),
@@ -183,6 +190,9 @@ fn compress<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> (&'a mut [u8], Comp
 }
 
 fn encrypt(key: &Key, depth: u32, index: u64, data: &mut [u8]) -> Tag {
+    if data.is_empty() {
+        return Tag::default();
+    }
     let nonce = crate::record_nonce(depth, index);
     let tag = ChaCha12Poly1305::new(key)
         .encrypt_in_place_detached(&nonce, &[], data)

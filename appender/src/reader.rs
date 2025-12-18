@@ -129,13 +129,15 @@ where
     ) -> Result<Vec<u8>, Error<D::Error>> {
         let len = usize::try_from(entry.compressed_len).expect("u32 <= usize");
         let mut data = alloc::vec![0; len];
-        self.device
-            .read(entry.offset, &mut data)
-            .map_err(Error::Device)?;
-        let nonce = crate::record_nonce(depth, index);
-        ChaCha12Poly1305::new(&self.pack.key)
-            .decrypt_in_place_detached(&nonce, &[], &mut data, &entry.tag)
-            .map_err(Error::Crypto)?;
+        if len > 0 {
+            self.device
+                .read(entry.offset, &mut data)
+                .map_err(Error::Device)?;
+            let nonce = crate::record_nonce(depth, index);
+            ChaCha12Poly1305::new(&self.pack.key)
+                .decrypt_in_place_detached(&nonce, &[], &mut data, &entry.tag)
+                .map_err(Error::Crypto)?;
+        }
         let len = usize::try_from(entry.uncompressed_len).expect("u32 <= usize");
         Ok(decompress(data, len, entry.compression_algorithm)?)
     }
@@ -259,13 +261,15 @@ fn decompress<'a>(
     uncompressed_len: usize,
     algorithm: CompressionAlgorithm,
 ) -> Result<Vec<u8>, CorruptedCompression> {
-    match algorithm {
+    let mut data = match algorithm {
         // TODO should we allow trimming trailing zeros?
-        CompressionAlgorithm::None if data.len() != uncompressed_len => Err(CorruptedCompression),
-        CompressionAlgorithm::None => Ok(data),
+        CompressionAlgorithm::None if data.len() <= uncompressed_len => data,
+        CompressionAlgorithm::None => return Err(CorruptedCompression),
         CompressionAlgorithm::Lz4 => todo!("lz4"),
-        CompressionAlgorithm::Zstd => decompress_zstd(data, uncompressed_len),
-    }
+        CompressionAlgorithm::Zstd => decompress_zstd(data, uncompressed_len)?,
+    };
+    data.resize(uncompressed_len, 0u8);
+    Ok(data)
 }
 
 fn decompress_zstd(
@@ -274,7 +278,7 @@ fn decompress_zstd(
 ) -> Result<Vec<u8>, CorruptedCompression> {
     let mut b = alloc::vec![0; uncompressed_len];
     let real_len = zstd_safe::decompress(&mut *b, &data).map_err(|_| CorruptedCompression)?;
-    (real_len == b.len())
+    (real_len <= b.len())
         .then_some(b)
         .ok_or(CorruptedCompression)
 }
