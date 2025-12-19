@@ -121,10 +121,6 @@ where
     }
 
     fn flush_all(&mut self) -> Result<Option<record::Entry>, Error<D::Error>> {
-        self.flush_leaf()?;
-        self.flush_leaf()?;
-        self.flush_leaf()?;
-        self.flush_leaf()?;
         for d in 0..DEPTH {
             if let Some(x) = self.flush_record(d)? {
                 self.append_record(d + 1, &x.into_bytes())?;
