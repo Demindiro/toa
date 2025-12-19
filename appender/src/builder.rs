@@ -16,6 +16,11 @@ pub struct Builder<D> {
     device: D,
 }
 
+pub struct PackedRecord {
+    entry: record::Entry,
+    parent_depth: u8,
+}
+
 #[derive(Default)]
 struct RecordWriter {
     data: Vec<u8>,
@@ -84,10 +89,15 @@ where
         };
         let object_trie_root = objects.serialize(|data| self.write_inside_bounds(data))?;
         let record_trie_root = self.flush_all()?.expect("at least one object");
+        assert_eq!(
+            record_trie_root.parent_depth,
+            DEPTH + 1,
+            "final record is not at root"
+        );
         let pack = pack::Pack {
             key: self.key,
             object_trie_root,
-            record_trie_root,
+            record_trie_root: record_trie_root.entry,
         };
         let pack = PackRef(pack.into_bytes());
         self.device.sync().map_err(Error::Device)?;
@@ -112,7 +122,7 @@ where
 
     fn flush_leaf(&mut self) -> Result<(), Error<D::Error>> {
         if let Some(x) = self.flush_record(0)? {
-            self.append_record_parent(1, x)?;
+            self.append_record_parent(x)?;
             const MASK: u64 = (1 << PITCH) - 1;
             self.pack_len.0 += MASK;
             self.pack_len.0 &= !MASK;
@@ -120,13 +130,14 @@ where
         Ok(())
     }
 
-    fn flush_all(&mut self) -> Result<Option<record::Entry>, Error<D::Error>> {
+    fn flush_all(&mut self) -> Result<Option<PackedRecord>, Error<D::Error>> {
         for d in 0..DEPTH {
             if let Some(x) = self.flush_record(d)? {
-                self.append_record_parent(d + 1, x)?;
+                self.append_record_parent(x)?;
             }
         }
-        self.flush_record(DEPTH)
+        let mut entry = self.flush_record(DEPTH)?;
+        Ok(entry)
     }
 
     fn append_record(&mut self, mut data: &[u8]) -> Result<(), Error<D::Error>> {
@@ -134,28 +145,23 @@ where
             data = rest;
             let buf = &mut core::mem::take(buf);
             let entry = self.write_record(0, index, buf)?;
-            self.append_record_parent(1, entry)?;
+            self.append_record_parent(entry)?;
         }
         Ok(())
     }
 
-    fn append_record_parent(
-        &mut self,
-        mut depth: u8,
-        mut entry: record::Entry,
-    ) -> Result<(), Error<D::Error>> {
+    fn append_record_parent(&mut self, mut entry: PackedRecord) -> Result<(), Error<D::Error>> {
         while let Some((buf, index, rest)) =
-            self.writers[usize::from(depth)].append(&entry.into_bytes())
+            self.writers[usize::from(entry.parent_depth)].append(&entry.entry.into_bytes())
         {
             assert!(rest.is_empty(), "partial parent");
             let buf = &mut core::mem::take(buf);
-            entry = self.write_record(depth, index, buf)?;
-            depth += 1;
+            entry = self.write_record(entry.parent_depth, index, buf)?;
         }
         Ok(())
     }
 
-    fn flush_record(&mut self, depth: u8) -> Result<Option<record::Entry>, Error<D::Error>> {
+    fn flush_record(&mut self, depth: u8) -> Result<Option<PackedRecord>, Error<D::Error>> {
         if let Some((buf, index)) = self.writers[usize::from(depth)].flush() {
             let buf = &mut core::mem::take(buf);
             self.write_record(depth, index, buf).map(Some)
@@ -169,7 +175,7 @@ where
         depth: u8,
         index: u64,
         buf: &mut Vec<u8>,
-    ) -> Result<record::Entry, Error<D::Error>> {
+    ) -> Result<PackedRecord, Error<D::Error>> {
         assert!(
             buf.len() <= 1 << PITCH,
             "buffer exceeds maximum record size"
@@ -185,12 +191,16 @@ where
         let tag = encrypt(&self.key, depth.into(), index, data);
         let offset = self.device.append(data).map_err(Error::Device)?;
         buf.clear();
-        Ok(record::Entry {
+        let entry = record::Entry {
             tag,
             offset,
             compression_algorithm,
             compressed_len,
             uncompressed_len,
+        };
+        Ok(PackedRecord {
+            entry,
+            parent_depth: depth + 1,
         })
     }
 }
