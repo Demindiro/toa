@@ -96,7 +96,7 @@ where
 
     fn write(&mut self, data: &[u8]) -> Result<PackOffset, Error<D::Error>> {
         // TODO risk of desynchronization
-        append_record(&mut self.device, &self.key, 0, &mut self.writers, data)?;
+        self.append_record(0, data)?;
         let offset = self.pack_len;
         self.pack_len.0 += data.len() as u64;
         Ok(offset)
@@ -116,7 +116,7 @@ where
         let (dev, key) = (&mut self.device, &self.key);
         let x = flush_record(dev, key, 0, wr)?;
         if let Some(x) = x {
-            append_record(dev, key, 1, writers, &x.into_bytes())?;
+            self.append_record(1, &x.into_bytes())?;
             const MASK: u64 = (1 << PITCH) - 1;
             self.pack_len.0 += MASK;
             self.pack_len.0 &= !MASK;
@@ -129,16 +129,25 @@ where
         self.flush_leaf()?;
         self.flush_leaf()?;
         self.flush_leaf()?;
-        let (dev, key) = (&mut self.device, &self.key);
         for d in 0..DEPTH {
+            let (dev, key) = (&mut self.device, &self.key);
             let writers = &mut self.writers;
             let wr = &mut writers[usize::from(d)];
             if let Some(x) = flush_record(dev, key, d.into(), wr)? {
-                append_record(dev, key, d + 1, writers, &x.into_bytes())?;
+                self.append_record(d + 1, &x.into_bytes())?;
             }
         }
         let [.., wr] = &mut self.writers;
         flush_record(&mut self.device, &self.key, DEPTH.into(), wr)
+    }
+
+    fn append_record(&mut self, depth: u8, mut data: &[u8]) -> Result<(), Error<D::Error>> {
+        while let Some((buf, index, rest)) = self.writers[usize::from(depth)].append(data) {
+            data = rest;
+            let entry = write_record(&mut self.device, &self.key, depth.into(), index, buf)?;
+            self.append_record(1 + depth, &entry.into_bytes())?;
+        }
+        Ok(())
     }
 }
 
@@ -231,25 +240,6 @@ where
         compressed_len,
         uncompressed_len,
     })
-}
-
-fn append_record<D>(
-    dev: &mut D,
-    key: &Key,
-    depth: u8,
-    writers: &mut [RecordWriter; 1 + DEPTH as usize],
-    data: &[u8],
-) -> Result<(), Error<D::Error>>
-where
-    D: device::Write,
-{
-    let mut data = data;
-    while let Some((buf, index, rest)) = writers[usize::from(depth)].append(data) {
-        data = rest;
-        let entry = write_record(dev, key, depth.into(), index, buf)?;
-        append_record(dev, key, 1 + depth, writers, &entry.into_bytes())?;
-    }
-    Ok(())
 }
 
 fn flush_record<D>(
