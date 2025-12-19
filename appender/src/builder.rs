@@ -111,11 +111,7 @@ where
     }
 
     fn flush_leaf(&mut self) -> Result<(), Error<D::Error>> {
-        let writers = &mut self.writers;
-        let wr = &mut writers[0];
-        let (dev, key) = (&mut self.device, &self.key);
-        let x = flush_record(dev, key, 0, wr)?;
-        if let Some(x) = x {
+        if let Some(x) = self.flush_record(0)? {
             self.append_record(1, &x.into_bytes())?;
             const MASK: u64 = (1 << PITCH) - 1;
             self.pack_len.0 += MASK;
@@ -130,15 +126,11 @@ where
         self.flush_leaf()?;
         self.flush_leaf()?;
         for d in 0..DEPTH {
-            let (dev, key) = (&mut self.device, &self.key);
-            let writers = &mut self.writers;
-            let wr = &mut writers[usize::from(d)];
-            if let Some(x) = flush_record(dev, key, d.into(), wr)? {
+            if let Some(x) = self.flush_record(d)? {
                 self.append_record(d + 1, &x.into_bytes())?;
             }
         }
-        let [.., wr] = &mut self.writers;
-        flush_record(&mut self.device, &self.key, DEPTH.into(), wr)
+        self.flush_record(DEPTH)
     }
 
     fn append_record(&mut self, depth: u8, mut data: &[u8]) -> Result<(), Error<D::Error>> {
@@ -148,6 +140,13 @@ where
             self.append_record(1 + depth, &entry.into_bytes())?;
         }
         Ok(())
+    }
+
+    fn flush_record(&mut self, depth: u8) -> Result<Option<record::Entry>, Error<D::Error>> {
+        self.writers[usize::from(depth)]
+            .flush()
+            .map(|(buf, index)| write_record(&mut self.device, &self.key, depth.into(), index, buf))
+            .transpose()
     }
 }
 
@@ -240,21 +239,6 @@ where
         compressed_len,
         uncompressed_len,
     })
-}
-
-fn flush_record<D>(
-    dev: &mut D,
-    key: &Key,
-    depth: u32,
-    writer: &mut RecordWriter,
-) -> Result<Option<record::Entry>, Error<D::Error>>
-where
-    D: device::Write,
-{
-    writer
-        .flush()
-        .map(|(buf, index)| write_record(dev, key, depth, index, buf))
-        .transpose()
 }
 
 /// # Returns
