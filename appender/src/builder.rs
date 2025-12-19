@@ -137,7 +137,22 @@ where
         while let Some((buf, index, rest)) = self.writers[usize::from(depth)].append(data) {
             data = rest;
             let entry = write_record(&mut self.device, &self.key, depth.into(), index, buf)?;
-            self.append_record(1 + depth, &entry.into_bytes())?;
+            self.append_record_parent(1 + depth, entry)?;
+        }
+        Ok(())
+    }
+
+    fn append_record_parent(
+        &mut self,
+        mut depth: u8,
+        mut entry: record::Entry,
+    ) -> Result<(), Error<D::Error>> {
+        while let Some((buf, index, rest)) =
+            self.writers[usize::from(depth)].append(&entry.into_bytes())
+        {
+            assert!(rest.is_empty(), "partial parent");
+            entry = write_record(&mut self.device, &self.key, depth.into(), index, buf)?;
+            depth += 1;
         }
         Ok(())
     }
