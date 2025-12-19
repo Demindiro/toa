@@ -10,7 +10,7 @@ pub mod pack;
 mod reader;
 pub mod record;
 
-pub use builder::Builder;
+pub use builder::{Builder, worker};
 pub use chacha20poly1305::Key;
 pub use reader::{Object, Reader, cache};
 
@@ -66,7 +66,7 @@ mod test {
     use rand::{SeedableRng, rngs::StdRng};
 
     struct TestBuild {
-        builder: Builder<Vec<u8>>,
+        builder: Builder<Vec<u8>, worker::ForcedQueue<worker::Work>>,
     }
 
     struct TestRead {
@@ -102,7 +102,7 @@ mod test {
 
     fn init() -> TestBuild {
         let rng = StdRng::from_seed([0; 32]);
-        let builder = Builder::new(Default::default(), rng);
+        let builder = Builder::new(Default::default(), Default::default(), rng);
         TestBuild { builder }
     }
 
