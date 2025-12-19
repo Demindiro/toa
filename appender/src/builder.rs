@@ -111,7 +111,8 @@ where
     }
 
     fn flush_leaf(&mut self) -> Result<(), Error<D::Error>> {
-        let [wr, writers @ ..] = &mut self.writers;
+        let writers = &mut self.writers;
+        let wr = &mut writers[0];
         let (dev, key) = (&mut self.device, &self.key);
         let x = flush_record(dev, key, 0, wr)?;
         if let Some(x) = x {
@@ -130,11 +131,9 @@ where
         self.flush_leaf()?;
         let (dev, key) = (&mut self.device, &self.key);
         for d in 0..DEPTH {
-            let [wr, writers @ ..] = &mut self.writers[d.into()..] else {
-                unreachable!("at least one writer")
-            };
-            let d = u32::from(d);
-            if let Some(x) = flush_record(dev, key, d, wr)? {
+            let writers = &mut self.writers;
+            let wr = &mut writers[usize::from(d)];
+            if let Some(x) = flush_record(dev, key, d.into(), wr)? {
                 append_record(dev, key, d + 1, writers, &x.into_bytes())?;
             }
         }
@@ -237,20 +236,17 @@ where
 fn append_record<D>(
     dev: &mut D,
     key: &Key,
-    depth: u32,
-    writers: &mut [RecordWriter],
+    depth: u8,
+    writers: &mut [RecordWriter; 1 + DEPTH as usize],
     data: &[u8],
 ) -> Result<(), Error<D::Error>>
 where
     D: device::Write,
 {
-    let [wr, writers @ ..] = writers else {
-        panic!("excessive depth")
-    };
     let mut data = data;
-    while let Some((buf, index, rest)) = wr.append(data) {
+    while let Some((buf, index, rest)) = writers[usize::from(depth)].append(data) {
         data = rest;
-        let entry = write_record(dev, key, depth, index, buf)?;
+        let entry = write_record(dev, key, depth.into(), index, buf)?;
         append_record(dev, key, 1 + depth, writers, &entry.into_bytes())?;
     }
     Ok(())
