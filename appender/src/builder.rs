@@ -112,7 +112,7 @@ where
 
     fn flush_leaf(&mut self) -> Result<(), Error<D::Error>> {
         if let Some(x) = self.flush_record(0)? {
-            self.append_record(1, &x.into_bytes())?;
+            self.append_record_parent(1, x)?;
             const MASK: u64 = (1 << PITCH) - 1;
             self.pack_len.0 += MASK;
             self.pack_len.0 &= !MASK;
@@ -123,7 +123,7 @@ where
     fn flush_all(&mut self) -> Result<Option<record::Entry>, Error<D::Error>> {
         for d in 0..DEPTH {
             if let Some(x) = self.flush_record(d)? {
-                self.append_record(d + 1, &x.into_bytes())?;
+                self.append_record_parent(d + 1, x)?;
             }
         }
         self.flush_record(DEPTH)
