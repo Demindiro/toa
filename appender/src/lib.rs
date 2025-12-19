@@ -172,8 +172,7 @@ mod test {
             .map(|x| (x, s.add(&vec![x; n])))
             .collect::<Vec<_>>();
         let s = s.finish();
-        keys.iter()
-            .for_each(|(x, k)| s.assert_eq(k, &vec![*x; n]));
+        keys.iter().for_each(|(x, k)| s.assert_eq(k, &vec![*x; n]));
     }
 
     // TODO we need tests to ensure crypto works!

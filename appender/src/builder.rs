@@ -132,7 +132,8 @@ where
     fn append_record(&mut self, depth: u8, mut data: &[u8]) -> Result<(), Error<D::Error>> {
         while let Some((buf, index, rest)) = self.writers[usize::from(depth)].append(data) {
             data = rest;
-            let entry = write_record(&mut self.device, &self.key, depth.into(), index, buf)?;
+            let buf = &mut core::mem::take(buf);
+            let entry = self.write_record(depth, index, buf)?;
             self.append_record_parent(1 + depth, entry)?;
         }
         Ok(())
@@ -147,17 +148,50 @@ where
             self.writers[usize::from(depth)].append(&entry.into_bytes())
         {
             assert!(rest.is_empty(), "partial parent");
-            entry = write_record(&mut self.device, &self.key, depth.into(), index, buf)?;
+            let buf = &mut core::mem::take(buf);
+            entry = self.write_record(depth, index, buf)?;
             depth += 1;
         }
         Ok(())
     }
 
     fn flush_record(&mut self, depth: u8) -> Result<Option<record::Entry>, Error<D::Error>> {
-        self.writers[usize::from(depth)]
-            .flush()
-            .map(|(buf, index)| write_record(&mut self.device, &self.key, depth.into(), index, buf))
-            .transpose()
+        if let Some((buf, index)) = self.writers[usize::from(depth)].flush() {
+            let buf = &mut core::mem::take(buf);
+            self.write_record(depth, index, buf).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn write_record(
+        &mut self,
+        depth: u8,
+        index: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<record::Entry, Error<D::Error>> {
+        assert!(
+            buf.len() <= 1 << PITCH,
+            "buffer exceeds maximum record size"
+        );
+        let mut compress_buf = Vec::new();
+        let uncompressed_len = u32::try_from(buf.len()).expect("already checked buf.len()");
+        let (data, compression_algorithm) = compress(buf, &mut compress_buf);
+        assert!(
+            data.len() <= 1 << PITCH,
+            "data is guaranteed to be smaller than buf"
+        );
+        let compressed_len = u32::try_from(data.len()).expect("already checked data.len()");
+        let tag = encrypt(&self.key, depth.into(), index, data);
+        let offset = self.device.append(data).map_err(Error::Device)?;
+        buf.clear();
+        Ok(record::Entry {
+            tag,
+            offset,
+            compression_algorithm,
+            compressed_len,
+            uncompressed_len,
+        })
     }
 }
 
@@ -216,40 +250,6 @@ fn encrypt(key: &Key, depth: u32, index: u64, data: &mut [u8]) -> Tag {
         .encrypt_in_place_detached(&nonce, &[], data)
         .expect("failed to encrypt data");
     tag
-}
-
-fn write_record<D>(
-    dev: &mut D,
-    key: &Key,
-    depth: u32,
-    index: u64,
-    buf: &mut Vec<u8>,
-) -> Result<record::Entry, Error<D::Error>>
-where
-    D: device::Write,
-{
-    assert!(
-        buf.len() <= 1 << PITCH,
-        "buffer exceeds maximum record size"
-    );
-    let mut compress_buf = Vec::new();
-    let uncompressed_len = u32::try_from(buf.len()).expect("already checked buf.len()");
-    let (data, compression_algorithm) = compress(buf, &mut compress_buf);
-    assert!(
-        data.len() <= 1 << PITCH,
-        "data is guaranteed to be smaller than buf"
-    );
-    let compressed_len = u32::try_from(data.len()).expect("already checked data.len()");
-    let tag = encrypt(key, depth, index, data);
-    let offset = dev.append(data).map_err(Error::Device)?;
-    buf.clear();
-    Ok(record::Entry {
-        tag,
-        offset,
-        compression_algorithm,
-        compressed_len,
-        uncompressed_len,
-    })
 }
 
 /// # Returns
