@@ -203,7 +203,6 @@ where
         index: u64,
         buf: &mut Vec<u8>,
     ) -> Result<Option<PackedRecord>, Error<D::Error>> {
-        dbg!(depth, index);
         assert!(
             buf.len() <= 1 << PITCH,
             "buffer exceeds maximum record size"
