@@ -96,7 +96,7 @@ where
 
     fn write(&mut self, data: &[u8]) -> Result<PackOffset, Error<D::Error>> {
         // TODO risk of desynchronization
-        self.append_record(0, data)?;
+        self.append_record(data)?;
         let offset = self.pack_len;
         self.pack_len.0 += data.len() as u64;
         Ok(offset)
@@ -129,12 +129,12 @@ where
         self.flush_record(DEPTH)
     }
 
-    fn append_record(&mut self, depth: u8, mut data: &[u8]) -> Result<(), Error<D::Error>> {
-        while let Some((buf, index, rest)) = self.writers[usize::from(depth)].append(data) {
+    fn append_record(&mut self, mut data: &[u8]) -> Result<(), Error<D::Error>> {
+        while let Some((buf, index, rest)) = self.writers[0].append(data) {
             data = rest;
             let buf = &mut core::mem::take(buf);
-            let entry = self.write_record(depth, index, buf)?;
-            self.append_record_parent(1 + depth, entry)?;
+            let entry = self.write_record(0, index, buf)?;
+            self.append_record_parent(1, entry)?;
         }
         Ok(())
     }
