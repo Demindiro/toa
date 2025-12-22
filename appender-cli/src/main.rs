@@ -14,7 +14,7 @@ use std::{
 const MAGIC: [u8; 16] = *b"Plainey Appender";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Builder = appender::Builder<File, worker::SingleThread>;
+type Builder = appender::Builder<File, worker::ThreadPool<worker::Work>>;
 type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
 
 struct Reader {

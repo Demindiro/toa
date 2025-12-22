@@ -63,7 +63,13 @@ where
     W: worker::Workers<Work>,
 {
     pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
-        self.add_with_key(Hash(blake3::hash(data).into()), data)
+        self.poll_workers()?;
+        let mut h = blake3::Hasher::new();
+        #[cfg(feature = "rayon")]
+        h.update_rayon(data);
+        #[cfg(not(feature = "rayon"))]
+        h.update(data);
+        self.add_with_key(Hash(h.finalize().into()), data)
     }
 
     fn add_with_key(&mut self, key: Hash, data: &[u8]) -> Result<Hash, Error<D::Error>> {
@@ -243,7 +249,16 @@ where
         }
     }
 
-    /// Wait for all workers to finish with queued work.
+    /// Poll workers for any finished work.
+    fn poll_workers(&mut self) -> Result<(), Error<D::Error>> {
+        while let Some(Work { mut entry, data }) = self.workers.poll() {
+            entry.entry.offset = self.device.append(&data).map_err(Error::Device)?;
+            self.append_record_parent(entry)?;
+        }
+        Ok(())
+    }
+
+    /// Wait for workers to finish with queued work.
     fn wait_workers(&mut self) -> Result<(), Error<D::Error>> {
         while let Some(Work { mut entry, data }) = self.workers.wait() {
             entry.entry.offset = self.device.append(&data).map_err(Error::Device)?;
