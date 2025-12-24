@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 std = ["alloc"]
 alloc = []
-rayon = ["std", "blake3/rayon", "dep:rayon-core"]
+rayon = ["std", "dep:rayon-core"]
 
 [dependencies]
 blake3 = { version = "1.8.2", default-features = false }

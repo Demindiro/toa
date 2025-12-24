@@ -64,12 +64,8 @@ where
 {
     pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
         self.poll_workers()?;
-        let mut h = blake3::Hasher::new();
-        #[cfg(feature = "rayon")]
-        h.update_rayon(data);
-        #[cfg(not(feature = "rayon"))]
-        h.update(data);
-        self.add_with_key(Hash(h.finalize().into()), data)
+        let h = blake3::hash(data);
+        self.add_with_key(Hash(h.into()), data)
     }
 
     fn add_with_key(&mut self, key: Hash, data: &[u8]) -> Result<Hash, Error<D::Error>> {
