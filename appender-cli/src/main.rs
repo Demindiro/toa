@@ -1,6 +1,6 @@
 mod unix;
 
-use appender::{Hash, cache::MicroLru};
+use appender::{Hash, cache::MicroLru, worker};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -14,7 +14,7 @@ use std::{
 const MAGIC: [u8; 16] = *b"Plainey Appender";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Builder = appender::Builder<File>;
+type Builder = appender::Builder<File, worker::ThreadPool<worker::Work>>;
 type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
 
 struct Reader {
@@ -146,7 +146,7 @@ fn new_builder(store: &str) -> Result<Builder> {
         .create_new(true)
         .open(store)?;
     dev.write_all(&MAGIC)?;
-    let dev = Builder::new(dev, rand::thread_rng());
+    let dev = Builder::new(dev, Default::default(), rand::thread_rng());
     Ok(dev)
 }
 

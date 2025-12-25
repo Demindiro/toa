@@ -10,7 +10,7 @@ pub mod pack;
 mod reader;
 pub mod record;
 
-pub use builder::Builder;
+pub use builder::{Builder, worker};
 pub use chacha20poly1305::Key;
 pub use reader::{Object, Reader, cache};
 
@@ -66,7 +66,7 @@ mod test {
     use rand::{SeedableRng, rngs::StdRng};
 
     struct TestBuild {
-        builder: Builder<Vec<u8>>,
+        builder: Builder<Vec<u8>, worker::ForcedQueue<worker::Work>>,
     }
 
     struct TestRead {
@@ -88,7 +88,7 @@ mod test {
 
     impl TestRead {
         fn assert_eq(&self, key: &Hash, value: &[u8]) {
-            let mut x = self
+            let x = self
                 .reader
                 .get(&key)
                 .expect("get failed")
@@ -102,7 +102,7 @@ mod test {
 
     fn init() -> TestBuild {
         let rng = StdRng::from_seed([0; 32]);
-        let builder = Builder::new(Default::default(), rng);
+        let builder = Builder::new(Default::default(), Default::default(), rng);
         TestBuild { builder }
     }
 
@@ -153,6 +153,26 @@ mod test {
         let k = s.add(&v);
         let s = s.finish();
         s.assert_eq(&k, &v);
+    }
+
+    #[test]
+    fn insert_one_large_zeros() {
+        let mut s = init();
+        let v = vec![0; 1 << 20];
+        let k = s.add(&v);
+        let s = s.finish();
+        s.assert_eq(&k, &v);
+    }
+
+    #[test]
+    fn insert_many_large() {
+        let n = 1 << 21;
+        let mut s = init();
+        let keys = (0..=255)
+            .map(|x| (x, s.add(&vec![x; n])))
+            .collect::<Vec<_>>();
+        let s = s.finish();
+        keys.iter().for_each(|(x, k)| s.assert_eq(k, &vec![*x; n]));
     }
 
     // TODO we need tests to ensure crypto works!
