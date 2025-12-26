@@ -1,4 +1,4 @@
-use super::{Leaf2, NibbleIndex};
+use super::{ByteIndex, Leaf2, U256};
 use crate::{Hash, ObjectRaw, PackOffset};
 use core::mem;
 
@@ -9,17 +9,18 @@ where
     F: FnMut(PackOffset, &mut [u8]) -> Result<(), E>,
 {
     let mut offset = root;
-    let mut index = NibbleIndex(0);
+    let mut index = ByteIndex(0);
     loop {
         let (offt, ty) = (offset.0 & !7, offset.0 & 7);
         let mut f = |o, buf: &mut _| (dev)(PackOffset(offt + o), buf);
         if ty & 1 == 0 {
-            let nibble = index.get(key);
-            let buf = &mut [0; 8];
+            let byte = index.get(key);
+            let buf = &mut [0; 32];
             f(0, buf)?;
-            let population = u16::from_le_bytes(buf[..2].try_into().expect("2 bytes"));
-            let i = (population % (1 << nibble.0)).count_ones();
-            f(8 * (1 + u64::from(i)), buf)?;
+            let population = U256::from_le_bytes(buf);
+            let i = (population & U256::trailing_mask(byte.0)).count_ones();
+            let buf = &mut [0; 8];
+            f(32 + 8 * u64::from(i), buf)?;
             offset = PackOffset(u64::from_le_bytes(*buf));
         } else {
             let buf = &mut [0; 48];
@@ -60,15 +61,13 @@ where
     G: FnMut(Hash) -> bool,
 {
     let mut f = |o, buf: &mut _| (dev)(PackOffset(offset + o), buf);
-    let buf = &mut [0; 8];
+    let buf = &mut [0; 32];
     f(0, buf)?;
-    let population = u16::from_le_bytes(buf[..2].try_into().expect("2 bytes"));
-    let len = usize::try_from(population.count_ones()).expect("u32 <= usize");
-    let buf = &mut [0; 8 * 16];
-    let buf = &mut buf[..8 * len];
-    f(8, buf)?;
-    for x in buf.chunks_exact(8) {
-        let offt = u64::from_le_bytes(x.try_into().expect("exactly 8 bytes"));
+    let population = U256::from_le_bytes(buf);
+    let mut buf = vec![[0; 8]; usize::from(population.count_ones())];
+    f(32, buf.as_flattened_mut())?;
+    for x in buf {
+        let offt = u64::from_le_bytes(x);
         if iter_with_do(PackOffset(offt), dev, with)? {
             return Ok(true);
         }

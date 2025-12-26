@@ -1,4 +1,4 @@
-use super::{Leaf2, Nibble, NibbleIndex};
+use super::{Byte, ByteIndex, Leaf2, U256};
 use crate::{Hash, ObjectRaw, PackOffset};
 use alloc::boxed::Box;
 use core::{fmt, mem};
@@ -14,8 +14,8 @@ pub(crate) struct Insert<'a, 'h> {
 }
 
 enum InsertNode<'a> {
-    Parent(Nibble, &'a mut Parent),
-    Leaf(NibbleIndex, &'a mut Node),
+    Parent(Byte, &'a mut Parent),
+    Leaf(ByteIndex, &'a mut Node),
 }
 
 enum Node {
@@ -24,7 +24,7 @@ enum Node {
 }
 
 struct Parent {
-    population: u16,
+    population: U256,
     branches: Box<[Node]>,
 }
 
@@ -43,19 +43,19 @@ impl ObjectTrie {
 
     pub fn try_insert<'a, 'h>(&'a mut self, key: &'h Hash) -> Option<Insert<'a, 'h>> {
         let mut cur = &mut self.root;
-        let mut index = NibbleIndex(0);
+        let mut index = ByteIndex(0);
         loop {
             match cur {
                 Node::Parent(x) => {
-                    let nibble = index.get(key);
+                    let byte = index.get(&key);
                     // https://github.com/rust-lang/rust/issues/21906
-                    if !x.contains_nibble(nibble) {
+                    if !x.contains_byte(byte) {
                         break Some(Insert {
-                            replace: InsertNode::Parent(nibble, x),
+                            replace: InsertNode::Parent(byte, x),
                             key,
                         });
                     }
-                    cur = x.get_mut(nibble).expect("contains nibble");
+                    cur = x.get_mut(byte).expect("contains nibble");
                 }
                 Node::Leaf(Leaf { hash, .. }) => {
                     break if hash == key {
@@ -113,7 +113,7 @@ impl Node {
 }
 
 impl Parent {
-    fn new_pair(index: NibbleIndex, [a, b]: [Leaf; 2]) -> Self {
+    fn new_pair(index: ByteIndex, [a, b]: [Leaf; 2]) -> Self {
         let [x, y] = [a, b].map(|x| (index.get(&x.hash), Node::Leaf(x)));
         if x.0 != y.0 {
             Self::new([x, y])
@@ -123,13 +123,13 @@ impl Parent {
         }
     }
 
-    fn new<const N: usize>(mut branches: [(Nibble, Node); N]) -> Self {
-        const { assert!(N < 16) }
-        let population = branches.iter().fold(0u16, |s, x| s | 1 << x.0.0);
+    fn new<const N: usize>(mut branches: [(Byte, Node); N]) -> Self {
+        const { assert!(N <= 256) }
+        let population = branches.iter().fold(U256::ZERO, |s, x| s.with_bit(x.0.0));
         assert_eq!(
-            population.count_ones(),
-            branches.len() as u32,
-            "{population:016b}  {branches:#?}"
+            usize::from(population.count_ones()),
+            branches.len(),
+            "{population:016x?}  {branches:#?}"
         );
         branches.sort_by_key(|x| x.0);
         Self {
@@ -138,28 +138,30 @@ impl Parent {
         }
     }
 
-    fn insert(&mut self, nibble: Nibble, node: Node) {
-        assert!(!self.contains_nibble(nibble));
-        let bit = 1 << nibble.0;
-        self.population |= bit;
+    fn insert(&mut self, byte: Byte, node: Node) {
+        assert!(!self.contains_byte(byte));
+        self.population.set_bit(byte.0);
         let mut branches = mem::take(&mut self.branches).into_vec();
-        let i = self.nibble_to_index(nibble).expect("population bit set");
+        let i = self.byte_to_index(byte).expect("population bit set");
         branches.reserve(1);
         branches.insert(i, node);
         self.branches = branches.into();
     }
 
-    fn contains_nibble(&self, nibble: Nibble) -> bool {
-        self.nibble_to_index(nibble).is_some()
+    fn contains_byte(&self, byte: Byte) -> bool {
+        self.byte_to_index(byte).is_some()
     }
 
-    fn get_mut(&mut self, nibble: Nibble) -> Option<&mut Node> {
-        self.nibble_to_index(nibble).map(|i| &mut self.branches[i])
+    fn get_mut(&mut self, byte: Byte) -> Option<&mut Node> {
+        self.byte_to_index(byte).map(|i| &mut self.branches[i])
     }
 
-    fn nibble_to_index(&self, nibble: Nibble) -> Option<usize> {
-        let bit = 1 << nibble.0;
-        (self.population & bit != 0).then(|| (self.population & (bit - 1)).count_ones() as usize)
+    fn byte_to_index(&self, Byte(byte): Byte) -> Option<usize> {
+        self.population.test_bit(byte).then(|| {
+            (self.population & U256::trailing_mask(byte))
+                .count_ones()
+                .into()
+        })
     }
 
     fn serialize<E, F>(self, f: &mut F) -> Result<PackOffset, E>
@@ -167,15 +169,15 @@ impl Parent {
         F: FnMut(&[u8]) -> Result<PackOffset, E>,
     {
         debug_assert_eq!(self.branches.len(), self.population.count_ones() as usize);
-        let len = self.branches.len();
-        let buf = &mut [0; 1 + 16];
-        buf[0] = u64::from(self.population);
-        buf[1..]
-            .iter_mut()
-            .zip(self.branches)
-            .try_for_each(|(x, y)| Ok(*x = y.serialize(f)?.0))?;
-        let buf = buf.map(u64::to_le_bytes);
-        (f)(buf[..1 + len].as_flattened())
+        // stack-allocated buffer would take 2080 bytes -- too much!
+        let capacity = 32 + 8 * self.branches.len();
+        let mut buf = Vec::with_capacity(capacity);
+        buf.extend(self.population.to_le_bytes());
+        for x in self.branches {
+            buf.extend(x.serialize(f)?.0.to_le_bytes());
+        }
+        assert_eq!(buf.len(), capacity);
+        (f)(&buf)
     }
 }
 
@@ -208,12 +210,12 @@ impl fmt::Debug for Parent {
         // to panic or not to?
         // probably not, given Debug is especially useful when panicking
         let mut it = self.branches.iter();
-        for i in (0..16).filter(|i| self.population >> i & 1 != 0) {
+        for i in (0..=u8::MAX).filter(|&i| self.population.test_bit(i)) {
             let Some(x) = it.next() else {
-                let _ = f.entry(&format_args!("{:x}", i), &"<???>");
+                let _ = f.entry(&format_args!("{:02x}", i), &"<???>");
                 continue;
             };
-            f.entry(&format_args!("{:x}", i), &x);
+            f.entry(&format_args!("{:02x}", i), &x);
         }
         for x in it {
             f.entry(&"<???>", &x);
