@@ -81,12 +81,20 @@ where
     R: Send,
 {
     fn next_ticket(&mut self) -> u64 {
-        if self.ticket_last - self.ticket_first > u64::from(self.max_pending) {
+        while self.is_full() && !self.can_pop() {
             self.recv_one();
         }
         let x = self.ticket_last;
         self.ticket_last += 1;
         x
+    }
+
+    fn is_full(&self) -> bool {
+        self.ticket_last - self.ticket_first > u64::from(self.max_pending)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ticket_first == self.ticket_last
     }
 
     fn can_pop(&self) -> bool {
@@ -105,12 +113,8 @@ where
     }
 
     fn recv_one(&mut self) {
-        // avoid a potential deadlock when we can already pop finished work.
-        //
-        // also defensively check for the case where no work has been enqueued at all.
-        if self.can_pop() || self.ticket_first == self.ticket_last {
-            return;
-        }
+        assert!(!self.is_empty(), "no work enqueued");
+        assert!(!self.can_pop(), "can dequeue work");
         let (ticket, x) = self.recv.recv().expect("we own at least one handle");
         self.queue.push((cmp::Reverse(ticket), SkipCmp(x)));
     }
@@ -161,7 +165,7 @@ where
     }
 
     fn wait(&mut self) -> Option<R> {
-        while self.ticket_first != self.ticket_last {
+        while !self.is_empty() {
             if let Some(x) = self.pop() {
                 return Some(x);
             }
