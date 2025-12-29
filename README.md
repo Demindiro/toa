@@ -179,7 +179,7 @@ It is immediately followed by `entry-count` entries:
 | 15:12 | GID               |
 | 23:16 | name offset       |
 | 31:24 | modified time     |
-| 63:32 | hash              |
+| 63:32 | hash / path       |
 
 
 | bits | short description |
@@ -189,12 +189,16 @@ It is immediately followed by `entry-count` entries:
 
 Type 0 is a regular file, type 1 is a directory and type 2 is a symbolic link.
 
+Regular files and directory entries use a hash,
+symbolic links use an offset + length in the same name array for the path.
+
 Names are stored after the entry array.
 
 Modified time is in terms of microseconds.
 
 Entries MUST be sorted by name.
 Names blob MUST be in order of the entries.
+Symbolic link paths MUST follow immediately after the corresponding name.
 
 !!! note This increases the chances of identical directories being deduplicated.
 

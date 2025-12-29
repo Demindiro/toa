@@ -11,7 +11,7 @@ use std::{
     ops,
 };
 
-const MAGIC: [u8; 16] = *b"Plainey Appender";
+const MAGIC: [u8; 16] = *b"Appender\x20\x25\x12\x25\0\0\0\0";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Builder = appender::Builder<File, worker::ThreadPool<worker::Work>>;

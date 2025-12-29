@@ -205,13 +205,27 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
     // TODO support other platforms
     use std::os::unix::fs::MetadataExt;
 
+    enum Data {
+        Object(Hash),
+        Sym(String),
+    }
+
     struct Entry {
         type_perms: u16,
         name: Box<str>,
         uid: u32,
         gid: u32,
         modified: i64,
-        key: Hash,
+        key: Data,
+    }
+
+    impl fmt::Debug for Data {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Object(x) => x.fmt(f),
+                Self::Sym(x) => x.fmt(f),
+            }
+        }
     }
 
     let mut entries = Vec::new();
@@ -225,11 +239,11 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
             .file_type()
             .map_err(|e| format!("failed to get file type of {path:?}: {e}"))?;
         let (ty_s, ty_n, key) = if ty.is_file() {
-            ("f", 0, add_file(dev, path, stat)?)
+            ("f", 0, Data::Object(add_file(dev, path, stat)?))
         } else if ty.is_dir() {
-            ("d", 1, add_dir(dev, path, stat)?)
+            ("d", 1, Data::Object(add_dir(dev, path, stat)?))
         } else if ty.is_symlink() {
-            ("s", 2, add_symlink(dev, path, stat)?)
+            ("s", 2, Data::Sym(add_symlink(path, stat)?))
         } else {
             eprintln!("skipping {path} (unknown format)");
             continue;
@@ -285,25 +299,37 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
         buf.extend(e.gid.to_le_bytes());
         buf.extend(names_offset.to_le_bytes());
         buf.extend(e.modified.to_le_bytes());
-        buf.extend(e.key.0);
+        match &e.key {
+            Data::Object(x) => buf.extend(x.0),
+            Data::Sym(x) => {
+                let len = x.len() as u64;
+                buf.extend(names_offset.to_le_bytes());
+                buf.extend(len.to_le_bytes());
+                buf.extend([0; 16]);
+                names_offset += len;
+            }
+        }
         assert_eq!(prev_len, buf.len() - 64);
         names_offset += e.name.len() as u64;
     }
     for e in &entries {
         buf.extend(e.name.as_bytes());
+        match &e.key {
+            Data::Object(_) => {}
+            Data::Sym(x) => buf.extend(x.as_bytes()),
+        }
     }
 
     dev.add(&buf)
         .map_err(|e| format!("failed to add : {e:?}").into())
 }
 
-fn add_symlink(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_symlink(path: &str, stat: &mut Stat) -> Result<String> {
     let link =
         fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
     let link = path_to_utf8(&link)?;
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
-    dev.add(link.as_bytes())
-        .map_err(|e| format!("failed to add symbolic link: {e:?}").into())
+    Ok(link.into())
 }
 
 fn new_reader(store: &str) -> Result<(Reader, Hash)> {
