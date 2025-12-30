@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const MAGIC: [u8; 16] = *b"Plainey Appender";
+const MAGIC: [u8; 16] = *b"Appender\x20\x25\x12\x25\0\0\0\0";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
@@ -245,7 +245,12 @@ impl fuser::Filesystem for Fs {
             if e.name != name {
                 continue;
             }
-            let obj = self.dev.get(&e.key).unwrap().to_raw();
+            let obj = match e.ty {
+                unix::DirItemType::File | unix::DirItemType::Dir => {
+                    self.dev.get(&e.key).unwrap().to_raw()
+                }
+                unix::DirItemType::SymLink => dir.symlink_slice(&e.key),
+            };
             let ino = self.increase_ref(parent, obj, e.ty);
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
