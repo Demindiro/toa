@@ -9,7 +9,7 @@ pub trait Cache<V> {
     fn get(&self, key: Key) -> Option<Self::Get<'_>>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(pub u64);
 
 /// Very simple direct-mapped cache primarily intended for testing.
@@ -53,5 +53,10 @@ impl<V> Cache<V> for MicroLru<V> {
     fn get(&self, key: Key) -> Option<Self::Get<'_>> {
         let i = key.0 as usize % self.keys.len();
         (self.keys[i].get() == key).then(|| Ref::map(self.values.borrow(), |x| &x[i]))
+}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Key({:016x})", self.0)
     }
 }
