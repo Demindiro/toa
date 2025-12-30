@@ -90,11 +90,13 @@ impl<'a> Dir<'a> {
         }))
     }
 
-    pub fn symlink_slice(&self, key: &Hash) -> appender::ObjectRaw {
-        let [a, b, c, d, e, f, g, h, x @ ..] = key.0;
+    pub fn symlink_slice(&self, item: &DirItem) -> appender::ObjectRaw {
+        let [a, b, c, d, e, f, g, h, x @ ..] = item.key.0;
         let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let [a, b, c, d, e, f, g, h, ..] = x;
         let len = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
+        // FIXME workaround for bug in appender-cli
+        let offset = offset + item.name.len() as u64;
         self.object
             .to_raw()
             .subslice(offset, len)

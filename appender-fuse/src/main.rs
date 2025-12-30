@@ -123,6 +123,12 @@ impl Fs {
             .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
     }
 
+    fn get_ino_symlink(&self, ino: u64) -> Option<(Node, Object<'_, InnerReader>)> {
+        self.get_ino(ino)
+            .filter(|x| x.ty == unix::DirItemType::SymLink)
+            .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
+    }
+
     /// # Returns
     ///
     /// The current (or new) inode number of the object.
@@ -249,7 +255,7 @@ impl fuser::Filesystem for Fs {
                 unix::DirItemType::File | unix::DirItemType::Dir => {
                     self.dev.get(&e.key).unwrap().to_raw()
                 }
-                unix::DirItemType::SymLink => dir.symlink_slice(&e.key),
+                unix::DirItemType::SymLink => dir.symlink_slice(&e),
             };
             let ino = self.increase_ref(parent, obj, e.ty);
             let mtime = SystemTime::UNIX_EPOCH;
@@ -284,6 +290,19 @@ impl fuser::Filesystem for Fs {
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX);
         let data = file.read(offset as u64, size).unwrap();
+        reply.data(&data)
+    }
+
+    fn readlink(&mut self, _: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
+        let Some((_, symlink)) = self.get_ino_symlink(ino) else {
+            return reply.error(libc::ENOENT);
+            //reply.error(libc::ENOTDIR)
+        };
+        let data = symlink
+            .read_exact(0, usize::MAX)
+            .unwrap()
+            .into_bytes()
+            .unwrap();
         reply.data(&data)
     }
 }

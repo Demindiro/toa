@@ -303,6 +303,9 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
             Data::Object(x) => buf.extend(x.0),
             Data::Sym(x) => {
                 let len = x.len() as u64;
+                // FIXME we're adding the name offset *after* this statement,
+                // not *before*
+                // whoopdadoop
                 buf.extend(names_offset.to_le_bytes());
                 buf.extend(len.to_le_bytes());
                 buf.extend([0; 16]);
