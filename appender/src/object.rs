@@ -19,7 +19,7 @@ struct Leaf2 {
 const _: () = assert!(mem::size_of::<Leaf2>() == 48);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct U256([usize; 32 / mem::size_of::<usize>()]);
+struct U256([usize; Self::WORDS]);
 
 impl Leaf2 {
     fn into_bytes(self) -> [u8; 48] {
@@ -51,7 +51,8 @@ impl ByteIndex {
 }
 
 impl U256 {
-    const ZERO: Self = Self([0; 32 / mem::size_of::<usize>()]);
+    const WORDS: usize = 32 / mem::size_of::<usize>();
+    const ZERO: Self = Self([0; Self::WORDS]);
 
     fn test_bit(&self, index: u8) -> bool {
         let [i, s] = Self::split_bit_index(index.into());
@@ -75,8 +76,8 @@ impl U256 {
 
     /// Generate a mask with 0 to 255 bits set starting from the lowest bit.
     fn trailing_mask(bits: u8) -> Self {
-        let mut rd = [0; 32 / mem::size_of::<usize>() * 2];
-        let mut wr = [0; 32 / mem::size_of::<usize>()];
+        let mut rd = [0; Self::WORDS * 2];
+        let mut wr = [0; Self::WORDS];
         let i = usize::from(bits) + (mem::size_of::<usize>() * 8 - 1);
         let [i, s] = Self::split_bit_index(i);
         rd[..wr.len()].fill(usize::MAX);
