@@ -278,7 +278,6 @@ fn decompress_zstd(
 ) -> Result<Vec<u8>, CorruptedCompression> {
     let mut b = alloc::vec![0; uncompressed_len];
     let real_len = zstd_safe::decompress(&mut *b, &data).map_err(|_| CorruptedCompression)?;
-    (real_len <= b.len())
-        .then_some(b)
-        .ok_or(CorruptedCompression)
+    b.resize_with(real_len, || unreachable!("trim"));
+    Ok(b)
 }
