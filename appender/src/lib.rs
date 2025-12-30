@@ -45,6 +45,15 @@ impl ObjectRaw {
     pub fn offset(&self) -> u64 {
         self.offset.0
     }
+
+    pub fn subslice(&self, offset: u64, len: u64) -> Option<ObjectRaw> {
+        let start = self.offset.0.checked_add(offset)?;
+        let end = start.checked_add(len)?;
+        (end <= self.offset.0 + self.len).then_some(Self {
+            offset: PackOffset(start),
+            len,
+        })
+    }
 }
 
 impl fmt::Debug for Hash {
