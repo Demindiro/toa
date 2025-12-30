@@ -289,7 +289,12 @@ impl fuser::Filesystem for Fs {
             //reply.error(libc::ENOTDIR)
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX);
-        let data = file.read(offset as u64, size).unwrap();
+        // kernel gets confused if you don't fill the entire buffer...
+        let data = file
+            .read_exact(offset as u64, size)
+            .unwrap()
+            .into_bytes()
+            .unwrap();
         reply.data(&data)
     }
 
