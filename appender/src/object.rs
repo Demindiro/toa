@@ -147,4 +147,22 @@ mod test {
             x => todo!("{x}"),
         }
     }
+
+    #[test]
+    fn u256_count_ones() {
+        let it = (0..U256::WORDS).flat_map(|a| (0..mem::size_of::<usize>() * 8).map(move |b| [a, b]));
+        for (i, [a, b]) in it.enumerate() {
+            let mut x = U256::ZERO;
+            x.0[..a].fill(usize::MAX);
+            x.0[a] = !(usize::MAX << b);
+            assert_eq!(usize::from(x.count_ones()), i);
+        }
+        let mut x = U256::ZERO;
+        x.0.fill(usize::MAX);
+        assert_eq!(usize::from(x.count_ones()), 256);
+        let mut x = U256::ZERO;
+        x.0[0] = 0b10110101;
+        x.0[1] = 0b11010110101;
+        assert_eq!(u32::from(x.count_ones()), x.0[0].count_ones() + x.0[1].count_ones());
+    }
 }
