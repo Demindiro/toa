@@ -346,17 +346,7 @@ fn file_attr(
 }
 
 fn usage(procname: &str) -> Box<dyn Error> {
-    format!("usage: {procname} <pack> <mount>").into()
-}
-
-fn args_end<A>(procname: &str, mut args: A) -> Result<()>
-where
-    A: Iterator<Item = String>,
-{
-    args.next()
-        .is_none()
-        .then_some(())
-        .ok_or_else(|| usage(procname))
+    format!("usage: {procname} <pack> <mount> [--allow-other]").into()
 }
 
 fn new_reader(pack: &str) -> Result<(Reader, Meta)> {
@@ -381,13 +371,20 @@ fn parse_meta(mut buf: &[u8]) -> Result<Meta> {
 fn start() -> Result<()> {
     env_logger::init();
 
+    let mut allow_other = false;
+
     let mut args = std::env::args();
     let procname = args.next();
     let procname = procname.as_deref().unwrap_or("appender-fuse");
 
     let pack = args.next().ok_or_else(|| usage(procname))?;
     let mount = args.next().ok_or_else(|| usage(procname))?;
-    args_end(procname, args)?;
+    while let Some(x) = args.next() {
+        match &*x {
+            "--allow-other" => allow_other = true,
+            _ => return Err(usage(procname)),
+        }
+    }
 
     let (dev, meta) = new_reader(&pack)?;
     let root = meta
@@ -409,9 +406,8 @@ fn start() -> Result<()> {
         nodes_rev: Default::default(),
         ino_counter: 2,
     };
-    let opt = [
+    let mut opt = vec![
         fuser::MountOption::FSName("appender".into()),
-        //fuser::MountOption::AllowOther,
         //fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
         fuser::MountOption::NoDev,
@@ -421,6 +417,9 @@ fn start() -> Result<()> {
         fuser::MountOption::NoAtime,
         fuser::MountOption::Sync, // TODO not correct? Should be async (eventually)?
     ];
+    if allow_other {
+        opt.push(fuser::MountOption::AllowOther);
+    }
     fuser::mount2(fs, mount, &opt).map_err(|e| format!("failed to mount pack: {e}"))?;
     Ok(())
 }
