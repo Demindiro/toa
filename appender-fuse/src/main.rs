@@ -31,8 +31,7 @@ struct Meta {
 
 struct Fs {
     dev: Reader,
-    root: ObjectRaw,
-    root_key: Hash,
+    root: Node,
     nodes: BTreeMap<u64, Node>,
     nodes_rev: BTreeMap<u64, u64>,
     ino_counter: u64,
@@ -97,23 +96,13 @@ impl ops::Deref for Reader {
 }
 
 impl Fs {
-    fn root_ino(&self) -> Node {
-        Node {
-            parent_ino: 0,
-            obj: self.root,
-            refcount: 1,
-            ty: unix::DirItemType::Dir,
-            key: self.root_key,
-        }
-    }
-
-    fn get_ino(&self, ino: u64) -> Option<Node> {
+    fn get_ino(&self, ino: u64) -> Option<&Node> {
         (ino == fuser::FUSE_ROOT_ID)
-            .then(|| self.root_ino())
-            .or_else(|| self.nodes.get(&ino).copied())
+            .then(|| &self.root)
+            .or_else(|| self.nodes.get(&ino))
     }
 
-    fn get_ino_dir(&self, ino: u64) -> Option<(Node, unix::Dir<'_>)> {
+    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, unix::Dir<'_>)> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::Dir)
             .map(|x| {
@@ -122,13 +111,13 @@ impl Fs {
             })
     }
 
-    fn get_ino_file(&self, ino: u64) -> Option<(Node, Object<'_, InnerReader>)> {
+    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Object<'_, InnerReader>)> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::File)
             .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
     }
 
-    fn get_ino_symlink(&self, ino: u64) -> Option<(Node, Object<'_, InnerReader>)> {
+    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Object<'_, InnerReader>)> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::SymLink)
             .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
@@ -186,7 +175,7 @@ impl fuser::Filesystem for Fs {
         let attr = if ino == fuser::FUSE_ROOT_ID {
             file_attr(
                 ino,
-                self.root.len(),
+                self.root.obj.len(),
                 unix::DirItemType::Dir,
                 SystemTime::UNIX_EPOCH,
                 0o777,
@@ -452,8 +441,13 @@ fn start() -> Result<()> {
         .to_raw();
     let fs = Fs {
         dev,
-        root,
-        root_key,
+        root: Node {
+            key: root_key,
+            obj: root,
+            parent_ino: 0,
+            refcount: 1,
+            ty: unix::DirItemType::Dir,
+        },
         nodes: Default::default(),
         nodes_rev: Default::default(),
         ino_counter: 2,
