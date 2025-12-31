@@ -344,7 +344,7 @@ impl fuser::Filesystem for Fs {
                     let Some(x) = self.get_ino(ino) else {
                         return reply.error(libc::ENOENT);
                     };
-                    reply.data(format!("{:?}", x.key).as_bytes())
+                    reply.data(&x.key.to_hex())
                 }
             },
             _ => reply.error(libc::ENODATA),
