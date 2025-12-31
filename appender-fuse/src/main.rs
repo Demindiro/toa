@@ -14,6 +14,8 @@ use std::{
 };
 
 const MAGIC: [u8; 16] = *b"Appender\x20\x25\x12\x25\0\0\0\0";
+const XATTR_NAME_LIST: &[u8] = b"user.hash.blake3\0";
+const XATTR_NAME_HASH_BLAKE3: &[u8] = b"user.hash.blake3";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
@@ -30,6 +32,7 @@ struct Meta {
 struct Fs {
     dev: Reader,
     root: ObjectRaw,
+    root_key: Hash,
     nodes: BTreeMap<u64, Node>,
     nodes_rev: BTreeMap<u64, u64>,
     ino_counter: u64,
@@ -41,6 +44,7 @@ struct Node {
     obj: ObjectRaw,
     refcount: u64,
     ty: unix::DirItemType,
+    key: Hash,
 }
 
 impl Reader {
@@ -99,6 +103,7 @@ impl Fs {
             obj: self.root,
             refcount: 1,
             ty: unix::DirItemType::Dir,
+            key: self.root_key,
         }
     }
 
@@ -132,7 +137,13 @@ impl Fs {
     /// # Returns
     ///
     /// The current (or new) inode number of the object.
-    fn increase_ref(&mut self, parent_ino: u64, obj: ObjectRaw, ty: unix::DirItemType) -> u64 {
+    fn increase_ref(
+        &mut self,
+        parent_ino: u64,
+        key: Hash,
+        obj: ObjectRaw,
+        ty: unix::DirItemType,
+    ) -> u64 {
         let ino = *self.nodes_rev.entry(obj.offset()).or_insert_with(|| {
             let ino = self.ino_counter;
             self.ino_counter += 1;
@@ -143,6 +154,7 @@ impl Fs {
             obj,
             refcount: 0,
             ty,
+            key,
         });
         node.refcount += 1;
         ino
@@ -257,7 +269,7 @@ impl fuser::Filesystem for Fs {
                 }
                 unix::DirItemType::SymLink => dir.symlink_slice(&e),
             };
-            let ino = self.increase_ref(parent, obj, e.ty);
+            let ino = self.increase_ref(parent, e.key, obj, e.ty);
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
                 ..0 => mtime - Duration::from_micros(-e.modified as u64),
@@ -309,6 +321,45 @@ impl fuser::Filesystem for Fs {
             .into_bytes()
             .unwrap();
         reply.data(&data)
+    }
+
+    fn listxattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        size: u32,
+        reply: fuser::ReplyXattr,
+    ) {
+        if size == 0 {
+            reply.size(XATTR_NAME_LIST.len() as u32)
+        } else if (size as usize) < XATTR_NAME_LIST.len() {
+            reply.error(libc::ERANGE)
+        } else {
+            reply.data(XATTR_NAME_LIST)
+        }
+    }
+
+    fn getxattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        size: u32,
+        reply: fuser::ReplyXattr,
+    ) {
+        match name.as_encoded_bytes() {
+            self::XATTR_NAME_HASH_BLAKE3 => match size {
+                0 => reply.size(64),
+                ..64 => reply.error(libc::ERANGE),
+                64.. => {
+                    let Some(x) = self.get_ino(ino) else {
+                        return reply.error(libc::ENOENT);
+                    };
+                    reply.data(format!("{:?}", x.key).as_bytes())
+                }
+            },
+            _ => reply.error(libc::ENODATA),
+        }
     }
 }
 
@@ -387,7 +438,7 @@ fn start() -> Result<()> {
     }
 
     let (dev, meta) = new_reader(&pack)?;
-    let root = meta
+    let root_key = meta
         .map
         .get("unix.root")
         .map(|x| &**x)
@@ -396,12 +447,13 @@ fn start() -> Result<()> {
         .map(Hash)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     let root = dev
-        .get(&root)
+        .get(&root_key)
         .map_err(|e| format!("failed to get root object: {e}"))?
         .to_raw();
     let fs = Fs {
         dev,
         root,
+        root_key,
         nodes: Default::default(),
         nodes_rev: Default::default(),
         ino_counter: 2,
