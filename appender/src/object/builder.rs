@@ -171,7 +171,7 @@ impl Parent {
         debug_assert_eq!(self.branches.len(), self.population.count_ones() as usize);
         // stack-allocated buffer would take 2080 bytes -- too much!
         let capacity = 32 + 8 * self.branches.len();
-        let mut buf = Vec::with_capacity(capacity);
+        let mut buf = alloc::vec::Vec::with_capacity(capacity);
         buf.extend(self.population.to_le_bytes());
         for x in self.branches {
             buf.extend(x.serialize(f)?.0.to_le_bytes());

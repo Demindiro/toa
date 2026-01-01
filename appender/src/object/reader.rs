@@ -64,7 +64,7 @@ where
     let buf = &mut [0; 32];
     f(0, buf)?;
     let population = U256::from_le_bytes(buf);
-    let mut buf = vec![[0; 8]; usize::from(population.count_ones())];
+    let mut buf = alloc::vec![[0; 8]; usize::from(population.count_ones())];
     f(32, buf.as_flattened_mut())?;
     for x in buf {
         let offt = u64::from_le_bytes(x);
