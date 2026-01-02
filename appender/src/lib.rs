@@ -11,6 +11,7 @@ mod reader;
 pub mod record;
 
 pub use builder::{Builder, worker};
+pub use blake3;
 pub use chacha20poly1305::Key;
 pub use reader::{Object, Reader, cache};
 

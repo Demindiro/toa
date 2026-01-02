@@ -105,6 +105,8 @@ usage: {procname} <add|get|list>
         list all known objects
     meta <pack>
         list meta table
+    scrub <pack>
+        verify pack integrity
     unix new <pack> <directory>
     unix get <pack> <path>
     unix ls <pack> [path]"
@@ -305,6 +307,51 @@ where
     Ok(())
 }
 
+fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let (dev, _meta) = new_reader(&store)?;
+    // first collect keys,
+    // then sort based on offset to ensure we iterate over all data linearly
+    let mut objects = Vec::new();
+    eprintln!("collecting keys...");
+    dev.iter_with(|key| {
+        let obj = dev.get(&key).unwrap().to_raw();
+        objects.push((key, obj));
+        false
+    })
+    .map_err(|e| format!("failure during store iteration: {e:?}"))?;
+
+    eprintln!("sorting keys...");
+    objects.sort_by_key(|x| x.1.offset());
+
+    eprintln!("traversing objects...");
+    let mut n_ok @ mut n_fail = 0;
+    objects.into_iter().for_each(|(key, obj)| {
+        let obj = appender::Object::from_raw(obj, &*dev);
+        let mut hasher = appender::blake3::Hasher::new();
+        for x in obj.read_exact(0, usize::MAX).unwrap() {
+            let x = x.unwrap();
+            hasher.update(&x);
+        }
+        let hash = hasher.finalize();
+        if &key.0 == hash.as_bytes() {
+            n_ok += 1;
+        } else {
+            println!("fail ({key:?} != {hash})");
+            n_fail += 1;
+        }
+    });
+
+    println!("ok:{n_ok}, fail:{n_fail}");
+
+    (n_fail == 0).then_some(()).ok_or_else(|| "some objects are corrupt".into())
+}
+
 fn start() -> Result<()> {
     let mut args = std::env::args();
     let procname = args.next();
@@ -315,6 +362,7 @@ fn start() -> Result<()> {
         "get" => cmd_get(procname, args),
         "list" => cmd_list(procname, args),
         "meta" => cmd_meta(procname, args),
+        "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
         _ => Err(usage(procname)),
     }
