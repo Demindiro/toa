@@ -30,19 +30,26 @@ enum DirItemType {
     SymLink,
 }
 
+struct ObjectRawOrd(appender::ObjectRaw);
+
 impl<'a> DirIter<'a> {
     fn new(dev: &'a Reader, key: &Hash) -> Result<Self> {
-        let object = dev.get(key)?;
+        dev.get(key)
+            .and_then(Self::from_object)
+            .map_err(|e| format!("{key:?}: {e:?}").into())
+    }
+
+    fn from_object(object: Object<'a, InnerReader>) -> Result<Self> {
         let hdr = object
             .read_exact(0, 32)
             .and_then(|x| x.into_bytes())
-            .map_err(|e| format!("failed to get directory header of {key:?}: {e:?}"))?;
+            .map_err(|e| format!("failed to get directory header: {e:?}"))?;
         let hdr: [u8; 32] = hdr
             .try_into()
-            .map_err(|_| format!("{key:?} has truncated (or invalid) directory header"))?;
+            .map_err(|_| format!("truncated (or invalid) directory header"))?;
         let [magic @ .., a, b, c, d, e, f, g, h] = hdr;
         if magic != MAGIC {
-            return Err(format!("{key:?} has bad dir magic").into());
+            return Err(format!("bad dir magic").into());
         }
         let total = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let cur = 0;
@@ -105,6 +112,10 @@ impl Iterator for DirIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.try_next().transpose()
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        usize::try_from(self.total - self.cur).map_or((usize::MAX, None), |x| (x, Some(x)))
+    }
 }
 
 impl fmt::Display for DirItem {
@@ -136,6 +147,26 @@ impl fmt::Display for DirItem {
     }
 }
 
+impl PartialEq for ObjectRawOrd {
+    fn eq(&self, rhs: &Self) -> bool {
+        self.0.offset() == rhs.0.offset()
+    }
+}
+
+impl Eq for ObjectRawOrd {}
+
+impl PartialOrd for ObjectRawOrd {
+    fn partial_cmp(&self, rhs: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(rhs))
+    }
+}
+
+impl Ord for ObjectRawOrd {
+    fn cmp(&self, rhs: &Self) -> core::cmp::Ordering {
+        self.0.offset().cmp(&rhs.0.offset())
+    }
+}
+
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -145,6 +176,7 @@ where
         "new" => cmd_new(procname, args),
         "get" => cmd_get(procname, args),
         "ls" => cmd_ls(procname, args),
+        "scrub" => cmd_scrub(procname, args),
         _ => Err(usage(procname)),
     }
 }
@@ -199,6 +231,57 @@ where
     DirIter::new(&dev, &dir)?.try_for_each(|e| e.map(|e| println!("{e}")))?;
 
     Ok(())
+}
+
+fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let (dev, dir) = new_reader(&store)?;
+    // pre-collect + sorting makes a *huge* difference in performance
+    // larger caches would help, but that ooesn't scale as well as
+    // having a better iteration order.
+    //
+    // TODO binary heap will include duplicates
+    // might want to use something else, like a BTreeSet?
+    let dir = ObjectRawOrd(dev.get(&dir)?.to_raw());
+    let mut stack = std::collections::BinaryHeap::from([dir]);
+    let mut n_ok @ mut n_fail = 0;
+    while let Some(dir) = stack.pop() {
+        let mut items =
+            DirIter::from_object(Object::from_raw(dir.0, &dev))?.collect::<Result<Vec<_>>>()?;
+        items.sort_by_key(|x| x.key);
+        for x in items {
+            match x.ty {
+                DirItemType::Dir => stack.push(ObjectRawOrd(dev.get(&x.key)?.to_raw())),
+                DirItemType::File => {}
+                DirItemType::SymLink => continue,
+            }
+            let Ok(has) = dev
+                .contains_key(&x.key)
+                .inspect_err(|e| eprintln!("failed to fetch {:?}: {e:?}", x.key))
+            else {
+                n_fail += 1;
+                continue;
+            };
+            if !has {
+                println!("missing {:?}", x.key);
+                n_fail += 1;
+                continue;
+            } else {
+                n_ok += 1;
+            }
+        }
+    }
+
+    eprintln!("ok:{n_ok} fail:{n_fail}");
+
+    (n_fail == 0)
+        .then_some(())
+        .ok_or_else(|| "some objects missing".into())
 }
 
 fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {

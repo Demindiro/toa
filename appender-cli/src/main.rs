@@ -109,7 +109,10 @@ usage: {procname} <add|get|list>
         verify pack integrity
     unix new <pack> <directory>
     unix get <pack> <path>
-    unix ls <pack> [path]"
+    unix ls <pack> [path]
+    unix scrub <pack>
+        verify directory tree integrity
+        this does not check file contents, only whether they're present"
     )
     .into()
 }
@@ -349,7 +352,9 @@ where
 
     println!("ok:{n_ok}, fail:{n_fail}");
 
-    (n_fail == 0).then_some(()).ok_or_else(|| "some objects are corrupt".into())
+    (n_fail == 0)
+        .then_some(())
+        .ok_or_else(|| "some objects are corrupt".into())
 }
 
 fn start() -> Result<()> {
