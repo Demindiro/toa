@@ -44,6 +44,10 @@ struct Node {
     refcount: u64,
     ty: unix::DirItemType,
     key: Hash,
+    mtime: SystemTime,
+    perm: u16,
+    uid: u32,
+    gid: u32,
 }
 
 impl Reader {
@@ -132,6 +136,10 @@ impl Fs {
         key: Hash,
         obj: ObjectRaw,
         ty: unix::DirItemType,
+        perm: u16,
+        mtime: SystemTime,
+        uid: u32,
+        gid: u32,
     ) -> u64 {
         let ino = *self.nodes_rev.entry(obj.offset()).or_insert_with(|| {
             let ino = self.ino_counter;
@@ -144,6 +152,10 @@ impl Fs {
             refcount: 0,
             ty,
             key,
+            perm,
+            mtime,
+            uid,
+            gid,
         });
         node.refcount += 1;
         ino
@@ -172,20 +184,18 @@ impl fuser::Filesystem for Fs {
         _fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        let attr = if ino == fuser::FUSE_ROOT_ID {
-            file_attr(
-                ino,
-                self.root.obj.len(),
-                unix::DirItemType::Dir,
-                SystemTime::UNIX_EPOCH,
-                0o777,
-                0,
-                0,
-            )
-        } else {
-            // nonsense but w/e
-            return reply.error(libc::ENOMEM);
-        };
+        let node = self
+            .get_ino(ino)
+            .unwrap_or_else(|| panic!("ino {ino} not found"));
+        let attr = file_attr(
+            ino,
+            node.obj.len(),
+            node.ty,
+            node.mtime,
+            node.perm,
+            node.uid,
+            node.gid,
+        );
         reply.attr(&Duration::MAX, &attr)
     }
 
@@ -258,13 +268,15 @@ impl fuser::Filesystem for Fs {
                 }
                 unix::DirItemType::SymLink => dir.symlink_slice(&e),
             };
-            let ino = self.increase_ref(parent, e.key, obj, e.ty);
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
                 ..0 => mtime - Duration::from_micros(-e.modified as u64),
                 0.. => mtime + Duration::from_micros(e.modified as u64),
             };
-            let attr = file_attr(ino, obj.len(), e.ty, mtime, e.permissions, e.uid, e.gid);
+            let perm = e.permissions;
+            let perm = 0o777;
+            let ino = self.increase_ref(parent, e.key, obj, e.ty, perm, mtime, e.uid, e.gid);
+            let attr = file_attr(ino, obj.len(), e.ty, mtime, perm, e.uid, e.gid);
             return reply.entry(&Duration::MAX, &attr, 0);
         }
         reply.error(libc::ENOENT)
@@ -447,6 +459,10 @@ fn start() -> Result<()> {
             parent_ino: 0,
             refcount: 1,
             ty: unix::DirItemType::Dir,
+            uid: 0,
+            gid: 0,
+            mtime: SystemTime::UNIX_EPOCH,
+            perm: 0o555,
         },
         nodes: Default::default(),
         nodes_rev: Default::default(),
