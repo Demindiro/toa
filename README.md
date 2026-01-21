@@ -174,13 +174,14 @@ It is immediately followed by `entry-count` entries:
 | -----:|:----------------- |
 |   1:0 | type+permissions  |
 |   2:2 | name length       |
-|   7:3 | (zero)            |
+|   7:3 | length            |
 |  11:8 | UID               |
 | 15:12 | GID               |
 | 23:16 | name offset       |
 | 31:24 | modified time     |
 | 63:32 | hash / path       |
 
+If the length is 0 then the real length must be found by looking up the object.
 
 | bits | short description |
 | ----:|:----------------- |
