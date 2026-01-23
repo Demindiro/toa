@@ -147,8 +147,9 @@ It consists of 2 parts:
 
 | bytes | short description     |
 | -----:|:--------------------- |
-|  15:0 | (zero)                |
-| 23:16 | byte offset           |
+|   7:0 | (zero)                |
+|  15:8 | object length         |
+| 23:16 | chunk byte offset     |
 | 27:24 | compressed info   (1) |
 | 31:28 | uncompressed info (2) |
 
