@@ -449,12 +449,22 @@ impl<'a> StoreWrite for FileStoreWrite<'a> {
 mod test {
     use super::*;
 
-    struct Test {
-        log: WriteLog<MemStore>,
+    struct Test<S> {
+        log: WriteLog<S>,
         buf: Box<[u8; CHUNK_SIZE]>,
     }
 
-    impl Test {
+    impl<S> Test<S>
+    where
+        S: Store,
+        S::Error: core::fmt::Debug,
+    {
+        fn new(store: S) -> Self {
+            let log = WriteLog::load(store).expect("load");
+            let buf = Box::new([0; CHUNK_SIZE]);
+            Self { log, buf }
+        }
+
         fn add(&mut self, data: &[u8]) -> Hash {
             let expect = Hash(*blake3::hash(data).as_bytes());
             let key = self.log.add(data).expect("add");
@@ -485,10 +495,8 @@ mod test {
         }
     }
 
-    fn init() -> Test {
-        let log = WriteLog::load(MemStore::default()).expect("init empty WriteLog");
-        let buf = Box::new([0; CHUNK_SIZE]);
-        Test { log, buf }
+    fn init() -> Test<MemStore> {
+        Test::new(MemStore::default())
     }
 
     #[test]
@@ -579,6 +587,21 @@ mod test {
     #[test]
     fn reload() {
         let mut s = init();
+        let f = |x| format!("A number {x}").into_bytes();
+        let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
+        let mut s = s.reload();
+        keys.iter()
+            .enumerate()
+            .for_each(|(i, k)| s.assert_eq(k, &f(i)));
+    }
+
+    #[test]
+    fn file_store() {
+        let mut s = Test::new(FileStore {
+            chunks: tempfile::tempfile().expect("tempfile chunks"),
+            entries: tempfile::tempfile().expect("tempfile entries"),
+            buffer: Default::default(),
+        });
         let f = |x| format!("A number {x}").into_bytes();
         let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
         let mut s = s.reload();
