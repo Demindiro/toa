@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["appender", "appender-cli", "appender-fuse"]
+members = ["appender", "appender-cli", "appender-fuse", "toa-core"]
 
 [profile.dev]
 opt-level = 1

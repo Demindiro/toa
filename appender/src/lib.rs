@@ -14,16 +14,12 @@ pub use blake3;
 pub use builder::{Builder, worker};
 pub use chacha20poly1305::Key;
 pub use reader::{Object, Reader, cache};
+pub use toa_core::Hash;
 
 use chacha20poly1305::Nonce;
-use core::fmt;
 
 const DEPTH: u8 = 3;
 const PITCH: u8 = 17;
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct Hash(pub [u8; 32]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -36,18 +32,6 @@ struct PackOffset(u64);
 pub struct ObjectRaw {
     offset: PackOffset,
     len: u64,
-}
-
-impl Hash {
-    pub fn to_hex(&self) -> [u8; 64] {
-        let mut b = [0; 64];
-        for (w, x) in b.chunks_exact_mut(2).zip(self.0) {
-            let f = |i| b"0123456789abcdef"[usize::from(i)];
-            w[0] = f(x >> 4);
-            w[1] = f(x & 15);
-        }
-        b
-    }
 }
 
 impl ObjectRaw {
@@ -66,12 +50,6 @@ impl ObjectRaw {
             offset: PackOffset(start),
             len,
         })
-    }
-}
-
-impl fmt::Debug for Hash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|x| write!(f, "{x:02x}"))
     }
 }
 

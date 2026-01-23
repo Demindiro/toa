@@ -209,20 +209,15 @@ where
             buf.len() <= 1 << PITCH,
             "buffer exceeds maximum record size"
         );
-        let mut compress_buf = Vec::new();
         let uncompressed_len = u32::try_from(buf.len()).expect("already checked buf.len()");
         let key = self.key;
         let mut buf = core::mem::take(buf);
         let x = self.workers.add(move || {
-            let buf = &mut buf;
-            let (data, compression_algorithm) = compress(buf, &mut compress_buf);
-            assert!(
-                data.len() <= 1 << PITCH,
-                "data is guaranteed to be smaller than buf"
-            );
+            let mut data = vec![0; buf.len()];
+            let (len, compression_algorithm) = toa_core::compress(&mut buf, &mut data);
+            data.resize_with(len, || unreachable!("data is guaranteed to be smaller than buf"));
             let compressed_len = u32::try_from(data.len()).expect("already checked data.len()");
-            let tag = encrypt(&key, depth.into(), index, data);
-            //buf.clear();
+            let tag = encrypt(&key, depth.into(), index, &mut *data);
             let entry = record::Entry {
                 tag,
                 offset: 0xdeadcafebabe,
@@ -234,7 +229,6 @@ where
                 entry,
                 parent_depth: depth + 1,
             };
-            let data = core::mem::take(data);
             Work { entry, data }
         });
         if let Some(Work { mut entry, data }) = x {
@@ -293,26 +287,6 @@ impl RecordWriter {
     }
 }
 
-/// # Returns
-///
-/// A buffer that is guaranteed to be no larger than `data`.
-fn compress<'a>(
-    data: &'a mut Vec<u8>,
-    buf: &'a mut Vec<u8>,
-) -> (&'a mut Vec<u8>, CompressionAlgorithm) {
-    let end = data
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|x| *x.1 != 0)
-        .map_or(0, |x| x.0 + 1);
-    data.resize_with(end, || unreachable!("shrink only"));
-    match compress_zstd(data, buf) {
-        true => (buf, CompressionAlgorithm::Zstd),
-        false => (data, CompressionAlgorithm::None),
-    }
-}
-
 fn encrypt(key: &Key, depth: u32, index: u64, data: &mut [u8]) -> Tag {
     if data.is_empty() {
         return Tag::default();
@@ -322,21 +296,4 @@ fn encrypt(key: &Key, depth: u32, index: u64, data: &mut [u8]) -> Tag {
         .encrypt_in_place_detached(&nonce, &[], data)
         .expect("failed to encrypt data");
     tag
-}
-
-/// # Returns
-///
-/// `true` if the data got successfully compressed and is less than the original length.
-fn compress_zstd<'a>(data: &'a mut [u8], buf: &'a mut Vec<u8>) -> bool {
-    // TODO make compression level configurable
-    buf.clear();
-    buf.resize(data.len(), 0);
-    let len = zstd_safe::compress(&mut **buf, data, zstd_safe::CompressionLevel::MAX)
-        .unwrap_or(usize::MAX);
-    if len >= data.len() {
-        return false;
-    }
-    // if only Vec had a separate shrink method...
-    buf.resize_with(len, || unreachable!());
-    true
 }

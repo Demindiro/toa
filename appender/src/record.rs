@@ -1,14 +1,6 @@
+pub(crate) use toa_core::{CompressionAlgorithm, UnknownCompressionAlgorithm};
+
 use chacha20poly1305::Tag;
-
-#[derive(Clone, Copy, Debug)]
-pub enum CompressionAlgorithm {
-    None = 0,
-    Lz4 = 1,
-    Zstd = 2,
-}
-
-#[derive(Clone, Debug)]
-pub struct UnknownCompressionAlgorithm(pub u32);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Entry {
@@ -49,19 +41,6 @@ impl Entry {
             compression_algorithm,
             compressed_len,
             uncompressed_len,
-        })
-    }
-}
-
-impl TryFrom<u32> for CompressionAlgorithm {
-    type Error = UnknownCompressionAlgorithm;
-
-    fn try_from(x: u32) -> Result<Self, Self::Error> {
-        Ok(match x {
-            0 => Self::None,
-            1 => Self::Lz4,
-            2 => Self::Zstd,
-            x => return Err(UnknownCompressionAlgorithm(x)),
         })
     }
 }
