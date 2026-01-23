@@ -91,6 +91,18 @@ pub struct MemStoreWrite<'a> {
     offset: usize,
 }
 
+#[cfg(any(feature = "std", test))]
+pub struct FileStore {
+    pub chunks: std::fs::File,
+    pub entries: std::fs::File,
+    pub buffer: Vec<u8>,
+}
+
+#[cfg(any(feature = "std", test))]
+pub struct FileStoreWrite<'a> {
+    store: &'a mut FileStore,
+}
+
 impl<S: Store> WriteLog<S> {
     pub fn load<'a>(mut store: S) -> Result<Self, S::Error> {
         let mut lut = BTreeMap::new();
@@ -359,6 +371,77 @@ impl<'a> StoreWrite for MemStoreWrite<'a> {
             panic!("len exceeds capacity")
         });
         Ok(u64::try_from(self.offset).expect("usize <= u64"))
+    }
+}
+
+#[cfg(any(feature = "std", test))]
+impl Store for FileStore {
+    type Error = std::io::Error;
+    type Write<'a>
+        = FileStoreWrite<'a>
+    where
+        Self: 'a;
+    type Read<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
+    fn write_chunk<'a>(&'a mut self, max_len: usize) -> Result<Self::Write<'a>, Self::Error> {
+        self.buffer.resize(max_len, 0);
+        Ok(FileStoreWrite { store: self })
+    }
+
+    fn write_entry(&mut self, data: &[u8; ENTRY_SIZE]) -> Result<(), Self::Error> {
+        use std::io::{self, Seek, Write};
+        self.entries.seek(io::SeekFrom::End(0))?;
+        self.entries.write_all(data)
+    }
+
+    fn read_chunk<'a>(
+        &'a mut self,
+        offset: u64,
+        len: usize,
+    ) -> Result<Self::Read<'a>, Self::Error> {
+        use std::io::{self, Read, Seek};
+        self.buffer.resize(len, 0);
+        self.chunks.seek(io::SeekFrom::Start(offset))?;
+        self.chunks.read_exact(&mut self.buffer)?;
+        Ok(&self.buffer)
+    }
+
+    fn read_entry(&mut self, index: u32) -> Result<[u8; ENTRY_SIZE], Self::Error> {
+        use std::io::{self, Read, Seek};
+        let mut buf = [0; 64];
+        self.entries
+            .seek(io::SeekFrom::Start(u64::from(index) * ENTRY_SIZE as u64))?;
+        self.entries.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn len(&mut self) -> Result<u32, Self::Error> {
+        use std::io::{self, Seek};
+        let pos = self.entries.seek(io::SeekFrom::End(0))?;
+        u32::try_from(pos / 64)
+            .map_err(|_| io::Error::new(io::ErrorKind::FileTooLarge, "too many entries"))
+    }
+}
+
+#[cfg(any(feature = "std", test))]
+impl<'a> StoreWrite for FileStoreWrite<'a> {
+    type Error = std::io::Error;
+
+    fn buf(&mut self) -> &mut [u8] {
+        &mut self.store.buffer
+    }
+
+    fn finish(self, len: usize) -> Result<u64, Self::Error> {
+        use std::io::{self, Seek, Write};
+        self.store
+            .buffer
+            .resize_with(len, || panic!("len exceeds capacity"));
+        let pos = self.store.chunks.seek(io::SeekFrom::End(0))?;
+        self.store.chunks.write_all(&self.store.buffer)?;
+        Ok(pos)
     }
 }
 
