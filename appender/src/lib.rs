@@ -107,22 +107,6 @@ mod test {
     }
 
     #[test]
-    fn hash_to_hex() {
-        assert_eq!(
-            Hash([0; 32]).to_hex(),
-            *b"0000000000000000000000000000000000000000000000000000000000000000"
-        );
-        assert_eq!(
-            Hash([1; 32]).to_hex(),
-            *b"0101010101010101010101010101010101010101010101010101010101010101"
-        );
-        assert_eq!(
-            Hash([0xf7; 32]).to_hex(),
-            *b"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7"
-        );
-    }
-
-    #[test]
     fn insert_one_empty() {
         let mut s = init();
         let key = s.add(b"");

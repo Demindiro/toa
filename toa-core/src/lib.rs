@@ -102,3 +102,24 @@ fn compress_zstd<'a>(data: &[u8], buf: &'a mut [u8]) -> Option<usize> {
 fn decompress_zstd(data: &[u8], buf: &mut [u8]) -> Result<usize, CorruptedCompression> {
     zstd_safe::decompress(buf, data).map_err(|_| CorruptedCompression)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn hash_to_hex() {
+        assert_eq!(
+            Hash([0; 32]).to_hex(),
+            *b"0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            Hash([1; 32]).to_hex(),
+            *b"0101010101010101010101010101010101010101010101010101010101010101"
+        );
+        assert_eq!(
+            Hash([0xf7; 32]).to_hex(),
+            *b"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7"
+        );
+    }
+}
