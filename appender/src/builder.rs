@@ -215,7 +215,9 @@ where
         let x = self.workers.add(move || {
             let mut data = vec![0; buf.len()];
             let (len, compression_algorithm) = toa_core::compress(&mut buf, &mut data);
-            data.resize_with(len, || unreachable!("data is guaranteed to be smaller than buf"));
+            data.resize_with(len, || {
+                unreachable!("data is guaranteed to be smaller than buf")
+            });
             let compressed_len = u32::try_from(data.len()).expect("already checked data.len()");
             let tag = encrypt(&key, depth.into(), index, &mut *data);
             let entry = record::Entry {
