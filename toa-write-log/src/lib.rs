@@ -476,6 +476,13 @@ mod test {
                 Read::Leaf { len } => assert!(&self.buf[..len] == data, "{len} <> {}", data.len()),
             }
         }
+
+        fn reload(self) -> Self {
+            let Self { log, buf } = self;
+            let log = log.into_store();
+            let log = WriteLog::load(log).expect("reload");
+            Test { log, buf }
+        }
     }
 
     fn init() -> Test {
@@ -567,5 +574,16 @@ mod test {
             .map(|x| (x, s.add(&vec![x; n])))
             .collect::<Vec<_>>();
         keys.iter().for_each(|(x, k)| s.assert_eq(k, &vec![*x; n]));
+    }
+
+    #[test]
+    fn reload() {
+        let mut s = init();
+        let f = |x| format!("A number {x}").into_bytes();
+        let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
+        let mut s = s.reload();
+        keys.iter()
+            .enumerate()
+            .for_each(|(i, k)| s.assert_eq(k, &f(i)));
     }
 }
