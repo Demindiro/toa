@@ -213,7 +213,7 @@ where
         let key = self.key;
         let mut buf = core::mem::take(buf);
         let x = self.workers.add(move || {
-            let mut data = vec![0; buf.len()];
+            let mut data = alloc::vec![0; buf.len()];
             let (len, compression_algorithm) = toa_core::compress(&mut buf, &mut data);
             data.resize_with(len, || {
                 unreachable!("data is guaranteed to be smaller than buf")

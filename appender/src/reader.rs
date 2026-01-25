@@ -138,7 +138,7 @@ where
                 .map_err(Error::Crypto)?;
         }
         let len = usize::try_from(entry.uncompressed_len).expect("u32 <= usize");
-        let mut buf = vec![0; len];
+        let mut buf = alloc::vec![0; len];
         toa_core::decompress(&data, &mut buf, entry.compression_algorithm)?;
         Ok(buf)
     }
