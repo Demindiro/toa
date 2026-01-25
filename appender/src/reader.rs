@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use cache::Cache;
 use chacha20poly1305::{AeadInPlace, ChaCha12Poly1305, KeyInit};
+use toa_core::CorruptedCompression;
 
 pub struct Reader<D, C> {
     pack: pack::Pack,
@@ -35,8 +36,6 @@ pub enum Error<D> {
     UnknownCompressionAlgorithm,
     CorruptedCompression,
 }
-
-struct CorruptedCompression;
 
 impl<D, C> Reader<D, C> {
     pub fn into_device(self) -> D {
@@ -139,7 +138,9 @@ where
                 .map_err(Error::Crypto)?;
         }
         let len = usize::try_from(entry.uncompressed_len).expect("u32 <= usize");
-        Ok(decompress(data, len, entry.compression_algorithm)?)
+        let mut buf = vec![0; len];
+        toa_core::decompress(&data, &mut buf, entry.compression_algorithm)?;
+        Ok(buf)
     }
 
     fn reader(&self) -> impl FnMut(PackOffset, &mut [u8]) -> Result<(), Error<D::Error>> + '_ {
@@ -254,30 +255,4 @@ impl<D> From<CorruptedCompression> for Error<D> {
     fn from(_: CorruptedCompression) -> Self {
         Self::CorruptedCompression
     }
-}
-
-fn decompress<'a>(
-    data: Vec<u8>,
-    uncompressed_len: usize,
-    algorithm: CompressionAlgorithm,
-) -> Result<Vec<u8>, CorruptedCompression> {
-    let mut data = match algorithm {
-        // TODO should we allow trimming trailing zeros?
-        CompressionAlgorithm::None if data.len() <= uncompressed_len => data,
-        CompressionAlgorithm::None => return Err(CorruptedCompression),
-        CompressionAlgorithm::Lz4 => todo!("lz4"),
-        CompressionAlgorithm::Zstd => decompress_zstd(data, uncompressed_len)?,
-    };
-    data.resize(uncompressed_len, 0u8);
-    Ok(data)
-}
-
-fn decompress_zstd(
-    data: Vec<u8>,
-    uncompressed_len: usize,
-) -> Result<Vec<u8>, CorruptedCompression> {
-    let mut b = alloc::vec![0; uncompressed_len];
-    let real_len = zstd_safe::decompress(&mut *b, &data).map_err(|_| CorruptedCompression)?;
-    b.resize_with(real_len, || unreachable!("trim"));
-    Ok(b)
 }

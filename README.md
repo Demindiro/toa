@@ -129,6 +129,38 @@ but this is not required.
 | ...:8 | branches          |
 
 
+## Write log
+
+Writing new data is done using a simple append-log structure.
+The log structure assumes the presence of an in-memory index
+for fast lookups and is designed to be regularly flushed:
+
+It consists of 2 parts:
+
+- a list of 64KiB chunks, each optionally compressed.
+- a list of (hash, entry) tuples describing chunks.
+
+| bytes | short description |
+| -----:|:----------------- |
+|  31:0 | hash              |
+| 63:32 | entry             |
+
+| bytes | short description     |
+| -----:|:--------------------- |
+|   7:0 | (zero)                |
+|  15:8 | object length         |
+| 23:16 | chunk byte offset     |
+| 27:24 | compressed info   (1) |
+| 31:28 | uncompressed info (2) |
+
+| bits  | description                |
+| -----:|:-------------------------- |
+|   7:0 | algorithm (1) / (zero) (2) |
+|  31:8 | length in bytes            |
+
+**Note** lack of encryption.
+
+
 ## Containers
 
 Objects by themselves likely aren't useful for common tasks.
@@ -139,12 +171,8 @@ A few container formats are defined to integrate with existing systems.
 The plain container starts with the magic string "Plainey Appender".
 It ends with a metadata table and an unencrypted pack reference.
 
-To support various usecases, it provides a table of key-value pairs.
-Keys must be valid UTF-8.
-Keys are prefixed with a 8-bit length in bytes.
-Values may be any arbitrary data.
-Values are prefixed with a 16-bit length in bytes.
-The table is suffixed with a 32-bit length in bytes.
+It is preceded by a 32-bit meta table size,
+which in turn is preceded by the corresponding meta table.
 
 ### UNIX container
 
@@ -206,3 +234,29 @@ Symbolic link paths MUST follow immediately after the corresponding name.
 The paths MUST be valid UTF-8.
 
 The special entries `.` and `..` are never included.
+
+
+### Write log
+
+The write log uses a directory with three files:
+
+- `CHUNKS`: chunk list
+- `ENTRIES`: entry list
+- `META`: magic + key + metatable
+
+| bytes | short description |
+| -----:|:----------------- |
+|  15:0 | magic "ToA write log\x26\x01\x22" |
+| 20:16 | meta table size   |
+|   ... | meta table        |
+
+
+### Meta table
+
+The meta table is used by some containers.
+
+To support various usecases, it provides a table of key-value pairs.
+Keys must be valid UTF-8.
+Keys are prefixed with a 8-bit length in bytes.
+Values may be any arbitrary data.
+Values are prefixed with a 16-bit length in bytes.
