@@ -1,6 +1,6 @@
 #![no_std]
 
-pub use toa_hash::{hash, Hash};
+pub use toa_hash::{DataHasher, Hash, RefsHasher, hash};
 
 use core::fmt;
 

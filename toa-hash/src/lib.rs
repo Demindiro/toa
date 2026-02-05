@@ -3,7 +3,7 @@
 use core::fmt;
 use sha3::{
     TurboShake128, TurboShake128Core,
-    digest::{ExtendableOutput, Update, XofReader},
+    digest::{ExtendableOutput, Reset, Update, XofReader},
 };
 
 const DF_ROOT: u8 = 1 << 0;
@@ -16,6 +16,31 @@ const CHUNK_SIZE: usize = 1 << 13;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(transparent)]
 pub struct Hash(pub [u8; 32]);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+pub struct DataHash(Hash);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+pub struct RefsHash(Hash);
+
+#[derive(Clone)]
+pub struct DataHasher(TreeHasher);
+#[derive(Clone)]
+pub struct RefsHasher(TreeHasher);
+
+/// Chaining value
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+struct Cv(Hash);
+
+#[derive(Clone)]
+struct TreeHasher {
+    stack: arrayvec::ArrayVec<Cv, { 128 - 13 }>,
+    domain: u8,
+    chunk: TurboShake128,
+    len: u128,
+}
 
 impl Hash {
     pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
@@ -37,15 +62,170 @@ impl Hash {
     }
 }
 
+impl DataHash {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
+impl RefsHash {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
+
+impl Default for DataHasher {
+    fn default() -> Self {
+        Self(TreeHasher::new(DF_DATA))
+    }
+}
+
+impl Default for RefsHasher {
+    fn default() -> Self {
+        Self(TreeHasher::new(DF_REFS))
+    }
+}
+
+impl DataHasher {
+    pub fn update<T>(&mut self, data: T)
+    where
+        T: AsRef<[u8]>,
+    {
+        self.0.update(data.as_ref())
+    }
+
+    pub fn chain<T>(self, data: T) -> Self
+    where
+        T: AsRef<[u8]>,
+    {
+        Self(self.0.chain(data.as_ref()))
+    }
+
+    pub fn finalize(self) -> DataHash {
+        DataHash(self.0.finalize().0)
+    }
+}
+
+impl RefsHasher {
+    pub fn update<T>(&mut self, data: T)
+    where
+        T: AsRef<[Hash]>,
+    {
+        self.0.update(bytemuck::cast_slice(data.as_ref()))
+    }
+
+    pub fn chain<T>(self, data: T) -> Self
+    where
+        T: AsRef<[Hash]>,
+    {
+        Self(self.0.chain(bytemuck::cast_slice(data.as_ref())))
+    }
+
+    pub fn finalize(self) -> RefsHash {
+        RefsHash(self.0.finalize().0)
+    }
+}
+
+impl TreeHasher {
+    fn new(domain: u8) -> Self {
+        assert!(domain == DF_DATA || domain == DF_REFS);
+        Self {
+            domain,
+            stack: Default::default(),
+            chunk: TurboShake128::from_core(TurboShake128Core::new(domain | DF_LEAF)),
+            len: 0,
+        }
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        while let Some((mut y, n)) = self.chunk_update(data) {
+            data = &data[n..];
+            while self.stack.len() >= self.chunk_pos().count_ones() as usize {
+                let x = self.stack.pop().expect("chunk_pos() >= 1");
+                y = ts_pair(self.domain, &[x, y]);
+            }
+            self.stack.push(y);
+        }
+    }
+
+    fn chain(mut self, data: &[u8]) -> Self {
+        self.update(data);
+        self
+    }
+
+    fn finalize(mut self) -> Cv {
+        let Some(mut y) = self.stack.pop() else {
+            return self.chunk_take();
+        };
+        while let Some(x) = self.stack.pop() {
+            y = ts_pair(self.domain, &[x, y]);
+        }
+        y
+    }
+
+    /// # Returns
+    ///
+    /// `None` if the chunk isn't full, otherwise CV and amount of bytes consumed.
+    fn chunk_update(&mut self, data: &[u8]) -> Option<(Cv, usize)> {
+        if data.is_empty() {
+            return None;
+        }
+        let n = data.len().min(CHUNK_SIZE - self.chunk_len());
+        let data = &data[..n];
+        self.chunk.update(data);
+        self.len += n as u128;
+        (self.chunk_len() == 0).then(|| (self.chunk_take(), n))
+    }
+
+    fn chunk_take(&mut self) -> Cv {
+        let mut hash = [0; 32];
+        self.chunk.clone().finalize_xof().read(&mut hash);
+        self.chunk.reset();
+        Cv(Hash(hash))
+    }
+
+    fn chunk_len(&self) -> usize {
+        self.len as usize % CHUNK_SIZE
+    }
+
+    fn chunk_pos(&self) -> u128 {
+        self.len / CHUNK_SIZE as u128
+    }
+}
+
 impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         core::str::from_utf8(&self.to_hex()).expect("ascii").fmt(f)
     }
 }
 
+impl fmt::Display for DataHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for RefsHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Debug for DataHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "data:{}", self.0)
+    }
+}
+
+impl fmt::Debug for RefsHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "refs:{}", self.0)
     }
 }
 
@@ -69,30 +249,7 @@ fn root_hash(data: Hash, refs: Hash, data_len: u128, refs_len: u128) -> Hash {
 
 /// `domain` must be either `DF_DATA` or `DF_REFS`.
 fn tree_hash(domain: u8, data: &[u8]) -> Hash {
-    assert!(domain == DF_DATA || domain == DF_REFS);
-    if data.is_empty() {
-        return ts_hash(domain | DF_LEAF, &[]);
-    }
-    let mut stack = [Hash([0; 32]); 52];
-    let mut stack_i = 0usize;
-    for (i, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
-        let mut x = ts_hash(domain | DF_LEAF, chunk);
-        while stack_i >= (i + 1).count_ones() as usize {
-            stack_i -= 1;
-            x = ts_pair(domain, &[stack[stack_i], x]);
-        }
-        stack[stack_i] = x;
-        stack_i += 1;
-    }
-    stack_i -= 1;
-    while stack_i > 0 {
-        stack_i -= 1;
-        let [x, y] = stack[stack_i..][..2] else {
-            unreachable!()
-        };
-        stack[stack_i] = ts_pair(domain, &[x, y]);
-    }
-    stack[0]
+    TreeHasher::new(domain).chain(data).finalize().0
 }
 
 fn ts_hash(domain: u8, data: &[u8]) -> Hash {
@@ -104,8 +261,8 @@ fn ts_hash(domain: u8, data: &[u8]) -> Hash {
     Hash(hash)
 }
 
-fn ts_pair(domain: u8, cv: &[Hash; 2]) -> Hash {
-    ts_hash(domain, cv.map(|x| x.0).as_flattened())
+fn ts_pair(domain: u8, cv: &[Cv; 2]) -> Cv {
+    Cv(ts_hash(domain, cv.map(|x| x.0.0).as_flattened()))
 }
 
 #[cfg(test)]
@@ -113,7 +270,7 @@ mod tests {
     use super::*;
 
     fn p(x: Hash, y: Hash) -> Hash {
-        ts_pair(DF_DATA, &[x, y])
+        ts_pair(DF_DATA, &[x, y].map(Cv)).0
     }
 
     fn test_chunks<const N: usize, F>(f: F)
