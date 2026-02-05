@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 zstd-safe = { version = "7.2.4", default-features = false }
+toa-hash = { path = "../toa-hash" }

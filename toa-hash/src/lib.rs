@@ -1,6 +1,5 @@
 #![cfg_attr(not(test), no_std)]
 #[forbid(unused_must_use, unsafe_code)]
-
 use core::fmt;
 use sha3::{
     TurboShake128, TurboShake128Core,
@@ -16,7 +15,7 @@ const CHUNK_SIZE: usize = 1 << 13;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(transparent)]
-pub struct Hash([u8; 32]);
+pub struct Hash(pub [u8; 32]);
 
 impl Hash {
     pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
@@ -26,16 +25,21 @@ impl Hash {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    pub fn to_hex(&self) -> [u8; 64] {
+        let mut b = [0; 64];
+        for (w, x) in b.chunks_exact_mut(2).zip(self.0) {
+            let f = |i| b"0123456789abcdef"[usize::from(i)];
+            w[0] = f(x >> 4);
+            w[1] = f(x & 15);
+        }
+        b
+    }
 }
 
 impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = &mut [0; 64];
-        for (w, r) in s.chunks_exact_mut(2).zip(self.0) {
-            w[0] = b"0123456789abcdef"[usize::from(r >> 4)];
-            w[1] = b"0123456789abcdef"[usize::from(r & 15)];
-        }
-        core::str::from_utf8(s).expect("ascii").fmt(f)
+        core::str::from_utf8(&self.to_hex()).expect("ascii").fmt(f)
     }
 }
 
@@ -172,5 +176,21 @@ mod tests {
     #[test]
     fn hash_tree_9_chunks() {
         test_chunks(|[a, b, c, d, e, f, g, h, i]| p(p(p(p(a, b), p(c, d)), p(p(e, f), p(g, h))), i))
+    }
+
+    #[test]
+    fn hash_to_hex() {
+        assert_eq!(
+            Hash([0; 32]).to_hex(),
+            *b"0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            Hash([1; 32]).to_hex(),
+            *b"0101010101010101010101010101010101010101010101010101010101010101"
+        );
+        assert_eq!(
+            Hash([0xf7; 32]).to_hex(),
+            *b"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7"
+        );
     }
 }
