@@ -1,3 +1,5 @@
+#[cfg(feature = "magic")]
+mod magic;
 mod unix;
 
 use appender::{Hash, cache::MicroLru, worker};
@@ -94,7 +96,7 @@ impl Stat {
 }
 
 fn usage(procname: &str) -> Box<dyn Error> {
-    format!(
+    let s = format!(
         "\
 usage: {procname} <add|get|list>
     new <pack> [files...]
@@ -113,8 +115,12 @@ usage: {procname} <add|get|list>
     unix scrub <pack>
         verify directory tree integrity
         this does not check file contents, only whether they're present"
-    )
-    .into()
+    );
+    #[cfg(feature = "magic")]
+    let s = s + "
+    magic all <pack>
+        list all objects along with detected file type";
+    s.into()
 }
 
 fn args_end<A>(procname: &str, mut args: A) -> Result<()>
@@ -369,6 +375,8 @@ fn start() -> Result<()> {
         "meta" => cmd_meta(procname, args),
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
+        #[cfg(feature = "magic")]
+        "magic" => magic::cmd(procname, args),
         _ => Err(usage(procname)),
     }
 }
