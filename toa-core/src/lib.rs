@@ -37,6 +37,12 @@ impl fmt::Debug for Hash {
     }
 }
 
+impl fmt::Display for Hash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
 impl TryFrom<u32> for CompressionAlgorithm {
     type Error = UnknownCompressionAlgorithm;
 
