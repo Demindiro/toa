@@ -1,0 +1,8 @@
+[package]
+name = "toa-hash"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.25.0", features = ["derive"] }
+sha3 = { version = "0.10.8", default-features = false }
