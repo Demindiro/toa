@@ -85,7 +85,7 @@ impl<'a> DirIter<'a> {
         let name_offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let [a, b, c, d, e, f, g, h, x @ ..] = x;
         let modified = i64::from_le_bytes([a, b, c, d, e, f, g, h]);
-        let key = Hash(x);
+        let key = Hash::from_bytes(x);
         let name = self
             .object
             .read_exact(name_offset, name_len.into())
@@ -194,7 +194,8 @@ where
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
     println!("d {root_key:?} {root}");
     let mut meta = Meta::default();
-    meta.map.insert("unix.root".into(), root_key.0.into());
+    meta.map
+        .insert("unix.root".into(), (*root_key.as_bytes()).into());
     let dev = finish(dev, meta)?;
 
     stat.summarize(&dev)?;
@@ -383,7 +384,7 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
         buf.extend(names_offset.to_le_bytes());
         buf.extend(e.modified.to_le_bytes());
         match &e.key {
-            Data::Object(x) => buf.extend(x.0),
+            Data::Object(x) => buf.extend(x.as_bytes()),
             Data::Sym(x) => {
                 let len = x.len() as u64;
                 // FIXME we're adding the name offset *after* this statement,
@@ -426,7 +427,7 @@ fn new_reader(store: &str) -> Result<(Reader, Hash)> {
         .ok_or("meta key \"unix.root\" not found")?;
     let key = (&**key)
         .try_into()
-        .map(Hash)
+        .map(Hash::from_bytes)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     Ok((dev, key))
 }

@@ -187,7 +187,7 @@ impl Leaf {
         F: FnMut(&[u8]) -> Result<PackOffset, E>,
     {
         (f)(&Leaf2 {
-            hash: self.hash.0,
+            hash: *self.hash.as_bytes(),
             offset: self.ptr.offset.0,
             len: self.ptr.len,
         }

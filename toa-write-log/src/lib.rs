@@ -110,7 +110,7 @@ impl<S: Store> WriteLog<S> {
         for i in 0..len {
             let buf = store.read_entry(i)?;
             let key = buf[..32].try_into().expect("32 bytes");
-            lut.insert(Hash(key), i);
+            lut.insert(Hash::from_bytes(key), i);
         }
         Ok(Self { store, len, lut })
     }
@@ -176,7 +176,7 @@ impl<S: Store> WriteLog<S> {
     {
         if len <= CHUNK_SIZE_64 {
             let b = (data)().map_err(AddStreamError::Stream)?;
-            let key = Hash(*blake3::hash(b.as_ref()).as_bytes());
+            let key = Hash::from_bytes(*blake3::hash(b.as_ref()).as_bytes());
             self.add_chunk(&key, len, b.as_ref())
                 .map_err(AddStreamError::Store)?;
             return Ok(key);
@@ -191,7 +191,7 @@ impl<S: Store> WriteLog<S> {
                 .update(b.as_ref())
                 .finalize_non_root();
             let obj_len = (len - byte_offset).min(CHUNK_SIZE_64);
-            self.add_chunk(&Hash(cv), obj_len, b.as_ref())
+            self.add_chunk(&Hash::from_bytes(cv), obj_len, b.as_ref())
                 .map_err(AddStreamError::Store)?;
             self.merge(&mut stack, i.count_ones() as usize, len)
                 .map_err(AddStreamError::Store)?;
@@ -204,9 +204,9 @@ impl<S: Store> WriteLog<S> {
         assert!(stack.is_empty(), "all CVs popped");
         let z = blake3::hazmat::merge_subtrees_root(&x, &y, blake3::hazmat::Mode::Hash);
         let xy = xy.as_flattened();
-        self.add_chunk(&Hash(*z.as_bytes()), len, xy)
+        self.add_chunk(&Hash::from_bytes(*z.as_bytes()), len, xy)
             .map_err(AddStreamError::Store)?;
-        Ok(Hash(*z.as_bytes()))
+        Ok(Hash::from_bytes(*z.as_bytes()))
     }
 
     fn merge(
@@ -233,7 +233,7 @@ impl<S: Store> WriteLog<S> {
         let xy @ [x, y] = x.and_then(|x| y.map(|y| [x, y])).expect("at least 2 CV");
         let z = blake3::hazmat::merge_subtrees_non_root(&x, &y, blake3::hazmat::Mode::Hash);
         let xy = xy.as_flattened();
-        self.add_chunk(&Hash(z), obj_len, xy)?;
+        self.add_chunk(&Hash::from_bytes(z), obj_len, xy)?;
         stack.push(z);
         Ok(())
     }
@@ -253,7 +253,7 @@ impl<S: Store> WriteLog<S> {
             compression: CompressionAlgorithm::None,
         };
         let mut b = [0; 64];
-        b[..32].copy_from_slice(&key.0);
+        b[..32].copy_from_slice(key.as_bytes());
         b[32..].copy_from_slice(&entry.into_bytes());
         self.store.write_entry(&b)?;
         self.lut.insert(*key, self.len);
@@ -466,7 +466,7 @@ mod test {
         }
 
         fn add(&mut self, data: &[u8]) -> Hash {
-            let expect = Hash(*blake3::hash(data).as_bytes());
+            let expect = Hash::from_bytes(*blake3::hash(data).as_bytes());
             let key = self.log.add(data).expect("add");
             assert_eq!(expect, key);
             key

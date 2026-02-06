@@ -273,7 +273,7 @@ where
     let key = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let key = appender::Hash(parse_hex(&key)?);
+    let key = appender::Hash::from_bytes(parse_hex(&key)?);
     let (dev, _meta) = new_reader(&store)?;
     dump_object(&dev, &key)?;
 
@@ -348,7 +348,14 @@ where
             hasher.update(&x);
         }
         let hash = hasher.finalize();
-        if &key.0 == hash.as_bytes() {
+        let hash = toa_core::Root {
+            data_root: hash,
+            refs_root: toa_core::RefsHasher::default().finalize(),
+            data_len: u128::from(obj.len()) << 3,
+            refs_len: 0,
+        }
+        .hash();
+        if key == hash {
             n_ok += 1;
         } else {
             println!("fail ({key:?} != {hash})");

@@ -445,7 +445,7 @@ fn start() -> Result<()> {
         .map(|x| &**x)
         .ok_or("\"unix.root\" not present in meta table")?
         .try_into()
-        .map(Hash)
+        .map(Hash::from_bytes)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     let root = dev
         .get(&root_key)

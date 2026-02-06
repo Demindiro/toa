@@ -70,7 +70,7 @@ impl<'a> Dir<'a> {
         let name_offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let [a, b, c, d, e, f, g, h, x @ ..] = x;
         let modified = i64::from_le_bytes([a, b, c, d, e, f, g, h]);
-        let key = Hash(x);
+        let key = Hash::from_bytes(x);
         let name = self
             .object
             .read_exact(name_offset, name_len.into())
@@ -91,7 +91,7 @@ impl<'a> Dir<'a> {
     }
 
     pub fn symlink_slice(&self, item: &DirItem) -> appender::ObjectRaw {
-        let [a, b, c, d, e, f, g, h, x @ ..] = item.key.0;
+        let [a, b, c, d, e, f, g, h, x @ ..] = *item.key.as_bytes();
         let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let [a, b, c, d, e, f, g, h, ..] = x;
         let len = u64::from_le_bytes([a, b, c, d, e, f, g, h]);

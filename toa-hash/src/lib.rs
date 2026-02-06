@@ -13,22 +13,10 @@ const DF_LEAF: u8 = 1 << 3;
 
 const CHUNK_SIZE: usize = 1 << 13;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(transparent)]
-pub struct Hash(pub [u8; 32]);
-
 #[derive(Clone)]
 pub struct DataHasher(TreeHasher);
 #[derive(Clone)]
 pub struct RefsHasher(TreeHasher);
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(transparent)]
-pub struct RefsCv(Cv);
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(transparent)]
-pub struct DataCv(Cv);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -42,7 +30,7 @@ pub struct Root {
 /// Chaining value
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(transparent)]
-struct Cv(Hash);
+struct Cv([u8; 32]);
 
 #[derive(Clone)]
 struct TreeHasher {
@@ -50,46 +38,6 @@ struct TreeHasher {
     domain: u8,
     chunk: TurboShake128,
     len: u128,
-}
-
-impl Hash {
-    pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
-        bytemuck::cast_slice(slice)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    pub fn to_hex(&self) -> [u8; 64] {
-        let mut b = [0; 64];
-        for (w, x) in b.chunks_exact_mut(2).zip(self.0) {
-            let f = |i| b"0123456789abcdef"[usize::from(i)];
-            w[0] = f(x >> 4);
-            w[1] = f(x & 15);
-        }
-        b
-    }
-}
-
-impl DataCv {
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.0.as_bytes()
-    }
-
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(Cv(Hash(bytes)))
-    }
-}
-
-impl RefsCv {
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.0.as_bytes()
-    }
-
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(Cv(Hash(bytes)))
-    }
 }
 
 impl Default for DataHasher {
@@ -160,7 +108,7 @@ impl TreeHasher {
             data = &data[n..];
             while self.stack.len() >= self.chunk_pos().count_ones() as usize {
                 let x = self.stack.pop().expect("chunk_pos() >= 1");
-                y = ts_pair(self.domain, &[x, y]);
+                y = ts_pair(self.domain, x, y);
             }
             self.stack.push(y);
         }
@@ -180,7 +128,7 @@ impl TreeHasher {
             return self.chunk_take();
         };
         while let Some(x) = self.stack.pop() {
-            y = ts_pair(self.domain, &[x, y]);
+            y = ts_pair(self.domain, x, y);
         }
         y
     }
@@ -203,7 +151,7 @@ impl TreeHasher {
         let mut hash = [0; 32];
         self.chunk.clone().finalize_xof().read(&mut hash);
         self.chunk.reset();
-        Cv(Hash(hash))
+        Cv(hash)
     }
 
     fn chunk_len(&self) -> usize {
@@ -221,7 +169,7 @@ impl TreeHasher {
 
 impl Root {
     pub fn hash(&self) -> Hash {
-        ts_hash(DF_ROOT, &self.to_bytes())
+        Hash(ts_hash(DF_ROOT, &self.to_bytes()))
     }
 
     // TODO add u128le
@@ -240,53 +188,87 @@ impl Root {
     }
 }
 
-impl fmt::Display for Hash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        core::str::from_utf8(&self.to_hex()).expect("ascii").fmt(f)
+macro_rules! impl_hash {
+    ($name:ident) => {
+        #[derive(
+            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable,
+        )]
+        #[repr(transparent)]
+        pub struct $name(Cv);
+
+        impl $name {
+            pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
+                bytemuck::cast_slice(slice)
+            }
+
+            pub fn as_bytes(&self) -> &[u8; 32] {
+                self.0.as_bytes()
+            }
+
+            pub fn from_bytes(bytes: [u8; 32]) -> Self {
+                Self(Cv(bytes))
+            }
+
+            pub fn to_hex(&self) -> [u8; 64] {
+                self.0.to_hex()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
+}
+
+impl_hash!(Hash);
+impl_hash!(DataCv);
+impl_hash!(RefsCv);
+
+impl Cv {
+    pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
+        bytemuck::cast_slice(slice)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> [u8; 64] {
+        let mut b = [0; 64];
+        for (w, x) in b.chunks_exact_mut(2).zip(self.0) {
+            let f = |i| b"0123456789abcdef"[usize::from(i)];
+            w[0] = f(x >> 4);
+            w[1] = f(x & 15);
+        }
+        b
     }
 }
 
 impl fmt::Display for Cv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        core::str::from_utf8(&self.to_hex()).expect("ascii").fmt(f)
     }
 }
 
-impl fmt::Display for DataCv {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl fmt::Display for RefsCv {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl fmt::Debug for Hash {
+impl fmt::Debug for Cv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
-    }
-}
-
-impl fmt::Debug for DataCv {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "data:{}", self.0)
-    }
-}
-
-impl fmt::Debug for RefsCv {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "refs:{}", self.0)
     }
 }
 
 pub fn hash(data: &[u8], refs: &[Hash]) -> Hash {
     let refs = Hash::slice_as_bytes(refs).as_flattened();
     Root {
-        data_root: DataCv(Cv(tree_hash(DF_DATA, data))),
-        refs_root: RefsCv(Cv(tree_hash(DF_REFS, refs))),
+        data_root: DataCv(tree_hash(DF_DATA, data)),
+        refs_root: RefsCv(tree_hash(DF_REFS, refs)),
         data_len: (data.len() as u128) << 3,
         refs_len: (refs.len() as u128) << 3,
     }
@@ -302,7 +284,7 @@ where
 {
     let data = data.as_ref();
     assert!(data.len() <= CHUNK_SIZE);
-    DataCv(Cv(ts_hash(DF_DATA | DF_LEAF, data)))
+    DataCv(ts_hash(DF_DATA | DF_LEAF, data))
 }
 
 /// # Panics
@@ -314,46 +296,46 @@ where
 {
     let refs = refs.as_ref();
     assert!(refs.len() <= CHUNK_SIZE / 32);
-    RefsCv(Cv(ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs))))
+    RefsCv(ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs)))
 }
 
 pub fn data_pair_cv(x: DataCv, y: DataCv) -> DataCv {
-    DataCv(ts_pair(DF_DATA, &[x.0, y.0]))
+    DataCv(ts_pair(DF_DATA, x.0, y.0))
 }
 
 pub fn refs_pair_cv(x: RefsCv, y: RefsCv) -> RefsCv {
-    RefsCv(ts_pair(DF_REFS, &[x.0, y.0]))
+    RefsCv(ts_pair(DF_REFS, x.0, y.0))
 }
 
 /// `domain` must be either `DF_DATA` or `DF_REFS`.
-fn tree_hash(domain: u8, data: &[u8]) -> Hash {
-    TreeHasher::new(domain).chain(data).finalize().0
+fn tree_hash(domain: u8, data: &[u8]) -> Cv {
+    TreeHasher::new(domain).chain(data).finalize()
 }
 
-fn ts_hash(domain: u8, data: &[u8]) -> Hash {
-    let mut hash = [0; 32];
+fn ts_hash(domain: u8, data: &[u8]) -> Cv {
+    let mut cv = [0; 32];
     TurboShake128::from_core(TurboShake128Core::new(domain))
         .chain(data)
         .finalize_xof()
-        .read(&mut hash);
-    Hash(hash)
+        .read(&mut cv);
+    Cv(cv)
 }
 
-fn ts_pair(domain: u8, cv: &[Cv; 2]) -> Cv {
-    Cv(ts_hash(domain, cv.map(|x| x.0.0).as_flattened()))
+fn ts_pair(domain: u8, x: Cv, y: Cv) -> Cv {
+    ts_hash(domain, [x, y].map(|x| x.0).as_flattened())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn p(x: Hash, y: Hash) -> Hash {
-        ts_pair(DF_DATA, &[x, y].map(Cv)).0
+    fn p(x: Cv, y: Cv) -> Cv {
+        ts_pair(DF_DATA, x, y)
     }
 
     fn test_chunks<const N: usize, F>(f: F)
     where
-        F: FnOnce([Hash; N]) -> Hash,
+        F: FnOnce([Cv; N]) -> Cv,
     {
         let mut t = [0; N];
         t.iter_mut().enumerate().for_each(|(i, x)| *x = i as u8);
@@ -422,17 +404,17 @@ mod tests {
     }
 
     #[test]
-    fn hash_to_hex() {
+    fn cv_to_hex() {
         assert_eq!(
-            Hash([0; 32]).to_hex(),
+            Cv([0; 32]).to_hex(),
             *b"0000000000000000000000000000000000000000000000000000000000000000"
         );
         assert_eq!(
-            Hash([1; 32]).to_hex(),
+            Cv([1; 32]).to_hex(),
             *b"0101010101010101010101010101010101010101010101010101010101010101"
         );
         assert_eq!(
-            Hash([0xf7; 32]).to_hex(),
+            Cv([0xf7; 32]).to_hex(),
             *b"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7"
         );
     }
