@@ -13,9 +13,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const MAGIC: [u8; 16] = *b"Appender\x20\x25\x12\x25\0\0\0\0";
-const XATTR_NAME_LIST: &[u8] = b"user.hash.blake3\0";
-const XATTR_NAME_HASH_BLAKE3: &[u8] = b"user.hash.blake3";
+const MAGIC: [u8; 16] = *b"Appender\x20\x26\x02\x06\0\0\0\0";
+const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
+const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
@@ -349,7 +349,7 @@ impl fuser::Filesystem for Fs {
         reply: fuser::ReplyXattr,
     ) {
         match name.as_encoded_bytes() {
-            self::XATTR_NAME_HASH_BLAKE3 => match size {
+            self::XATTR_NAME_HASH_TOA => match size {
                 0 => reply.size(64),
                 ..64 => reply.error(libc::ERANGE),
                 64.. => {
@@ -445,7 +445,7 @@ fn start() -> Result<()> {
         .map(|x| &**x)
         .ok_or("\"unix.root\" not present in meta table")?
         .try_into()
-        .map(Hash)
+        .map(Hash::from_bytes)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     let root = dev
         .get(&root_key)

@@ -41,7 +41,7 @@ impl Leaf2 {
 
 impl ByteIndex {
     fn get(&self, key: &Hash) -> Byte {
-        Byte(key.0[usize::from(self.0)])
+        Byte(key.as_bytes()[usize::from(self.0)])
     }
 
     fn next(&self) -> Self {

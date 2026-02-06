@@ -40,7 +40,7 @@ A pack consists of several structures:
 - A HAMT mapping keys to objects (Hash Array Mapped Trie)
 - A record trie of compressed, encrypted strips of data
 
-All cryptographic hashes use BLAKE3 except when noted otherwise.
+All cryptographic hashes use TOA hash except when noted otherwise.
 
 ### Key & encryption
 

@@ -10,7 +10,6 @@ pub mod pack;
 mod reader;
 pub mod record;
 
-pub use blake3;
 pub use builder::{Builder, worker};
 pub use chacha20poly1305::Key;
 pub use reader::{Object, Reader, cache};
@@ -82,7 +81,7 @@ mod test {
         }
 
         fn add(&mut self, data: &[u8]) -> Hash {
-            self.builder.add(data).expect("add failed")
+            self.builder.add(data, &[]).expect("add failed")
         }
     }
 

@@ -26,7 +26,7 @@ where
             let buf = &mut [0; 48];
             f(0, buf)?;
             let Leaf2 { hash, offset, len } = Leaf2::from_bytes(buf);
-            return Ok((hash == key.0).then_some(ObjectRaw {
+            return Ok((hash == *key.as_bytes()).then_some(ObjectRaw {
                 offset: PackOffset(offset),
                 len,
             }));
@@ -83,5 +83,5 @@ where
     let buf = &mut [0; 48];
     (dev)(PackOffset(offset), buf)?;
     let Leaf2 { hash, .. } = Leaf2::from_bytes(buf);
-    Ok((with)(Hash(hash)))
+    Ok((with)(Hash::from_bytes(hash)))
 }
