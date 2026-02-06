@@ -13,7 +13,7 @@ use std::{
     ops,
 };
 
-const MAGIC: [u8; 16] = *b"Appender\x20\x25\x12\x25\0\0\0\0";
+const MAGIC: [u8; 16] = *b"Appender\x20\x26\x02\x06\0\0\0\0";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Builder = appender::Builder<File, worker::ThreadPool<worker::Work>>;
@@ -207,7 +207,7 @@ fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
     };
     stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
     let key = dev
-        .add(&data)
+        .add(&data, &[])
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
 }
@@ -342,7 +342,7 @@ where
     let mut n_ok @ mut n_fail = 0;
     objects.into_iter().for_each(|(key, obj)| {
         let obj = appender::Object::from_raw(obj, &*dev);
-        let mut hasher = appender::blake3::Hasher::new();
+        let mut hasher = toa_core::DataHasher::default();
         for x in obj.read_exact(0, usize::MAX).unwrap() {
             let x = x.unwrap();
             hasher.update(&x);

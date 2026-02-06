@@ -62,10 +62,10 @@ where
     D: device::Write,
     W: worker::Workers<Work>,
 {
-    pub fn add(&mut self, data: &[u8]) -> Result<Hash, Error<D::Error>> {
+    pub fn add(&mut self, data: &[u8], refs: &[Hash]) -> Result<Hash, Error<D::Error>> {
         self.poll_workers()?;
-        let h = blake3::hash(data);
-        self.add_with_key(Hash(h.into()), data)
+        let h = toa_core::hash(data, refs);
+        self.add_with_key(h, data)
     }
 
     fn add_with_key(&mut self, key: Hash, data: &[u8]) -> Result<Hash, Error<D::Error>> {

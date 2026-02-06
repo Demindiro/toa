@@ -406,7 +406,7 @@ fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
         }
     }
 
-    dev.add(&buf)
+    dev.add(&buf, &[])
         .map_err(|e| format!("failed to add : {e:?}").into())
 }
 
