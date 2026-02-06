@@ -194,9 +194,8 @@ but stores the hash of the root directory right before the pack reference.
 
 As directories are primarily read by programs,
 it is in a binary format.
-The format starts with the magic "Appender UNIX directory\0",
-followed by a 64-bit entry count.
-It is immediately followed by `entry-count` entries:
+
+For every entry there is a 32-byte descriptor at the start of the data blob.
 
 | bytes | short description |
 | -----:|:----------------- |
@@ -207,7 +206,6 @@ It is immediately followed by `entry-count` entries:
 | 15:12 | GID               |
 | 23:16 | name offset       |
 | 31:24 | modified time     |
-| 63:32 | hash / path       |
 
 If the length is 0 then the real length must be found by looking up the object.
 
@@ -218,10 +216,7 @@ If the length is 0 then the real length must be found by looking up the object.
 
 Type 0 is a regular file, type 1 is a directory and type 2 is a symbolic link.
 
-Regular files and directory entries use a hash,
-symbolic links use an offset + length in the same name array for the path.
-
-Names are stored after the entry array.
+Names are stored after the descriptor array.
 
 Modified time is in terms of microseconds.
 
@@ -229,7 +224,7 @@ Entries MUST be sorted by name.
 Names blob MUST be in order of the entries.
 Symbolic link paths MUST follow immediately after the corresponding name.
 
-!!! note This increases the chances of identical directories being deduplicated.
+> This increases the chances of identical directories being deduplicated.
 
 The paths MUST be valid UTF-8.
 
