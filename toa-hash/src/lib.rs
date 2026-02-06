@@ -154,7 +154,11 @@ impl TreeHasher {
     }
 
     fn finalize(mut self) -> Cv {
-        let Some(mut y) = self.stack.pop() else {
+        let mut y = if !self.chunk_is_empty() {
+            self.chunk_take()
+        } else if let Some(y) = self.stack.pop() {
+            y
+        } else {
             return self.chunk_take();
         };
         while let Some(x) = self.stack.pop() {
@@ -174,7 +178,7 @@ impl TreeHasher {
         let data = &data[..n];
         self.chunk.update(data);
         self.len += n as u128;
-        (self.chunk_len() == 0).then(|| (self.chunk_take(), n))
+        self.chunk_is_empty().then(|| (self.chunk_take(), n))
     }
 
     fn chunk_take(&mut self) -> Cv {
@@ -190,6 +194,10 @@ impl TreeHasher {
 
     fn chunk_pos(&self) -> u128 {
         self.len / CHUNK_SIZE as u128
+    }
+
+    fn chunk_is_empty(&self) -> bool {
+        self.chunk_len() == 0
     }
 }
 
@@ -296,6 +304,14 @@ mod tests {
         let expect = ts_hash(DF_DATA | DF_LEAF, b"x");
         let result = tree_hash(DF_DATA, b"x");
         assert_eq!(result, expect);
+    }
+
+    #[test]
+    fn hash_tree_chunk_plus_one_byte() {
+        let data = [b'x'; CHUNK_SIZE + 1];
+        let a = ts_hash(DF_DATA | DF_LEAF, &data[..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE..]);
+        assert_eq!(p(a, b), tree_hash(DF_DATA, &data));
     }
 
     #[test]
