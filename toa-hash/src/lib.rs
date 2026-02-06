@@ -17,17 +17,27 @@ const CHUNK_SIZE: usize = 1 << 13;
 #[repr(transparent)]
 pub struct Hash(pub [u8; 32]);
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(transparent)]
-pub struct DataHash(Hash);
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(transparent)]
-pub struct RefsHash(Hash);
-
 #[derive(Clone)]
 pub struct DataHasher(TreeHasher);
 #[derive(Clone)]
 pub struct RefsHasher(TreeHasher);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+pub struct RefsCv(Cv);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+pub struct DataCv(Cv);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct Root {
+    pub data_root: DataCv,
+    pub refs_root: RefsCv,
+    pub data_len: u128,
+    pub refs_len: u128,
+}
 
 /// Chaining value
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
@@ -62,15 +72,23 @@ impl Hash {
     }
 }
 
-impl DataHash {
+impl DataCv {
     pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
+        self.0.0.as_bytes()
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Cv(Hash(bytes)))
     }
 }
 
-impl RefsHash {
+impl RefsCv {
     pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
+        self.0.0.as_bytes()
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Cv(Hash(bytes)))
     }
 }
 
@@ -101,8 +119,8 @@ impl DataHasher {
         Self(self.0.chain(data.as_ref()))
     }
 
-    pub fn finalize(self) -> DataHash {
-        DataHash(self.0.finalize().0)
+    pub fn finalize(self) -> DataCv {
+        DataCv(self.0.finalize())
     }
 }
 
@@ -121,8 +139,8 @@ impl RefsHasher {
         Self(self.0.chain(bytemuck::cast_slice(data.as_ref())))
     }
 
-    pub fn finalize(self) -> RefsHash {
-        RefsHash(self.0.finalize().0)
+    pub fn finalize(self) -> RefsCv {
+        RefsCv(self.0.finalize())
     }
 }
 
@@ -201,19 +219,46 @@ impl TreeHasher {
     }
 }
 
+impl Root {
+    pub fn hash(&self) -> Hash {
+        ts_hash(DF_ROOT, &self.to_bytes())
+    }
+
+    // TODO add u128le
+    // I hate endian!
+    pub fn to_bytes(mut self) -> [u8; 96] {
+        self.data_len = self.data_len.to_le();
+        self.refs_len = self.refs_len.to_le();
+        bytemuck::cast(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8; 96]) -> Self {
+        let mut x: Self = bytemuck::cast(*bytes);
+        x.data_len = x.data_len.to_le();
+        x.refs_len = x.refs_len.to_le();
+        x
+    }
+}
+
 impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         core::str::from_utf8(&self.to_hex()).expect("ascii").fmt(f)
     }
 }
 
-impl fmt::Display for DataHash {
+impl fmt::Display for Cv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl fmt::Display for RefsHash {
+impl fmt::Display for DataCv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for RefsCv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -225,13 +270,13 @@ impl fmt::Debug for Hash {
     }
 }
 
-impl fmt::Debug for DataHash {
+impl fmt::Debug for DataCv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "data:{}", self.0)
     }
 }
 
-impl fmt::Debug for RefsHash {
+impl fmt::Debug for RefsCv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "refs:{}", self.0)
     }
@@ -239,20 +284,45 @@ impl fmt::Debug for RefsHash {
 
 pub fn hash(data: &[u8], refs: &[Hash]) -> Hash {
     let refs = Hash::slice_as_bytes(refs).as_flattened();
-    let data_len = (data.len() as u128) << 3;
-    let refs_len = (refs.len() as u128) << 3;
-    let data = tree_hash(DF_DATA, data);
-    let refs = tree_hash(DF_REFS, refs);
-    root_hash(data, refs, data_len, refs_len)
+    Root {
+        data_root: DataCv(Cv(tree_hash(DF_DATA, data))),
+        refs_root: RefsCv(Cv(tree_hash(DF_REFS, refs))),
+        data_len: (data.len() as u128) << 3,
+        refs_len: (refs.len() as u128) << 3,
+    }
+    .hash()
 }
 
-fn root_hash(data: Hash, refs: Hash, data_len: u128, refs_len: u128) -> Hash {
-    let mut b = [0; 96];
-    b[..32].copy_from_slice(data.as_bytes());
-    b[32..64].copy_from_slice(refs.as_bytes());
-    b[64..80].copy_from_slice(&data_len.to_le_bytes());
-    b[80..].copy_from_slice(&refs_len.to_le_bytes());
-    ts_hash(DF_ROOT, &b)
+/// # Panics
+///
+/// If there are more than `CHUNK_SIZE` bytes.
+pub fn data_chunk_cv<T>(data: T) -> DataCv
+where
+    T: AsRef<[u8]>,
+{
+    let data = data.as_ref();
+    assert!(data.len() <= CHUNK_SIZE);
+    DataCv(Cv(ts_hash(DF_DATA | DF_LEAF, data)))
+}
+
+/// # Panics
+///
+/// If there are more than `CHUNK_SIZE / 32` items.
+pub fn refs_chunk_cv<T>(refs: T) -> RefsCv
+where
+    T: AsRef<[Hash]>,
+{
+    let refs = refs.as_ref();
+    assert!(refs.len() <= CHUNK_SIZE / 32);
+    RefsCv(Cv(ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs))))
+}
+
+pub fn data_pair_cv(x: DataCv, y: DataCv) -> DataCv {
+    DataCv(ts_pair(DF_DATA, &[x.0, y.0]))
+}
+
+pub fn refs_pair_cv(x: RefsCv, y: RefsCv) -> RefsCv {
+    RefsCv(ts_pair(DF_REFS, &[x.0, y.0]))
 }
 
 /// `domain` must be either `DF_DATA` or `DF_REFS`.
