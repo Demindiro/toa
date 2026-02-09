@@ -1,5 +1,5 @@
 use crate::{InnerReader, Result};
-use appender::{Hash, Object};
+use toa::{Hash, Object};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
 
@@ -90,12 +90,12 @@ impl<'a> Dir<'a> {
         }))
     }
 
-    pub fn symlink_slice(&self, item: &DirItem) -> appender::ObjectRaw {
+    pub fn symlink_slice(&self, item: &DirItem) -> toa::ObjectRaw {
         let [a, b, c, d, e, f, g, h, x @ ..] = *item.key.as_bytes();
         let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let [a, b, c, d, e, f, g, h, ..] = x;
         let len = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
-        // FIXME workaround for bug in appender-cli
+        // FIXME workaround for bug in toa-cli
         let offset = offset + item.name.len() as u64;
         self.object
             .to_raw()

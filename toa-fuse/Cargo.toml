@@ -1,10 +1,10 @@
 [package]
-name = "appender-fuse"
+name = "toa-fuse"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-appender = { path = "../appender", features = ["std"] }
+toa = { path = "../toa", features = ["std"] }
 env_logger = "0.11.8"
 fuser = "0.16.0"
 libc = "0.2.178"

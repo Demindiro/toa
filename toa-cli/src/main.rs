@@ -2,7 +2,7 @@
 mod magic;
 mod unix;
 
-use appender::{Hash, cache::MicroLru, worker};
+use toa::{Hash, cache::MicroLru, worker};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -16,8 +16,8 @@ use std::{
 const MAGIC: [u8; 16] = *b"Appender\x20\x26\x02\x06\0\0\0\0";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Builder = appender::Builder<File, worker::ThreadPool<worker::Work>>;
-type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
+type Builder = toa::Builder<File, worker::ThreadPool<worker::Work>>;
+type InnerReader = toa::Reader<File, MicroLru<Box<[u8]>>>;
 
 struct Reader {
     inner: InnerReader,
@@ -60,13 +60,13 @@ impl Reader {
 
         let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
 
-        let packref = appender::PackRef(buf);
+        let packref = toa::PackRef(buf);
         let inner = InnerReader::new(dev, Default::default(), packref)
             .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
         Ok((Reader { inner }, meta))
     }
 
-    fn get(&self, key: &Hash) -> Result<appender::Object<'_, InnerReader>> {
+    fn get(&self, key: &Hash) -> Result<toa::Object<'_, InnerReader>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query store: {e:?}"))?
@@ -273,7 +273,7 @@ where
     let key = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let key = appender::Hash::from_bytes(parse_hex(&key)?);
+    let key = toa::Hash::from_bytes(parse_hex(&key)?);
     let (dev, _meta) = new_reader(&store)?;
     dump_object(&dev, &key)?;
 
@@ -341,7 +341,7 @@ where
     eprintln!("traversing objects...");
     let mut n_ok @ mut n_fail = 0;
     objects.into_iter().for_each(|(key, obj)| {
-        let obj = appender::Object::from_raw(obj, &*dev);
+        let obj = toa::Object::from_raw(obj, &*dev);
         let mut hasher = toa_core::DataHasher::default();
         for x in obj.read_exact(0, usize::MAX).unwrap() {
             let x = x.unwrap();
@@ -373,7 +373,7 @@ where
 fn start() -> Result<()> {
     let mut args = std::env::args();
     let procname = args.next();
-    let procname = procname.as_deref().unwrap_or("appender-cli");
+    let procname = procname.as_deref().unwrap_or("toa-cli");
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
         "new" => cmd_new(procname, args),

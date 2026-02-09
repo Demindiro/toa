@@ -2,7 +2,7 @@ use crate::{
     Builder, InnerReader, Meta, Reader, Result, Stat, add_file, args_end, finish, new_builder,
     usage,
 };
-use appender::{Hash, Object};
+use toa::{Hash, Object};
 use chrono::prelude::*;
 use std::{fmt, fs, path::Path};
 
@@ -30,7 +30,7 @@ enum DirItemType {
     SymLink,
 }
 
-struct ObjectRawOrd(appender::ObjectRaw);
+struct ObjectRawOrd(toa::ObjectRaw);
 
 impl<'a> DirIter<'a> {
     fn new(dev: &'a Reader, key: &Hash) -> Result<Self> {

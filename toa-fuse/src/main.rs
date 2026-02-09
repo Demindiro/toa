@@ -1,6 +1,6 @@
 mod unix;
 
-use appender::{Hash, Object, ObjectRaw, cache::MicroLru};
+use toa::{Hash, Object, ObjectRaw, cache::MicroLru};
 use std::{
     collections::{BTreeMap, btree_map},
     error::Error,
@@ -18,7 +18,7 @@ const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
+type InnerReader = toa::Reader<File, MicroLru<Box<[u8]>>>;
 
 struct Reader {
     inner: InnerReader,
@@ -77,13 +77,13 @@ impl Reader {
 
         let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
 
-        let packref = appender::PackRef(buf);
+        let packref = toa::PackRef(buf);
         let inner = InnerReader::new(dev, Default::default(), packref)
             .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
         Ok((Reader { inner }, meta))
     }
 
-    fn get(&self, key: &Hash) -> Result<appender::Object<'_, InnerReader>> {
+    fn get(&self, key: &Hash) -> Result<toa::Object<'_, InnerReader>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query pack: {e:?}"))?
@@ -427,7 +427,7 @@ fn start() -> Result<()> {
 
     let mut args = std::env::args();
     let procname = args.next();
-    let procname = procname.as_deref().unwrap_or("appender-fuse");
+    let procname = procname.as_deref().unwrap_or("toa-fuse");
 
     let pack = args.next().ok_or_else(|| usage(procname))?;
     let mount = args.next().ok_or_else(|| usage(procname))?;
@@ -469,7 +469,7 @@ fn start() -> Result<()> {
         ino_counter: 2,
     };
     let mut opt = vec![
-        fuser::MountOption::FSName("appender".into()),
+        fuser::MountOption::FSName("toa".into()),
         //fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
         fuser::MountOption::NoDev,
