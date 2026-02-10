@@ -323,7 +323,7 @@ macro_rules! impl_cv {
                     .store
                     .get_chunk(self.root.as_bytes())
                     .unwrap_or(None)
-                    .map_or(0, |x| x.as_ref().len() as u128)
+                    .map_or(0, |x| (x.as_ref().len() / mem::size_of::<$ty>()) as u128)
             }
         }
     };
