@@ -3,7 +3,8 @@
 
 pub use toa_core::{self as core, Hash};
 
-use toa_core::DataCv;
+use ::core::mem;
+use toa_core::{DataCv, RefsCv};
 
 const NAMESPACE_ROOTS: u8 = 1;
 const NAMESPACE_PAIRS: u8 = 2;
@@ -55,22 +56,6 @@ pub enum ToaKvStoreError<T> {
 pub struct Object<S> {
     toa: S,
     root: toa_core::Root,
-}
-
-pub enum Data<'a, S> {
-    Pair(DataPair<'a, S>),
-    Chunk(DataChunk<'a, S>),
-}
-
-pub struct DataPair<'a, S> {
-    toa: &'a Toa<S>,
-    root: DataCv,
-    len: u128,
-}
-
-pub struct DataChunk<'a, S> {
-    toa: &'a Toa<S>,
-    root: DataCv,
 }
 
 #[derive(Debug)]
@@ -179,107 +164,164 @@ where
         Self { toa, root }
     }
 
+    /// Size of data blob **in bits**.
     pub fn data_len(&self) -> u128 {
         self.root.data_len
+    }
+
+    /// Size of references blob **in bits**.
+    pub fn refs_len(&self) -> u128 {
+        self.root.refs_len
     }
 
     pub fn data(&self) -> Data<'t, S> {
         Data::new(self.toa, self.root.data_root, (self.root.data_len + 7) >> 3)
     }
-}
 
-impl<'t, S> Data<'t, S>
-where
-    S: ToaStore,
-{
-    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<S::Error>> {
-        match self {
-            Data::Pair(x) => x.read(offset, buf),
-            Data::Chunk(x) => x.read(offset, buf),
-        }
-    }
-
-    pub fn read_exact(&self, offset: u128, buf: &mut [u8]) -> Result<(), ReadExactError<S::Error>> {
-        if self.len().saturating_sub(offset) < buf.len() as u128 {
-            return Err(ReadExactError::Truncated);
-        }
-        self.read(offset, buf).map(|_| ()).map_err(|x| x.into())
-    }
-
-    pub fn len(&self) -> u128 {
-        match self {
-            Self::Chunk(x) => x.len(),
-            Self::Pair(x) => x.len(),
-        }
-    }
-
-    fn new(toa: &'t Toa<S>, root: DataCv, len: u128) -> Self {
-        if len <= CHUNK_SIZE {
-            Self::Chunk(DataChunk { toa, root })
-        } else {
-            Self::Pair(DataPair { toa, root, len })
-        }
+    pub fn refs(&self) -> Refs<'t, S> {
+        Refs::new(
+            self.toa,
+            self.root.refs_root,
+            (self.root.refs_len + 255) >> 8,
+        )
     }
 }
 
-impl<'t, S> DataPair<'t, S>
-where
-    S: ToaStore,
-{
-    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<S::Error>> {
-        if buf.is_empty() || offset >= self.len {
-            return Ok(0);
+macro_rules! impl_cv {
+    ($cv:ident $root:ident $pair:ident $chunk:ident $ty:ident $docname:literal) => {
+        pub enum $root<'a, S> {
+            Pair($pair<'a, S>),
+            Chunk($chunk<'a, S>),
         }
-        let x = self
-            .toa
-            .store
-            .get_pair(self.root.as_bytes())
-            .map_err(ReadError::Store)?
-            .ok_or(ReadError::MissingPair)?;
-        let y = DataCv::from_bytes(x[32..].try_into().unwrap());
-        let x = DataCv::from_bytes(x[..32].try_into().unwrap());
-        let xl = self.len.next_power_of_two() >> 1;
-        let yl = self.len - xl;
-        let x = Data::new(self.toa, x, xl);
-        let y = Data::new(self.toa, y, yl);
-        let n = xl.saturating_sub(offset).min(buf.len() as u128) as usize;
-        let (xb, yb) = buf.split_at_mut(n);
-        Ok(x.read(offset, xb)? + y.read(offset.saturating_sub(xl), yb)?)
-    }
 
-    fn len(&self) -> u128 {
-        self.len
-    }
+        pub struct $pair<'a, S> {
+            toa: &'a Toa<S>,
+            root: $cv,
+            len: u128,
+        }
+
+        pub struct $chunk<'a, S> {
+            toa: &'a Toa<S>,
+            root: $cv,
+        }
+
+        impl<'t, S> $root<'t, S>
+        where
+            S: ToaStore,
+        {
+            pub fn read(
+                &self,
+                offset: u128,
+                buf: &mut [$ty],
+            ) -> Result<usize, ReadError<S::Error>> {
+                match self {
+                    Self::Pair(x) => x.read(offset, buf),
+                    Self::Chunk(x) => x.read(offset, buf),
+                }
+            }
+
+            pub fn read_exact(
+                &self,
+                offset: u128,
+                buf: &mut [$ty],
+            ) -> Result<(), ReadExactError<S::Error>> {
+                if self.len().saturating_sub(offset) < buf.len() as u128 {
+                    return Err(ReadExactError::Truncated);
+                }
+                self.read(offset, buf).map(|_| ()).map_err(|x| x.into())
+            }
+
+            #[doc = "Size of data blob **in "]
+            #[doc = $docname]
+            #[doc = "** (rounded up)."]
+            pub fn len(&self) -> u128 {
+                match self {
+                    Self::Chunk(x) => x.len(),
+                    Self::Pair(x) => x.len(),
+                }
+            }
+
+            fn new(toa: &'t Toa<S>, root: $cv, len: u128) -> Self {
+                if len <= (CHUNK_SIZE / mem::size_of::<$ty>() as u128) {
+                    Self::Chunk($chunk { toa, root })
+                } else {
+                    Self::Pair($pair { toa, root, len })
+                }
+            }
+        }
+
+        impl<'t, S> $pair<'t, S>
+        where
+            S: ToaStore,
+        {
+            pub fn read(
+                &self,
+                offset: u128,
+                buf: &mut [$ty],
+            ) -> Result<usize, ReadError<S::Error>> {
+                if buf.is_empty() || offset >= self.len {
+                    return Ok(0);
+                }
+                let x = self
+                    .toa
+                    .store
+                    .get_pair(self.root.as_bytes())
+                    .map_err(ReadError::Store)?
+                    .ok_or(ReadError::MissingPair)?;
+                let y = $cv::from_bytes(x[32..].try_into().unwrap());
+                let x = $cv::from_bytes(x[..32].try_into().unwrap());
+                let xl = self.len.next_power_of_two() >> 1;
+                let yl = self.len - xl;
+                let x = $root::new(self.toa, x, xl);
+                let y = $root::new(self.toa, y, yl);
+                let n = xl.saturating_sub(offset).min(buf.len() as u128) as usize;
+                let (xb, yb) = buf.split_at_mut(n);
+                Ok(x.read(offset, xb)? + y.read(offset.saturating_sub(xl), yb)?)
+            }
+
+            fn len(&self) -> u128 {
+                self.len
+            }
+        }
+
+        impl<'t, S> $chunk<'t, S>
+        where
+            S: ToaStore,
+        {
+            pub fn read(
+                &self,
+                offset: u128,
+                buf: &mut [$ty],
+            ) -> Result<usize, ReadError<S::Error>> {
+                if offset >= CHUNK_SIZE {
+                    return Ok(0);
+                }
+                let buf = bytemuck::cast_slice_mut(buf);
+                let x = self
+                    .toa
+                    .store
+                    .get_chunk(self.root.as_bytes())
+                    .map_err(ReadError::Store)?
+                    .ok_or(ReadError::MissingChunk)?;
+                let x = &x.as_ref()[offset as usize..];
+                let n = x.len().min(buf.len());
+                buf[..n].copy_from_slice(&x[..n]);
+                Ok(n / mem::size_of::<$ty>())
+            }
+
+            fn len(&self) -> u128 {
+                self.toa
+                    .store
+                    .get_chunk(self.root.as_bytes())
+                    .unwrap_or(None)
+                    .map_or(0, |x| x.as_ref().len() as u128)
+            }
+        }
+    };
 }
 
-impl<'t, S> DataChunk<'t, S>
-where
-    S: ToaStore,
-{
-    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<S::Error>> {
-        if offset >= CHUNK_SIZE {
-            return Ok(0);
-        }
-        let x = self
-            .toa
-            .store
-            .get_chunk(self.root.as_bytes())
-            .map_err(ReadError::Store)?
-            .ok_or(ReadError::MissingChunk)?;
-        let x = &x.as_ref()[offset as usize..];
-        let n = x.len().min(buf.len());
-        buf[..n].copy_from_slice(&x[..n]);
-        Ok(n)
-    }
-
-    fn len(&self) -> u128 {
-        self.toa
-            .store
-            .get_chunk(self.root.as_bytes())
-            .unwrap_or(None)
-            .map_or(0, |x| x.as_ref().len() as u128)
-    }
-}
+impl_cv!(DataCv Data DataPair DataChunk u8   "bytes");
+impl_cv!(RefsCv Refs RefsPair RefsChunk Hash "hashes");
 
 impl<T> ToaKvStore<T>
 where

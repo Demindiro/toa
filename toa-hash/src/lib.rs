@@ -201,6 +201,10 @@ macro_rules! impl_hash {
                 bytemuck::cast_slice(slice)
             }
 
+            pub fn slice_as_bytes_mut(slice: &mut [Self]) -> &mut [[u8; 32]] {
+                bytemuck::cast_slice_mut(slice)
+            }
+
             pub fn as_bytes(&self) -> &[u8; 32] {
                 self.0.as_bytes()
             }
