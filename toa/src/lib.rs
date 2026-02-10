@@ -53,6 +53,7 @@ pub enum ToaKvStoreError<T> {
     Kv(T),
 }
 
+#[derive(Clone)]
 pub struct Object<S> {
     toa: S,
     root: toa_core::Root,
@@ -84,28 +85,9 @@ where
     S: ToaStore,
 {
     pub fn add(&self, data: &[u8], refs: &[Hash]) -> Result<Hash, S::Error> {
-        assert!(refs.is_empty(), "todo refs");
-        let data_root = if data.len() <= CHUNK_SIZE as usize {
-            self.add_chunk(data)?
-        } else {
-            let mut stack = arrayvec::ArrayVec::<DataCv, { 128 - 13 }>::new();
-            for (i, y) in data.chunks(CHUNK_SIZE as usize).enumerate() {
-                let mut y = self.add_chunk(y)?;
-                while stack.len() >= (i + 1).count_ones() as usize {
-                    let x = stack.pop().expect("at least one element");
-                    y = self.add_pair(&x, &y)?;
-                }
-                stack.push(y);
-            }
-            let y = stack.pop().expect("at least one element");
-            stack
-                .into_iter()
-                .rev()
-                .try_fold(y, |y, x| self.add_pair(&x, &y))?
-        };
         let root = toa_core::Root {
-            data_root,
-            refs_root: toa_core::RefsHasher::default().finalize(),
+            data_root: self.add_data(data)?,
+            refs_root: self.add_refs(refs)?,
             data_len: (data.len() as u128) << 3,
             refs_len: (refs.len() as u128) << 8,
         };
@@ -136,16 +118,72 @@ where
         })
     }
 
-    fn add_pair(&self, x: &DataCv, y: &DataCv) -> Result<DataCv, S::Error> {
+    fn add_data(&self, data: &[u8]) -> Result<DataCv, S::Error> {
+        if data.len() <= CHUNK_SIZE as usize {
+            self.add_data_chunk(data)
+        } else {
+            let mut stack = arrayvec::ArrayVec::<DataCv, { 128 - 13 }>::new();
+            for (i, y) in data.chunks(CHUNK_SIZE as usize).enumerate() {
+                let mut y = self.add_data_chunk(y)?;
+                while stack.len() >= (i + 1).count_ones() as usize {
+                    let x = stack.pop().expect("at least one element");
+                    y = self.add_data_pair(&x, &y)?;
+                }
+                stack.push(y);
+            }
+            let y = stack.pop().expect("at least one element");
+            stack
+                .into_iter()
+                .rev()
+                .try_fold(y, |y, x| self.add_data_pair(&x, &y))
+        }
+    }
+
+    fn add_data_pair(&self, x: &DataCv, y: &DataCv) -> Result<DataCv, S::Error> {
         let cv = toa_core::data_pair_cv(*x, *y);
         let xy = [*x.as_bytes(), *y.as_bytes()];
         self.store.add_pair(cv.as_bytes(), &bytemuck::cast(xy))?;
         Ok(cv)
     }
 
-    fn add_chunk(&self, chunk: &[u8]) -> Result<DataCv, S::Error> {
+    fn add_data_chunk(&self, chunk: &[u8]) -> Result<DataCv, S::Error> {
         let cv = toa_core::data_chunk_cv(chunk);
         self.store.add_chunk(cv.as_bytes(), chunk)?;
+        Ok(cv)
+    }
+
+    fn add_refs(&self, refs: &[Hash]) -> Result<RefsCv, S::Error> {
+        if refs.len() <= CHUNK_SIZE as usize / 32 {
+            self.add_refs_chunk(refs)
+        } else {
+            let mut stack = arrayvec::ArrayVec::<RefsCv, { 128 - 13 }>::new();
+            for (i, y) in refs.chunks(CHUNK_SIZE as usize / 32).enumerate() {
+                let mut y = self.add_refs_chunk(y)?;
+                while stack.len() >= (i + 1).count_ones() as usize {
+                    let x = stack.pop().expect("at least one element");
+                    y = self.add_refs_pair(&x, &y)?;
+                }
+                stack.push(y);
+            }
+            let y = stack.pop().expect("at least one element");
+            stack
+                .into_iter()
+                .rev()
+                .try_fold(y, |y, x| self.add_refs_pair(&x, &y))
+        }
+    }
+
+    fn add_refs_pair(&self, x: &RefsCv, y: &RefsCv) -> Result<RefsCv, S::Error> {
+        let cv = toa_core::refs_pair_cv(*x, *y);
+        let xy = [*x.as_bytes(), *y.as_bytes()];
+        self.store.add_pair(cv.as_bytes(), &bytemuck::cast(xy))?;
+        Ok(cv)
+    }
+
+    fn add_refs_chunk(&self, chunk: &[Hash]) -> Result<RefsCv, S::Error> {
+        let refs = Hash::slice_as_bytes(chunk).as_flattened();
+        let cv = toa_core::refs_chunk_cv(chunk);
+        self.store.add_chunk(cv.as_bytes(), refs)?;
         Ok(cv)
     }
 }
