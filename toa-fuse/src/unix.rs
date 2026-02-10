@@ -1,10 +1,10 @@
-use crate::{InnerReader, Result};
+use crate::{InnerToa, Result};
 use toa::{Hash, Object};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
 
 pub struct Dir<'a> {
-    object: Object<'a, InnerReader>,
+    object: Object<&'a InnerToa>,
     total: u64,
 }
 
@@ -26,14 +26,12 @@ pub enum DirItemType {
 }
 
 impl<'a> Dir<'a> {
-    pub fn new(object: Object<'a, InnerReader>) -> Result<Self> {
-        let hdr = object
-            .read_exact(0, 32)
-            .and_then(|x| x.into_bytes())
+    pub fn new(object: Object<&'a InnerToa>) -> Result<Self> {
+        let mut hdr = [0; 32];
+        object
+            .data()
+            .read_exact(0, &mut hdr)
             .map_err(|e| format!("failed to get directory header: {e:?}"))?;
-        let hdr: [u8; 32] = hdr
-            .try_into()
-            .map_err(|_| format!("truncated (or invalid) directory header"))?;
         let [magic @ .., a, b, c, d, e, f, g, h] = hdr;
         if magic != MAGIC {
             return Err(format!("bad dir magic").into());
@@ -46,12 +44,11 @@ impl<'a> Dir<'a> {
         if index >= self.total {
             return Ok(None);
         }
-        let x = self
-            .object
-            .read_exact(32 + index * 64, 64)
-            .and_then(|x| x.into_bytes())
+        let mut x = [0; 64];
+        self.object
+            .data()
+            .read_exact((32 + index * 64).into(), &mut x)
             .map_err(|e| format!("failed to get directory entry: {e:?}"))?;
-        let x: [u8; 64] = x.try_into().map_err(|_| "directory entry is truncated")?;
         let [a, b, x @ ..] = x;
         let ty_perms = u16::from_le_bytes([a, b]);
         let ty = match ty_perms >> 9 {
@@ -71,10 +68,10 @@ impl<'a> Dir<'a> {
         let [a, b, c, d, e, f, g, h, x @ ..] = x;
         let modified = i64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let key = Hash::from_bytes(x);
-        let name = self
-            .object
-            .read_exact(name_offset, name_len.into())
-            .and_then(|x| x.into_bytes())
+        let mut name = vec![0; name_len.into()];
+        self.object
+            .data()
+            .read_exact(name_offset.into(), &mut name)
             .map_err(|e| format!("failed to get name of directory entry: {e:?}"))?;
         // TODO length check
         // also use a pretty-printer like BStr
@@ -90,16 +87,18 @@ impl<'a> Dir<'a> {
         }))
     }
 
-    pub fn symlink_slice(&self, item: &DirItem) -> toa::ObjectRaw {
+    pub fn symlink_slice(&self, item: &DirItem) -> Box<[u8]> {
         let [a, b, c, d, e, f, g, h, x @ ..] = *item.key.as_bytes();
         let offset = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let [a, b, c, d, e, f, g, h, ..] = x;
         let len = u64::from_le_bytes([a, b, c, d, e, f, g, h]);
         // FIXME workaround for bug in toa-cli
         let offset = offset + item.name.len() as u64;
+        let mut x = vec![0; len as usize];
         self.object
-            .to_raw()
-            .subslice(offset, len)
-            .expect("invalid symlink key")
+            .data()
+            .read_exact(offset.into(), &mut x)
+            .expect("invalid symlink key");
+        x.into()
     }
 }

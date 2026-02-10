@@ -1,4 +1,4 @@
-use crate::{Result, args_end, new_reader, usage};
+use crate::{Result, Toa, args_end, usage};
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
 where
@@ -23,7 +23,7 @@ where
     let db = magic::cookie::DatabasePaths::default();
     let cookie = cookie.load(&db)?;
 
-    let (dev, _meta) = new_reader(&pack)?;
+    let (dev, _meta) = Toa::open(&pack)?;
     dev.iter_with(|key| {
         // TODO we can't load the entire file in memory as it may be hundred of GBs in size
         // For now loading just the 64KiB is likely sufficient,
@@ -35,15 +35,9 @@ where
         // OTOH, it appears even `file` itself can't check the end of files,
         // so perhaps it doesn't matter?
         //println!("{key:?} {}");
-        // "read_exact" is such a terrible name...
-        let head = dev
-            .get(&key)
-            .expect("exists")
-            .read_exact(0, 1 << 16)
-            .unwrap()
-            .into_bytes()
-            .unwrap();
-        let ty = cookie.buffer(&head).unwrap();
+        let buf = &mut [0; 1 << 16];
+        let n = dev.get(&key).expect("exists").data().read(0, buf).unwrap();
+        let ty = cookie.buffer(&buf[..n]).unwrap();
         println!("{key} {ty}");
         false
     })

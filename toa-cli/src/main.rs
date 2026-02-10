@@ -2,7 +2,6 @@
 mod magic;
 mod unix;
 
-use toa::{Hash, cache::MicroLru, worker};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -12,15 +11,13 @@ use std::{
     io::{Read, Seek, Write},
     ops,
 };
-
-const MAGIC: [u8; 16] = *b"Appender\x20\x26\x02\x06\0\0\0\0";
+use toa::Hash;
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Builder = toa::Builder<File, worker::ThreadPool<worker::Work>>;
-type InnerReader = toa::Reader<File, MicroLru<Box<[u8]>>>;
+type InnerToa = toa::Toa<toa::ToaKvStore<toa_kv::sled::Tree>>;
 
-struct Reader {
-    inner: InnerReader,
+struct Toa {
+    inner: InnerToa,
 }
 
 #[derive(Default)]
@@ -28,45 +25,21 @@ struct Stat {
     size_sum: u64,
 }
 
-#[derive(Default)]
 struct Meta {
-    map: BTreeMap<Box<str>, Box<[u8]>>,
+    map: toa_kv::sled::Tree,
 }
 
-impl Reader {
-    fn new(path: &str) -> Result<(Self, Meta)> {
-        let mut dev = fs::OpenOptions::new().read(true).open(path)?;
-        let mut buf = [0; 16];
-        dev.read_exact(&mut buf)?;
-        if buf != MAGIC {
-            return Err("bad magic".into());
-        }
-
-        let mut buf = [0; 76];
-        dev.seek(io::SeekFrom::End(-76))
-            .map_err(|e| format!("seek to trailer failed: {e}"))?;
-        dev.read_exact(&mut buf)
-            .map_err(|e| format!("read of trailer failed: {e}"))?;
-
-        let [a, b, c, d, buf @ ..] = buf;
-        let len = u32::from_le_bytes([a, b, c, d]);
-        dev.seek(io::SeekFrom::End(-76 - i64::from(len)))
-            .map_err(|e| format!("seek to meta table failed: {e}"))?;
-        let mut meta = Vec::new();
-        (&mut dev)
-            .take(u64::from(len))
-            .read_to_end(&mut meta)
-            .map_err(|e| format!("seek of meta table failed: {e}"))?;
-
-        let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
-
-        let packref = toa::PackRef(buf);
-        let inner = InnerReader::new(dev, Default::default(), packref)
-            .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
-        Ok((Reader { inner }, meta))
+impl Toa {
+    fn open(store: &str) -> Result<(Self, Meta)> {
+        let db = toa_kv::sled::Db::open(store)
+            .map_err(|e| format!("failed to open store {store:?}: {e}"))?;
+        let toa = db.open_tree("toa")?;
+        let meta = db.open_tree("meta")?;
+        let inner = toa::Toa::new(toa::ToaKvStore(toa));
+        Ok((Self { inner }, Meta { map: meta }))
     }
 
-    fn get(&self, key: &Hash) -> Result<toa::Object<'_, InnerReader>> {
+    fn get(&self, key: &Hash) -> Result<toa::Object<&InnerToa>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query store: {e:?}"))?
@@ -74,8 +47,8 @@ impl Reader {
     }
 }
 
-impl ops::Deref for Reader {
-    type Target = InnerReader;
+impl ops::Deref for Toa {
+    type Target = InnerToa;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -92,6 +65,34 @@ impl Stat {
         let ratio = size_sum as f64 / pack_size as f64;
         println!("pack size: {pack_size}, files size: {size_sum}, ratio: {ratio}");
         Ok(())
+    }
+}
+
+impl Meta {
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn get(&self, key: &str) -> Option<impl ops::Deref<Target = [u8]>> {
+        self.map.get(key).unwrap()
+    }
+
+    fn insert(&self, key: &str, value: &[u8]) {
+        self.map.insert(key, value).unwrap();
+    }
+
+    fn iter(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            impl ops::Deref<Target = str> + std::fmt::Debug,
+            impl ops::Deref<Target = [u8]> + std::fmt::Debug,
+        ),
+    > {
+        self.map
+            .iter()
+            .map(|x| x.unwrap())
+            .map(|(k, v)| (String::from_utf8((*k).into()).unwrap(), v))
     }
 }
 
@@ -151,36 +152,7 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N]> {
     Ok(k)
 }
 
-fn new_builder(store: &str) -> Result<Builder> {
-    let mut dev = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(store)?;
-    dev.write_all(&MAGIC)?;
-    let dev = Builder::new(dev, Default::default(), rand::thread_rng());
-    Ok(dev)
-}
-
-fn new_reader(store: &str) -> Result<(Reader, Meta)> {
-    Reader::new(store).map_err(|e| format!("failed to open store {store:?}: {e}").into())
-}
-
-fn parse_meta(mut buf: &[u8]) -> Result<Meta> {
-    let mut meta = Meta::default();
-    while let [key_len, b @ ..] = buf {
-        let (key, b) = b.split_at(usize::from(*key_len));
-        let [x, y, b @ ..] = b else { todo!() };
-        let value_len = u16::from_le_bytes([*x, *y]);
-        let (value, b) = b.split_at(usize::from(value_len));
-        buf = b;
-        let key = core::str::from_utf8(key).expect("key is not UTF-8");
-        let prev = meta.map.insert(key.into(), value.into());
-        assert!(prev.is_none(), "duplicate key {key:?}");
-    }
-    Ok(meta)
-}
-
-fn add_files<A>(dev: &mut Builder, args: A) -> Result<Stat>
+fn add_files<A>(dev: &Toa, args: A) -> Result<Stat>
 where
     A: Iterator<Item = String>,
 {
@@ -192,7 +164,7 @@ where
     Ok(stat)
 }
 
-fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_file(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let data = fs::OpenOptions::new()
         .read(true)
         .open(path)
@@ -212,38 +184,22 @@ fn add_file(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
     Ok(key)
 }
 
-fn finish(dev: Builder, meta: Meta) -> Result<fs::File> {
-    let (mut dev, packref) = dev
-        .finish()
-        .map_err(|e| format!("failed to finalize store builder: {e:?}"))?;
-    let packref = packref.ok_or("no objects added to store")?;
-    let mut meta_size = 0;
-    for (k, v) in meta.map.iter() {
-        let kl = u8::try_from(k.len()).map_err(|_| "meta key too large")?;
-        dev.write_all(&kl.to_le_bytes())?;
-        dev.write_all(k.as_bytes())?;
-        let vl = u16::try_from(v.len()).map_err(|_| "meta value too large")?;
-        dev.write_all(&vl.to_le_bytes())?;
-        dev.write_all(v)?;
-        meta_size += 1 + k.len() + 2 + v.len();
-    }
-    let meta_size = u32::try_from(meta_size).map_err(|_| "meta table too large")?;
-    dev.write_all(&meta_size.to_le_bytes())
-        .and_then(|()| dev.write_all(&packref.0))
-        .map_err(|e| format!("failed to append trailer: {e}"))?;
-    dev.sync_all()
-        .map_err(|e| format!("failed to synchronize data: {e}"))?;
-    Ok(dev)
-}
-
-fn dump_object(dev: &Reader, key: &Hash) -> Result<()> {
+fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
     let obj = dev.get(&key)?;
     let mut out = io::stdout().lock();
-    let e = |e| format!("failed to read object: {e:?}");
-    for data in obj.read_exact(0, usize::MAX).map_err(e)? {
-        let data = data.map_err(e)?;
-        out.write_all(&data)
+    let mut buf = &mut [0; 1 << 13];
+    let mut offt = 0;
+    loop {
+        let n = obj
+            .data()
+            .read(offt, buf)
+            .map_err(|e| format!("failed to read object: {e:?}"))?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])
             .map_err(|e| format!("failed to write to stdout: {e:?}"))?;
+        offt += n as u128;
     }
     Ok(())
 }
@@ -254,13 +210,9 @@ where
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
 
-    let mut dev =
-        new_builder(&store).map_err(|e| format!("failed to create store builder: {e}"))?;
+    let (mut dev, meta) =
+        Toa::open(&store).map_err(|e| format!("failed to create store builder: {e}"))?;
     let stat = add_files(&mut dev, args)?;
-    let dev = finish(dev, Meta::default())
-        .map_err(|e| format!("failed to finalize store builder: {e:?}"))?;
-
-    stat.summarize(&dev)?;
 
     Ok(())
 }
@@ -274,7 +226,7 @@ where
     args_end(procname, args)?;
 
     let key = toa::Hash::from_bytes(parse_hex(&key)?);
-    let (dev, _meta) = new_reader(&store)?;
+    let (dev, _meta) = Toa::open(&store)?;
     dump_object(&dev, &key)?;
 
     Ok(())
@@ -287,7 +239,7 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, _meta) = new_reader(&store)?;
+    let (dev, _meta) = Toa::open(&store)?;
     dev.iter_with(|key| {
         println!("{key:?}");
         false
@@ -304,14 +256,10 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (_dev, meta) = new_reader(&store)?;
-    let plural = if meta.map.len() == 1 {
-        "entry"
-    } else {
-        "entries"
-    };
-    println!("{} {}", meta.map.len(), plural);
-    meta.map.iter().for_each(|(k, v)| println!("{k:?}: {v:?}"));
+    let (_dev, meta) = Toa::open(&store)?;
+    let plural = if meta.len() == 1 { "entry" } else { "entries" };
+    println!("{} {}", meta.len(), plural);
+    meta.iter().for_each(|(k, v)| println!("{k:?}: {v:?}"));
 
     Ok(())
 }
@@ -323,35 +271,42 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, _meta) = new_reader(&store)?;
+    let (dev, _meta) = Toa::open(&store)?;
     // first collect keys,
     // then sort based on offset to ensure we iterate over all data linearly
     let mut objects = Vec::new();
     eprintln!("collecting keys...");
     dev.iter_with(|key| {
-        let obj = dev.get(&key).unwrap().to_raw();
+        let obj = dev.get(&key).unwrap().into_root();
         objects.push((key, obj));
         false
     })
     .map_err(|e| format!("failure during store iteration: {e:?}"))?;
 
     eprintln!("sorting keys...");
-    objects.sort_by_key(|x| x.1.offset());
+    // TODO we just lost this capability :(
+    //objects.sort_by_key(|x| x.1.offset());
 
     eprintln!("traversing objects...");
     let mut n_ok @ mut n_fail = 0;
     objects.into_iter().for_each(|(key, obj)| {
-        let obj = toa::Object::from_raw(obj, &*dev);
+        let obj = toa::Object::from_root(&*dev, obj);
         let mut hasher = toa_core::DataHasher::default();
-        for x in obj.read_exact(0, usize::MAX).unwrap() {
-            let x = x.unwrap();
-            hasher.update(&x);
+        let mut buf = [0; 8192];
+        let mut offt = 0;
+        loop {
+            let n = obj.data().read(offt, &mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            offt += n as u128;
         }
         let hash = hasher.finalize();
         let hash = toa_core::Root {
             data_root: hash,
             refs_root: toa_core::RefsHasher::default().finalize(),
-            data_len: u128::from(obj.len()) << 3,
+            data_len: obj.data_len(),
             refs_len: 0,
         }
         .hash();

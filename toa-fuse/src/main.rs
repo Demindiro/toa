@@ -1,6 +1,5 @@
 mod unix;
 
-use toa::{Hash, Object, ObjectRaw, cache::MicroLru};
 use std::{
     collections::{BTreeMap, btree_map},
     error::Error,
@@ -12,35 +11,44 @@ use std::{
     ops,
     time::{Duration, SystemTime},
 };
+use toa::{Hash, Object};
 
-const MAGIC: [u8; 16] = *b"Appender\x20\x26\x02\x06\0\0\0\0";
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerReader = toa::Reader<File, MicroLru<Box<[u8]>>>;
+type InnerToa = toa::Toa<toa::ToaKvStore<toa_kv::sled::Tree>>;
 
-struct Reader {
-    inner: InnerReader,
+struct Toa {
+    inner: InnerToa,
 }
 
-#[derive(Default)]
 struct Meta {
-    map: BTreeMap<Box<str>, Box<[u8]>>,
+    map: toa_kv::sled::Tree,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum KeyOrStr {
+    Key([u8; 32]),
+    Str(Box<[u8]>),
+}
+
+enum Obj {
+    Root(toa::core::Root),
+    Str(Box<[u8]>),
 }
 
 struct Fs {
-    dev: Reader,
+    dev: Toa,
     root: Node,
     nodes: BTreeMap<u64, Node>,
-    nodes_rev: BTreeMap<u64, u64>,
+    nodes_rev: BTreeMap<KeyOrStr, u64>,
     ino_counter: u64,
 }
 
-#[derive(Clone, Copy)]
 struct Node {
     parent_ino: u64,
-    obj: ObjectRaw,
+    obj: Obj,
     refcount: u64,
     ty: unix::DirItemType,
     key: Hash,
@@ -50,40 +58,16 @@ struct Node {
     gid: u32,
 }
 
-impl Reader {
+impl Toa {
     fn new(path: &str) -> Result<(Self, Meta)> {
-        let mut dev = fs::OpenOptions::new().read(true).open(path)?;
-        let mut buf = [0; 16];
-        dev.read_exact(&mut buf)?;
-        if buf != MAGIC {
-            return Err("bad magic".into());
-        }
-
-        let mut buf = [0; 76];
-        dev.seek(io::SeekFrom::End(-76))
-            .map_err(|e| format!("seek to trailer failed: {e}"))?;
-        dev.read_exact(&mut buf)
-            .map_err(|e| format!("read of trailer failed: {e}"))?;
-
-        let [a, b, c, d, buf @ ..] = buf;
-        let len = u32::from_le_bytes([a, b, c, d]);
-        dev.seek(io::SeekFrom::End(-76 - i64::from(len)))
-            .map_err(|e| format!("seek to meta table failed: {e}"))?;
-        let mut meta = Vec::new();
-        (&mut dev)
-            .take(u64::from(len))
-            .read_to_end(&mut meta)
-            .map_err(|e| format!("seek of meta table failed: {e}"))?;
-
-        let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
-
-        let packref = toa::PackRef(buf);
-        let inner = InnerReader::new(dev, Default::default(), packref)
-            .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
-        Ok((Reader { inner }, meta))
+        let db = toa_kv::sled::Db::open(path)?;
+        let toa = db.open_tree("toa")?;
+        let meta = db.open_tree("meta")?;
+        let inner = toa::Toa::new(toa::ToaKvStore(toa));
+        Ok((Self { inner }, Meta { map: meta }))
     }
 
-    fn get(&self, key: &Hash) -> Result<toa::Object<'_, InnerReader>> {
+    fn get(&self, key: &Hash) -> Result<toa::Object<&InnerToa>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query pack: {e:?}"))?
@@ -91,8 +75,8 @@ impl Reader {
     }
 }
 
-impl ops::Deref for Reader {
-    type Target = InnerReader;
+impl ops::Deref for Toa {
+    type Target = InnerToa;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -110,21 +94,21 @@ impl Fs {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::Dir)
             .map(|x| {
-                let d = unix::Dir::new(Object::from_raw(x.obj, &self.dev)).unwrap();
+                let d = unix::Dir::new(Object::from_root(&self.dev, *x.obj.as_root())).unwrap();
                 (x, d)
             })
     }
 
-    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Object<'_, InnerReader>)> {
+    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Object<&InnerToa>)> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::File)
-            .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
+            .map(|x| (x, Object::from_root(&*self.dev, *x.obj.as_root())))
     }
 
-    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Object<'_, InnerReader>)> {
+    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, &[u8])> {
         self.get_ino(ino)
             .filter(|x| x.ty == unix::DirItemType::SymLink)
-            .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
+            .map(|x| (x, x.obj.as_str()))
     }
 
     /// # Returns
@@ -134,14 +118,14 @@ impl Fs {
         &mut self,
         parent_ino: u64,
         key: Hash,
-        obj: ObjectRaw,
+        obj: Obj,
         ty: unix::DirItemType,
         perm: u16,
         mtime: SystemTime,
         uid: u32,
         gid: u32,
     ) -> u64 {
-        let ino = *self.nodes_rev.entry(obj.offset()).or_insert_with(|| {
+        let ino = *self.nodes_rev.entry(obj.key()).or_insert_with(|| {
             let ino = self.ino_counter;
             self.ino_counter += 1;
             ino
@@ -189,7 +173,7 @@ impl fuser::Filesystem for Fs {
             .unwrap_or_else(|| panic!("ino {ino} not found"));
         let attr = file_attr(
             ino,
-            node.obj.len(),
+            obj_len(&node.obj),
             node.ty,
             node.mtime,
             node.perm,
@@ -264,9 +248,9 @@ impl fuser::Filesystem for Fs {
             }
             let obj = match e.ty {
                 unix::DirItemType::File | unix::DirItemType::Dir => {
-                    self.dev.get(&e.key).unwrap().to_raw()
+                    Obj::Root(self.dev.get(&e.key).unwrap().into_root())
                 }
-                unix::DirItemType::SymLink => dir.symlink_slice(&e),
+                unix::DirItemType::SymLink => Obj::Str(dir.symlink_slice(&e)),
             };
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
@@ -275,8 +259,9 @@ impl fuser::Filesystem for Fs {
             };
             let perm = e.permissions;
             let perm = 0o777;
+            let len = obj_len(&obj);
             let ino = self.increase_ref(parent, e.key, obj, e.ty, perm, mtime, e.uid, e.gid);
-            let attr = file_attr(ino, obj.len(), e.ty, mtime, perm, e.uid, e.gid);
+            let attr = file_attr(ino, len, e.ty, mtime, perm, e.uid, e.gid);
             return reply.entry(&Duration::MAX, &attr, 0);
         }
         reply.error(libc::ENOENT)
@@ -302,13 +287,9 @@ impl fuser::Filesystem for Fs {
             //reply.error(libc::ENOTDIR)
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX);
-        // kernel gets confused if you don't fill the entire buffer...
-        let data = file
-            .read_exact(offset as u64, size)
-            .unwrap()
-            .into_bytes()
-            .unwrap();
-        reply.data(&data)
+        let mut buf = vec![0; size as usize];
+        let n = file.data().read(offset as u128, &mut buf).unwrap();
+        reply.data(&buf[..n])
     }
 
     fn readlink(&mut self, _: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
@@ -316,12 +297,7 @@ impl fuser::Filesystem for Fs {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
-        let data = symlink
-            .read_exact(0, usize::MAX)
-            .unwrap()
-            .into_bytes()
-            .unwrap();
-        reply.data(&data)
+        reply.data(symlink)
     }
 
     fn listxattr(
@@ -364,6 +340,29 @@ impl fuser::Filesystem for Fs {
     }
 }
 
+impl Obj {
+    fn key(&self) -> KeyOrStr {
+        match self {
+            Self::Root(x) => KeyOrStr::Key(mix_key(&x)),
+            Self::Str(x) => KeyOrStr::Str(x.clone()),
+        }
+    }
+
+    fn as_root(&self) -> &toa::core::Root {
+        match self {
+            Self::Root(x) => x,
+            _ => todo!(),
+        }
+    }
+
+    fn as_str(&self) -> &[u8] {
+        match self {
+            Self::Str(x) => x,
+            _ => todo!(),
+        }
+    }
+}
+
 fn file_attr(
     ino: u64,
     len: u64,
@@ -401,23 +400,23 @@ fn usage(procname: &str) -> Box<dyn Error> {
     format!("usage: {procname} <pack> <mount> [--allow-other]").into()
 }
 
-fn new_reader(pack: &str) -> Result<(Reader, Meta)> {
-    Reader::new(pack).map_err(|e| format!("failed to open pack {pack:?}: {e}").into())
+fn new_reader(pack: &str) -> Result<(Toa, Meta)> {
+    Toa::new(pack).map_err(|e| format!("failed to open pack {pack:?}: {e}").into())
 }
 
-fn parse_meta(mut buf: &[u8]) -> Result<Meta> {
-    let mut meta = Meta::default();
-    while let [key_len, b @ ..] = buf {
-        let (key, b) = b.split_at(usize::from(*key_len));
-        let [x, y, b @ ..] = b else { todo!() };
-        let value_len = u16::from_le_bytes([*x, *y]);
-        let (value, b) = b.split_at(usize::from(value_len));
-        buf = b;
-        let key = core::str::from_utf8(key).expect("key is not UTF-8");
-        let prev = meta.map.insert(key.into(), value.into());
-        assert!(prev.is_none(), "duplicate key {key:?}");
+fn mix_key(root: &toa::core::Root) -> [u8; 32] {
+    let mut k = *root.data_root.as_bytes();
+    k.iter_mut()
+        .zip(*root.refs_root.as_bytes())
+        .for_each(|(x, y)| *x ^= y);
+    k
+}
+
+fn obj_len(obj: &Obj) -> u64 {
+    match obj {
+        Obj::Root(x) => x.data_len.try_into().unwrap_or(u64::MAX),
+        Obj::Str(x) => x.len() as u64,
     }
-    Ok(meta)
 }
 
 fn start() -> Result<()> {
@@ -442,20 +441,21 @@ fn start() -> Result<()> {
     let root_key = meta
         .map
         .get("unix.root")
-        .map(|x| &**x)
+        .unwrap()
         .ok_or("\"unix.root\" not present in meta table")?
+        .as_ref()
         .try_into()
         .map(Hash::from_bytes)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     let root = dev
         .get(&root_key)
         .map_err(|e| format!("failed to get root object: {e}"))?
-        .to_raw();
+        .into_root();
     let fs = Fs {
         dev,
         root: Node {
             key: root_key,
-            obj: root,
+            obj: Obj::Root(root),
             parent_ino: 0,
             refcount: 1,
             ty: unix::DirItemType::Dir,

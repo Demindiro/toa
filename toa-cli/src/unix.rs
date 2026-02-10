@@ -1,15 +1,12 @@
-use crate::{
-    Builder, InnerReader, Meta, Reader, Result, Stat, add_file, args_end, finish, new_builder,
-    usage,
-};
-use toa::{Hash, Object};
+use crate::{InnerToa, Meta, Result, Stat, Toa, add_file, args_end, usage};
 use chrono::prelude::*;
 use std::{fmt, fs, path::Path};
+use toa::{Hash, Object};
 
 const MAGIC: [u8; 24] = *b"Appender UNIX directory\0";
 
 struct DirIter<'a> {
-    object: Object<'a, InnerReader>,
+    object: Object<&'a InnerToa>,
     total: u64,
     cur: u64,
 }
@@ -30,23 +27,21 @@ enum DirItemType {
     SymLink,
 }
 
-struct ObjectRawOrd(toa::ObjectRaw);
+struct ObjectRawOrd(toa::core::Root);
 
 impl<'a> DirIter<'a> {
-    fn new(dev: &'a Reader, key: &Hash) -> Result<Self> {
+    fn new(dev: &'a Toa, key: &Hash) -> Result<Self> {
         dev.get(key)
             .and_then(Self::from_object)
             .map_err(|e| format!("{key:?}: {e:?}").into())
     }
 
-    fn from_object(object: Object<'a, InnerReader>) -> Result<Self> {
-        let hdr = object
-            .read_exact(0, 32)
-            .and_then(|x| x.into_bytes())
+    fn from_object(object: Object<&'a InnerToa>) -> Result<Self> {
+        let mut hdr = [0; 32];
+        let n = object
+            .data()
+            .read_exact(0, &mut hdr)
             .map_err(|e| format!("failed to get directory header: {e:?}"))?;
-        let hdr: [u8; 32] = hdr
-            .try_into()
-            .map_err(|_| format!("truncated (or invalid) directory header"))?;
         let [magic @ .., a, b, c, d, e, f, g, h] = hdr;
         if magic != MAGIC {
             return Err(format!("bad dir magic").into());
@@ -60,12 +55,11 @@ impl<'a> DirIter<'a> {
         if self.cur >= self.total {
             return Ok(None);
         }
-        let x = self
-            .object
-            .read_exact(32 + self.cur * 64, 64)
-            .and_then(|x| x.into_bytes())
+        let mut x = [0; 64];
+        self.object
+            .data()
+            .read_exact((32 + self.cur * 64).into(), &mut x)
             .map_err(|e| format!("failed to get directory entry: {e:?}"))?;
-        let x: [u8; 64] = x.try_into().map_err(|_| "directory entry is truncated")?;
         self.cur += 1;
         let [a, b, x @ ..] = x;
         let ty_perms = u16::from_le_bytes([a, b]);
@@ -86,10 +80,10 @@ impl<'a> DirIter<'a> {
         let [a, b, c, d, e, f, g, h, x @ ..] = x;
         let modified = i64::from_le_bytes([a, b, c, d, e, f, g, h]);
         let key = Hash::from_bytes(x);
-        let name = self
-            .object
-            .read_exact(name_offset, name_len.into())
-            .and_then(|x| x.into_bytes())
+        let mut name = vec![0; name_len.into()];
+        self.object
+            .data()
+            .read_exact(name_offset.into(), &mut name)
             .map_err(|e| format!("failed to get name of directory entry: {e:?}"))?;
         // TODO length check
         // also use a pretty-printer like BStr
@@ -149,7 +143,7 @@ impl fmt::Display for DirItem {
 
 impl PartialEq for ObjectRawOrd {
     fn eq(&self, rhs: &Self) -> bool {
-        self.0.offset() == rhs.0.offset()
+        self.0.data_root == rhs.0.data_root
     }
 }
 
@@ -163,7 +157,8 @@ impl PartialOrd for ObjectRawOrd {
 
 impl Ord for ObjectRawOrd {
     fn cmp(&self, rhs: &Self) -> core::cmp::Ordering {
-        self.0.offset().cmp(&rhs.0.offset())
+        //self.0.offset().cmp(&rhs.0.offset())
+        self.0.data_root.cmp(&rhs.0.data_root)
     }
 }
 
@@ -189,16 +184,11 @@ where
     let root = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let mut dev = new_builder(&store)?;
+    let (mut dev, mut meta) = Toa::open(&store)?;
     let mut stat = Stat::default();
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
     println!("d {root_key:?} {root}");
-    let mut meta = Meta::default();
-    meta.map
-        .insert("unix.root".into(), (*root_key.as_bytes()).into());
-    let dev = finish(dev, meta)?;
-
-    stat.summarize(&dev)?;
+    meta.insert("unix.root".into(), root_key.as_bytes());
 
     Ok(())
 }
@@ -211,7 +201,7 @@ where
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, dir) = new_reader(&store)?;
+    let (dev, dir) = open(&store)?;
     let file = traverse_path(&dev, &path, dir)?;
     crate::dump_object(&dev, &file)?;
 
@@ -227,7 +217,7 @@ where
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
-    let (dev, dir) = new_reader(&store)?;
+    let (dev, dir) = open(&store)?;
     let dir = traverse_path(&dev, path, dir)?;
     DirIter::new(&dev, &dir)?.try_for_each(|e| e.map(|e| println!("{e}")))?;
 
@@ -241,23 +231,23 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, dir) = new_reader(&store)?;
+    let (dev, dir) = open(&store)?;
     // pre-collect + sorting makes a *huge* difference in performance
     // larger caches would help, but that ooesn't scale as well as
     // having a better iteration order.
     //
     // TODO binary heap will include duplicates
     // might want to use something else, like a BTreeSet?
-    let dir = ObjectRawOrd(dev.get(&dir)?.to_raw());
+    let dir = ObjectRawOrd(dev.get(&dir)?.into_root());
     let mut stack = std::collections::BinaryHeap::from([dir]);
     let mut n_ok @ mut n_fail = 0;
     while let Some(dir) = stack.pop() {
         let mut items =
-            DirIter::from_object(Object::from_raw(dir.0, &dev))?.collect::<Result<Vec<_>>>()?;
+            DirIter::from_object(Object::from_root(&*dev, dir.0))?.collect::<Result<Vec<_>>>()?;
         items.sort_by_key(|x| x.key);
         for x in items {
             match x.ty {
-                DirItemType::Dir => stack.push(ObjectRawOrd(dev.get(&x.key)?.to_raw())),
+                DirItemType::Dir => stack.push(ObjectRawOrd(dev.get(&x.key)?.into_root())),
                 DirItemType::File => {}
                 DirItemType::SymLink => continue,
             }
@@ -285,7 +275,7 @@ where
         .ok_or_else(|| "some objects missing".into())
 }
 
-fn add_dir(dev: &mut Builder, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     // TODO support other platforms
     use std::os::unix::fs::MetadataExt;
 
@@ -419,20 +409,19 @@ fn add_symlink(path: &str, stat: &mut Stat) -> Result<String> {
     Ok(link.into())
 }
 
-fn new_reader(store: &str) -> Result<(Reader, Hash)> {
-    let (dev, meta) = super::new_reader(store)?;
+fn open(store: &str) -> Result<(Toa, Hash)> {
+    let (dev, meta) = Toa::open(store)?;
     let key = meta
-        .map
         .get("unix.root")
         .ok_or("meta key \"unix.root\" not found")?;
-    let key = (&**key)
+    let key = (&*key)
         .try_into()
         .map(Hash::from_bytes)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     Ok((dev, key))
 }
 
-fn traverse_path(dev: &Reader, path: &str, mut start: Hash) -> Result<Hash> {
+fn traverse_path(dev: &Toa, path: &str, mut start: Hash) -> Result<Hash> {
     let mut is_dir = true;
     for p in path.split("/").filter(|x| !x.is_empty()) {
         if !is_dir {
