@@ -302,6 +302,7 @@ macro_rules! impl_cv {
                 offset: u128,
                 buf: &mut [$ty],
             ) -> Result<usize, ReadError<S::Error>> {
+                let offset = offset * mem::size_of::<$ty>() as u128;
                 if offset >= CHUNK_SIZE {
                     return Ok(0);
                 }
