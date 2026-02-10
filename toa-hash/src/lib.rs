@@ -28,7 +28,9 @@ pub struct Root {
 }
 
 /// Chaining value
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable,
+)]
 #[repr(transparent)]
 struct Cv([u8; 32]);
 
@@ -191,7 +193,16 @@ impl Root {
 macro_rules! impl_hash {
     ($name:ident) => {
         #[derive(
-            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable,
+            Clone,
+            Copy,
+            Default,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            bytemuck::Pod,
+            bytemuck::Zeroable,
         )]
         #[repr(transparent)]
         pub struct $name(Cv);

@@ -231,6 +231,15 @@ macro_rules! impl_cv {
                 self.read(offset, buf).map(|_| ()).map_err(|x| x.into())
             }
 
+            pub fn read_array<const N: usize>(
+                &self,
+                offset: u128,
+            ) -> Result<[$ty; N], ReadExactError<S::Error>> {
+                let mut buf = [<$ty>::default(); N];
+                self.read_exact(offset, &mut buf)?;
+                Ok(buf)
+            }
+
             #[doc = "Size of data blob **in "]
             #[doc = $docname]
             #[doc = "** (rounded up)."]
