@@ -15,3 +15,4 @@ rand = { version = "0.8.0" }
 magic = { version = "0.16.7", optional = true }
 toa-core = { path = "../toa-core" }
 toa-kv   = { path = "../toa-kv"  , features = ["sled"] }
+toa-unix = { path = "../toa-unix" }
