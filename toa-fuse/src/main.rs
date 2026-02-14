@@ -11,6 +11,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use toa::{Hash, Object};
+use toa_unix::DirItemType;
 
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
@@ -26,35 +27,24 @@ struct Meta {
     map: toa_kv::sled::Tree,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum KeyOrStr {
-    Key([u8; 32]),
-    Str(Box<[u8]>),
-}
-
 struct Fs {
     dev: Toa,
     root: Node,
     nodes: BTreeMap<u64, Node>,
-    nodes_rev: BTreeMap<KeyOrStr, u64>,
+    nodes_rev: BTreeMap<Hash, u64>,
     ino_counter: u64,
 }
 
 struct Node {
     parent_ino: u64,
-    data: NodeData,
     refcount: u64,
-    key: Option<Hash>,
+    ty: DirItemType,
+    len: u64,
+    key: Hash,
     mtime: SystemTime,
     perm: u16,
     uid: u32,
     gid: u32,
-}
-
-enum NodeData {
-    File(toa::core::Root),
-    Dir(toa::core::Root),
-    SymLink(Box<[u8]>),
 }
 
 impl Toa {
@@ -91,23 +81,20 @@ impl Fs {
 
     fn get_ino_dir(&self, ino: u64) -> Option<(&Node, toa_unix::Dir<Object<&InnerToa>>)> {
         self.get_ino(ino)
-            .filter(|x| matches!(&x.data, NodeData::Dir(_)))
-            .map(|x| {
-                let d = toa_unix::Dir::new(Object::from_root(&self.dev, *x.data.as_root()));
-                (x, d)
-            })
+            .filter(|x| matches!(&x.ty, DirItemType::Dir))
+            .map(|x| (x, toa_unix::Dir::new(self.dev.get(&x.key).unwrap())))
     }
 
     fn get_ino_file(&self, ino: u64) -> Option<(&Node, Object<&InnerToa>)> {
         self.get_ino(ino)
-            .filter(|x| matches!(&x.data, NodeData::File(_)))
-            .map(|x| (x, Object::from_root(&*self.dev, *x.data.as_root())))
+            .filter(|x| matches!(&x.ty, DirItemType::File))
+            .map(|x| (x, self.dev.get(&x.key).unwrap()))
     }
 
-    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, &[u8])> {
+    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Object<&InnerToa>)> {
         self.get_ino(ino)
-            .filter(|x| matches!(&x.data, NodeData::SymLink(_)))
-            .map(|x| (x, x.data.as_str()))
+            .filter(|x| matches!(&x.ty, DirItemType::SymLink))
+            .map(|x| (x, self.dev.get(&x.key).unwrap()))
     }
 
     /// # Returns
@@ -116,21 +103,23 @@ impl Fs {
     fn increase_ref(
         &mut self,
         parent_ino: u64,
-        data: NodeData,
-        key: Option<Hash>,
+        ty: DirItemType,
+        len: u64,
+        key: Hash,
         perm: u16,
         mtime: SystemTime,
         uid: u32,
         gid: u32,
-    ) -> (u64, &NodeData) {
-        let ino = *self.nodes_rev.entry(data.key()).or_insert_with(|| {
+    ) -> u64 {
+        let ino = *self.nodes_rev.entry(key).or_insert_with(|| {
             let ino = self.ino_counter;
             self.ino_counter += 1;
             ino
         });
         let node = self.nodes.entry(ino).or_insert_with(|| Node {
             parent_ino,
-            data,
+            ty,
+            len,
             key,
             refcount: 0,
             perm,
@@ -139,7 +128,7 @@ impl Fs {
             gid,
         });
         node.refcount += 1;
-        (ino, &node.data)
+        ino
     }
 
     fn decrease_ref(&mut self, ino: u64, num: u64) {
@@ -168,7 +157,9 @@ impl fuser::Filesystem for Fs {
         let node = self
             .get_ino(ino)
             .unwrap_or_else(|| panic!("ino {ino} not found"));
-        let attr = file_attr(ino, &node.data, node.mtime, node.perm, node.uid, node.gid);
+        let attr = file_attr(
+            ino, node.ty, node.len, node.mtime, node.perm, node.uid, node.gid,
+        );
         reply.attr(&Duration::MAX, &attr)
     }
 
@@ -204,7 +195,7 @@ impl fuser::Filesystem for Fs {
                     let ty = match e.ty {
                         toa_unix::DirItemType::File => fuser::FileType::RegularFile,
                         toa_unix::DirItemType::Dir => fuser::FileType::Directory,
-                        toa_unix::DirItemType::SymLink(_) => fuser::FileType::Symlink,
+                        toa_unix::DirItemType::SymLink => fuser::FileType::Symlink,
                         toa_unix::DirItemType::Unknown { .. } => todo!(),
                     };
                     let mut nam = vec![0; e.name.len() as usize];
@@ -244,27 +235,17 @@ impl fuser::Filesystem for Fs {
             if name.as_bytes() != &*nam {
                 continue;
             }
-            let (data, key) = match &e.ty {
-                toa_unix::DirItemType::File => {
-                    let key = dir.get_ref(i).unwrap().unwrap();
-                    (
-                        NodeData::File(self.dev.get(&key).unwrap().into_root()),
-                        Some(key),
-                    )
-                }
-                toa_unix::DirItemType::Dir => {
-                    let key = dir.get_ref(i).unwrap().unwrap();
-                    (
-                        NodeData::Dir(self.dev.get(&key).unwrap().into_root()),
-                        Some(key),
-                    )
-                }
-                toa_unix::DirItemType::SymLink(x) => {
-                    let mut s = vec![0; x.len() as usize];
-                    dir.read_data(*x, &mut s).unwrap();
-                    (NodeData::SymLink(s.into()), None)
-                }
-                toa_unix::DirItemType::Unknown { .. } => todo!(),
+            let key = dir.get_ref(i).unwrap().unwrap();
+            let len = if e.len != 0 {
+                e.len
+            } else {
+                self.dev
+                    .get(&key)
+                    .unwrap()
+                    .data()
+                    .len()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
             };
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
@@ -273,8 +254,8 @@ impl fuser::Filesystem for Fs {
             };
             let perm = e.permissions;
             let perm = 0o777;
-            let (ino, data) = self.increase_ref(parent, data, None, perm, mtime, e.uid, e.gid);
-            let attr = file_attr(ino, data, mtime, perm, e.uid, e.gid);
+            let ino = self.increase_ref(parent, e.ty, len, key, perm, mtime, e.uid, e.gid);
+            let attr = file_attr(ino, e.ty, len, mtime, perm, e.uid, e.gid);
             return reply.entry(&Duration::MAX, &attr, 0);
         }
         reply.error(libc::ENOENT)
@@ -310,7 +291,9 @@ impl fuser::Filesystem for Fs {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
-        reply.data(symlink)
+        let buf = &mut vec![0; symlink.data().len() as usize];
+        symlink.data().read_exact(0, buf).unwrap();
+        reply.data(buf)
     }
 
     fn listxattr(
@@ -342,13 +325,10 @@ impl fuser::Filesystem for Fs {
                 let Some(x) = self.get_ino(ino) else {
                     return reply.error(libc::ENOENT);
                 };
-                let Some(x) = x.key else {
-                    return reply.error(libc::ENODATA);
-                };
                 match size {
                     0 => reply.size(64),
                     ..64 => reply.error(libc::ERANGE),
-                    64.. => reply.data(&x.to_hex()),
+                    64.. => reply.data(&x.key.to_hex()),
                 }
             }
             _ => reply.error(libc::ENODATA),
@@ -356,49 +336,20 @@ impl fuser::Filesystem for Fs {
     }
 }
 
-impl NodeData {
-    fn key(&self) -> KeyOrStr {
-        match self {
-            Self::File(x) | Self::Dir(x) => KeyOrStr::Key(mix_key(&x)),
-            Self::SymLink(x) => KeyOrStr::Str(x.clone()),
-        }
-    }
-
-    fn as_root(&self) -> &toa::core::Root {
-        match self {
-            Self::File(x) | Self::Dir(x) => x,
-            _ => todo!(),
-        }
-    }
-
-    fn as_str(&self) -> &[u8] {
-        match self {
-            Self::SymLink(x) => x,
-            _ => todo!(),
-        }
-    }
-
-    fn len(&self) -> u64 {
-        match self {
-            Self::File(x) | Self::Dir(x) => (x.data_len >> 3).try_into().unwrap_or(u64::MAX),
-            Self::SymLink(x) => x.len() as u64,
-        }
-    }
-}
-
 fn file_attr(
     ino: u64,
-    data: &NodeData,
+    ty: DirItemType,
+    len: u64,
     mtime: SystemTime,
     perm: u16,
     uid: u32,
     gid: u32,
 ) -> fuser::FileAttr {
-    let len = data.len();
-    let kind = match data {
-        NodeData::File(_) => fuser::FileType::RegularFile,
-        NodeData::Dir(_) => fuser::FileType::Directory,
-        NodeData::SymLink(_) => fuser::FileType::Symlink,
+    let kind = match ty {
+        DirItemType::File => fuser::FileType::RegularFile,
+        DirItemType::Dir => fuser::FileType::Directory,
+        DirItemType::SymLink => fuser::FileType::Symlink,
+        DirItemType::Unknown { .. } => todo!(),
     };
     fuser::FileAttr {
         ino,
@@ -425,14 +376,6 @@ fn usage(procname: &str) -> Box<dyn Error> {
 
 fn new_reader(pack: &str) -> Result<(Toa, Meta)> {
     Toa::new(pack).map_err(|e| format!("failed to open pack {pack:?}: {e}").into())
-}
-
-fn mix_key(root: &toa::core::Root) -> [u8; 32] {
-    let mut k = *root.data_root.as_bytes();
-    k.iter_mut()
-        .zip(*root.refs_root.as_bytes())
-        .for_each(|(x, y)| *x ^= y);
-    k
 }
 
 fn start() -> Result<()> {
@@ -463,15 +406,12 @@ fn start() -> Result<()> {
         .try_into()
         .map(Hash::from_bytes)
         .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
-    let root = dev
-        .get(&root_key)
-        .map_err(|e| format!("failed to get root object: {e}"))?
-        .into_root();
     let fs = Fs {
         dev,
         root: Node {
-            key: Some(root_key),
-            data: NodeData::Dir(root),
+            key: root_key,
+            ty: DirItemType::Dir,
+            len: 0, // "directory size" is a meaningless metric on UNIX so don't even bother
             parent_ino: 0,
             refcount: 1,
             uid: 0,

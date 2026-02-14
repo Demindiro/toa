@@ -15,6 +15,7 @@ pub struct DirIter<T> {
 #[derive(Debug)]
 pub struct DirItem {
     pub ty: DirItemType,
+    pub len: u64,
     pub permissions: u16,
     pub name: DirData,
     pub uid: u32,
@@ -22,11 +23,11 @@ pub struct DirItem {
     pub modified: i64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum DirItemType {
     File,
     Dir,
-    SymLink(DirData),
+    SymLink,
     Unknown { ty: u16 },
 }
 
@@ -91,15 +92,13 @@ where
                 let ty = match ty_perms >> 9 {
                     0 => DirItemType::File,
                     1 => DirItemType::Dir,
-                    2 => DirItemType::SymLink(DirData {
-                        offset: name_offset + name.len,
-                        len,
-                    }),
+                    2 => DirItemType::SymLink,
                     ty => DirItemType::Unknown { ty },
                 };
 
                 Ok(DirItem {
                     ty,
+                    len,
                     permissions: ty_perms & 0o777,
                     uid,
                     gid,

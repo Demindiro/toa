@@ -66,26 +66,8 @@ where
     for x in dir.iter() {
         let (i, x) = x.map_err(|e| format!("{e:?}"))?;
         let fmt = fmt_item(&dir, &x)?;
-        match x.ty {
-            DirItemType::File | DirItemType::Dir => {
-                let x = dir.get_ref(i).map_err(|e| format!("{e:?}"))?.unwrap();
-                print!("{x}");
-            }
-            DirItemType::SymLink(_) | DirItemType::Unknown { .. } => {
-                print!("________________________________________________________________")
-            }
-        }
-        print!("  {fmt}");
-        match x.ty {
-            DirItemType::File | DirItemType::Dir | DirItemType::Unknown { .. } => {}
-            DirItemType::SymLink(x) => {
-                let s = &mut vec![0; x.len() as usize];
-                dir.read_data(x, s).map_err(|e| format!("{e:?}"))?;
-                let s = String::from_utf8_lossy(s); // TODO use BStr
-                print!(" -> {s}");
-            }
-        }
-        println!();
+        let key = dir.get_ref(i).map_err(|e| format!("{e:?}"))?.unwrap();
+        println!("{key}  {fmt}");
     }
 
     Ok(())
@@ -149,27 +131,13 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     // TODO support other platforms
     use std::os::unix::fs::MetadataExt;
 
-    enum Data {
-        Object(Hash),
-        Sym(String),
-    }
-
     struct Entry {
         type_perms: u16,
         name: Box<str>,
         uid: u32,
         gid: u32,
         modified: i64,
-        key: Data,
-    }
-
-    impl fmt::Debug for Data {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                Self::Object(x) => x.fmt(f),
-                Self::Sym(x) => x.fmt(f),
-            }
-        }
+        key: Hash,
     }
 
     let mut entries = Vec::new();
@@ -183,11 +151,11 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
             .file_type()
             .map_err(|e| format!("failed to get file type of {path:?}: {e}"))?;
         let (ty_s, ty_n, key) = if ty.is_file() {
-            ("f", 0, Data::Object(add_file(dev, path, stat)?))
+            ("f", 0, add_file(dev, path, stat)?)
         } else if ty.is_dir() {
-            ("d", 1, Data::Object(add_dir(dev, path, stat)?))
+            ("d", 1, add_dir(dev, path, stat)?)
         } else if ty.is_symlink() {
-            ("s", 2, Data::Sym(add_symlink(path, stat)?))
+            ("s", 2, add_symlink(dev, path, stat)?)
         } else {
             eprintln!("skipping {path} (unknown format)");
             continue;
@@ -233,27 +201,17 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
         let prev_len = data.len();
         data.extend(e.type_perms.to_le_bytes());
         data.push(e.name.len() as u8);
-        match &e.key {
-            Data::Object(_) => data.extend([0; 5]),
-            Data::Sym(x) => data.extend(&x.len().to_le_bytes()[..5]),
-        }
+        data.extend([0; 5]);
         data.extend(e.uid.to_le_bytes());
         data.extend(e.gid.to_le_bytes());
         data.extend(names_offset.to_le_bytes());
         data.extend(e.modified.to_le_bytes());
-        match &e.key {
-            Data::Object(x) => refs.push(*x),
-            Data::Sym(x) => refs.push(toa::core::hash(&[], &[])),
-        }
+        refs.push(e.key);
         assert_eq!(prev_len, data.len() - 32);
         names_offset += e.name.len() as u64;
     }
     for e in &entries {
         data.extend(e.name.as_bytes());
-        match &e.key {
-            Data::Object(_) => {}
-            Data::Sym(x) => data.extend(x.as_bytes()),
-        }
     }
 
     let x = dev
@@ -262,12 +220,15 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     Ok(x)
 }
 
-fn add_symlink(path: &str, stat: &mut Stat) -> Result<String> {
+fn add_symlink(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let link =
         fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
     let link = path_to_utf8(&link)?;
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
-    Ok(link.into())
+    let key = dev
+        .add(link.as_bytes(), &[])
+        .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
+    Ok(key)
 }
 
 fn open(store: &str) -> Result<(Toa, Hash)> {
@@ -315,6 +276,7 @@ fn path_to_utf8(path: &Path) -> Result<&str> {
 fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
     let DirItem {
         ty,
+        len,
         name,
         uid,
         gid,
@@ -324,7 +286,7 @@ fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
     let ty = match ty {
         DirItemType::File => '-',
         DirItemType::Dir => 'd',
-        DirItemType::SymLink(_) => 's',
+        DirItemType::SymLink => 'l',
         DirItemType::Unknown { .. } => '?',
     };
     let b = *permissions;
