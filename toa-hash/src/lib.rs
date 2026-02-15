@@ -6,10 +6,9 @@ use sha3::{
     digest::{ExtendableOutput, Reset, Update, XofReader},
 };
 
-const DF_ROOT: u8 = 1 << 0;
-const DF_DATA: u8 = 1 << 1;
-const DF_REFS: u8 = 1 << 2;
-const DF_LEAF: u8 = 1 << 3;
+const DF_DATA: u8 = 1 << 0;
+const DF_REFS: u8 = 1 << 1;
+const DF_LEAF: u8 = 1 << 2;
 
 const CHUNK_SIZE: usize = 1 << 13;
 
@@ -17,15 +16,6 @@ const CHUNK_SIZE: usize = 1 << 13;
 pub struct DataHasher(TreeHasher);
 #[derive(Clone)]
 pub struct RefsHasher(TreeHasher);
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-pub struct Root {
-    pub data_root: DataCv,
-    pub refs_root: RefsCv,
-    pub data_len: u128,
-    pub refs_len: u128,
-}
 
 /// Chaining value
 #[derive(
@@ -177,27 +167,6 @@ impl TreeHasher {
     }
 }
 
-impl Root {
-    pub fn hash(&self) -> Hash {
-        Hash(ts_hash(DF_ROOT, &self.to_bytes()))
-    }
-
-    // TODO add u128le
-    // I hate endian!
-    pub fn to_bytes(mut self) -> [u8; 96] {
-        self.data_len = self.data_len.to_le();
-        self.refs_len = self.refs_len.to_le();
-        bytemuck::cast(self)
-    }
-
-    pub fn from_bytes(bytes: &[u8; 96]) -> Self {
-        let mut x: Self = bytemuck::cast(*bytes);
-        x.data_len = x.data_len.to_le();
-        x.refs_len = x.refs_len.to_le();
-        x
-    }
-}
-
 macro_rules! impl_hash {
     ($name:ident) => {
         #[derive(
@@ -285,13 +254,19 @@ impl fmt::Debug for Cv {
 
 pub fn hash(data: &[u8], refs: &[Hash]) -> Hash {
     let refs = Hash::slice_as_bytes(refs).as_flattened();
-    Root {
-        data_root: DataCv(tree_hash(DF_DATA, data)),
-        refs_root: RefsCv(tree_hash(DF_REFS, refs)),
-        data_len: (data.len() as u128) << 3,
-        refs_len: (refs.len() as u128) << 3,
+    let data = DataCv(tree_hash(DF_DATA, data));
+    let refs = RefsCv(tree_hash(DF_REFS, refs));
+    root_hash(data, refs)
+}
+
+pub fn root_hash(data: DataCv, refs: RefsCv) -> Hash {
+    let x = data.as_bytes().iter();
+    let y = refs.as_bytes().iter();
+    let mut z = [0; 32];
+    for ((x, y), z) in x.zip(y).zip(z.iter_mut()) {
+        *z = x ^ y;
     }
-    .hash()
+    Hash(Cv(z))
 }
 
 /// # Panics
