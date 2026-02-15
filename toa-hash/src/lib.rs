@@ -108,9 +108,12 @@ impl TreeHasher {
     fn update(&mut self, mut data: &[u8]) {
         while let Some((mut y, n)) = self.chunk_update(data) {
             data = &data[n..];
+            let mut shift = 0;
             while self.stack.len() >= self.chunk_pos().count_ones() as usize {
                 let x = self.stack.pop().expect("chunk_pos() >= 1");
-                y = ts_pair(self.domain, x, y);
+                shift += 1;
+                let len = ((CHUNK_SIZE as u128) << 3) << shift;
+                y = ts_pair(self.domain, x, y, len);
             }
             self.stack.push(y);
         }
@@ -122,6 +125,7 @@ impl TreeHasher {
     }
 
     fn finalize(mut self) -> Cv {
+        let len = self.len << 3;
         let mut y = if !self.chunk_is_empty() {
             self.chunk_take()
         } else if let Some(y) = self.stack.pop() {
@@ -129,8 +133,12 @@ impl TreeHasher {
         } else {
             return self.chunk_take();
         };
+        let d = len.next_power_of_two().trailing_zeros();
+        let d = d as usize - self.stack.len();
+        let mut mask = !((1 << d) - 1);
         while let Some(x) = self.stack.pop() {
-            y = ts_pair(self.domain, x, y);
+            mask <<= 1;
+            y = ts_pair(self.domain, x, y, len & !mask);
         }
         y
     }
@@ -310,12 +318,12 @@ where
     RefsCv(ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs)))
 }
 
-pub fn data_pair_cv(x: DataCv, y: DataCv) -> DataCv {
-    DataCv(ts_pair(DF_DATA, x.0, y.0))
+pub fn data_pair_cv(x: DataCv, y: DataCv, len: u128) -> DataCv {
+    DataCv(ts_pair(DF_DATA, x.0, y.0, len))
 }
 
-pub fn refs_pair_cv(x: RefsCv, y: RefsCv) -> RefsCv {
-    RefsCv(ts_pair(DF_REFS, x.0, y.0))
+pub fn refs_pair_cv(x: RefsCv, y: RefsCv, len: u128) -> RefsCv {
+    RefsCv(ts_pair(DF_REFS, x.0, y.0, len))
 }
 
 /// `domain` must be either `DF_DATA` or `DF_REFS`.
@@ -332,17 +340,30 @@ fn ts_hash(domain: u8, data: &[u8]) -> Cv {
     Cv(cv)
 }
 
-fn ts_pair(domain: u8, x: Cv, y: Cv) -> Cv {
-    ts_hash(domain, [x, y].map(|x| x.0).as_flattened())
+/// `len`: number of data bits of leaf nodes.
+fn ts_pair(domain: u8, x: Cv, y: Cv, len: u128) -> Cv {
+    let mut buf = [0; 80];
+    buf[00..32].copy_from_slice(x.as_bytes());
+    buf[32..64].copy_from_slice(y.as_bytes());
+    buf[64..].copy_from_slice(&len.to_le_bytes());
+    ts_hash(domain, &buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn p(x: Cv, y: Cv) -> Cv {
-        ts_pair(DF_DATA, x, y)
+    fn p(x: Cv, y: Cv, len: usize) -> Cv {
+        ts_pair(DF_DATA, x, y, (len as u128) << 3)
     }
+    macro_rules! p {
+        ($($f:ident $n:literal)*) => {
+            $(fn $f(x: Cv, y: Cv) -> Cv {
+                p(x, y, CHUNK_SIZE*$n)
+            })*
+        };
+    }
+    p!(p2 2 p3 3 p4 4 p5 5 p6 6 p7 7 p8 8 p9 9);
 
     fn test_chunks<const N: usize, F>(f: F)
     where
@@ -374,7 +395,48 @@ mod tests {
         let data = [b'x'; CHUNK_SIZE + 1];
         let a = ts_hash(DF_DATA | DF_LEAF, &data[..CHUNK_SIZE]);
         let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE..]);
-        assert_eq!(p(a, b), tree_hash(DF_DATA, &data));
+        assert_eq!(p(a, b, CHUNK_SIZE + 1), tree_hash(DF_DATA, &data));
+    }
+    #[test]
+    fn hash_tree_2_chunks_minus_one_byte() {
+        let data = [b'x'; 2 * CHUNK_SIZE - 1];
+        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..]);
+        assert_eq!(p(a, b, 2 * CHUNK_SIZE - 1), tree_hash(DF_DATA, &data));
+    }
+    #[test]
+    fn hash_tree_2_chunks_plus_one_byte() {
+        let data = [b'x'; 2 * CHUNK_SIZE + 1];
+        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
+        let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..]);
+        assert_eq!(
+            p(p2(a, b), c, 2 * CHUNK_SIZE + 1),
+            tree_hash(DF_DATA, &data)
+        );
+    }
+    #[test]
+    fn hash_tree_3_chunks_minus_one_byte() {
+        let data = [b'x'; 3 * CHUNK_SIZE - 1];
+        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
+        let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..]);
+        assert_eq!(
+            p(p2(a, b), c, 3 * CHUNK_SIZE - 1),
+            tree_hash(DF_DATA, &data)
+        );
+    }
+    #[test]
+    fn hash_tree_3_chunks_plus_one_byte() {
+        let data = [b'x'; 3 * CHUNK_SIZE + 1];
+        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
+        let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..CHUNK_SIZE]);
+        let d = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 3..][..]);
+        let ab = p2(a, b);
+        let cd = p(c, d, CHUNK_SIZE + 1);
+        let abcd = p(ab, cd, 3 * CHUNK_SIZE + 1);
+        assert_eq!(abcd, tree_hash(DF_DATA, &data));
     }
 
     #[test]
@@ -383,35 +445,37 @@ mod tests {
     }
     #[test]
     fn hash_tree_2_chunks() {
-        test_chunks(|[a, b]| p(a, b))
+        test_chunks(|[a, b]| p2(a, b))
     }
     #[test]
     fn hash_tree_3_chunks() {
-        test_chunks(|[a, b, c]| p(p(a, b), c))
+        test_chunks(|[a, b, c]| p(p2(a, b), c, 3 * CHUNK_SIZE))
     }
     #[test]
     fn hash_tree_4_chunks() {
-        test_chunks(|[a, b, c, d]| p(p(a, b), p(c, d)))
+        test_chunks(|[a, b, c, d]| p4(p2(a, b), p2(c, d)))
     }
     #[test]
     fn hash_tree_5_chunks() {
-        test_chunks(|[a, b, c, d, e]| p(p(p(a, b), p(c, d)), e))
+        test_chunks(|[a, b, c, d, e]| p5(p4(p2(a, b), p2(c, d)), e))
     }
     #[test]
     fn hash_tree_6_chunks() {
-        test_chunks(|[a, b, c, d, e, f]| p(p(p(a, b), p(c, d)), p(e, f)))
+        test_chunks(|[a, b, c, d, e, f]| p6(p4(p2(a, b), p2(c, d)), p2(e, f)))
     }
     #[test]
     fn hash_tree_7_chunks() {
-        test_chunks(|[a, b, c, d, e, f, g]| p(p(p(a, b), p(c, d)), p(p(e, f), g)))
+        test_chunks(|[a, b, c, d, e, f, g]| p7(p4(p2(a, b), p2(c, d)), p3(p2(e, f), g)))
     }
     #[test]
     fn hash_tree_8_chunks() {
-        test_chunks(|[a, b, c, d, e, f, g, h]| p(p(p(a, b), p(c, d)), p(p(e, f), p(g, h))))
+        test_chunks(|[a, b, c, d, e, f, g, h]| p8(p4(p2(a, b), p2(c, d)), p4(p2(e, f), p2(g, h))))
     }
     #[test]
     fn hash_tree_9_chunks() {
-        test_chunks(|[a, b, c, d, e, f, g, h, i]| p(p(p(p(a, b), p(c, d)), p(p(e, f), p(g, h))), i))
+        test_chunks(|[a, b, c, d, e, f, g, h, i]| {
+            p9(p8(p4(p2(a, b), p2(c, d)), p4(p2(e, f), p2(g, h))), i)
+        })
     }
 
     #[test]
