@@ -248,10 +248,6 @@ impl_hash!(DataCv);
 impl_hash!(RefsCv);
 
 impl Cv {
-    pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
-        bytemuck::cast_slice(slice)
-    }
-
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
