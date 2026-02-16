@@ -1,4 +1,4 @@
-//#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code, unused_must_use, elided_named_lifetimes)]
 
 pub use toa_core::{self as core, Hash};
@@ -56,7 +56,7 @@ pub enum ToaKvStoreError<T> {
 #[derive(Clone)]
 pub struct Object<S> {
     toa: S,
-    root: toa_core::Root,
+    root: Root,
 }
 
 #[derive(Debug)]
@@ -74,10 +74,64 @@ pub enum ReadExactError<S> {
     Store(S),
 }
 
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(C)]
+struct Root {
+    data: DataCv,
+    refs: RefsCv,
+    data_len: u128,
+    refs_len: u128,
+}
+
 impl<S> Toa<S> {
     pub fn new(store: S) -> Self {
         Self { store }
     }
+}
+
+macro_rules! impl_add {
+    ($cv:ident $add:ident $add_pair:ident $add_chunk:ident $arg:ident $elem:ident $toa_pair:ident $toa_chunk:ident) => {
+        fn $add(&self, $arg: &[$elem]) -> Result<$cv, S::Error> {
+            if $arg.len() <= CHUNK_SIZE as usize / mem::size_of::<$elem>() {
+                self.$add_chunk($arg)
+            } else {
+                let mut stack = arrayvec::ArrayVec::<$cv, { 128 - 13 }>::new();
+                let mut it = $arg.chunks_exact(CHUNK_SIZE as usize / mem::size_of::<$elem>());
+                for (i, y) in (&mut it).enumerate() {
+                    let mut y = self.$add_chunk(y)?;
+                    let mut len = 1 << 16;
+                    while stack.len() >= (i + 1).count_ones() as usize {
+                        let x = stack.pop().expect("at least one element");
+                        len <<= 1;
+                        y = self.$add_pair(&x, &y, len)?;
+                    }
+                    stack.push(y);
+                }
+
+                let mut y = if !it.remainder().is_empty() {
+                    self.$add_chunk(it.remainder())?
+                } else {
+                    stack.pop().expect("at least one element")
+                };
+                let len = ($arg.len() as u128) * 8;
+                let d = len.next_power_of_two().trailing_zeros();
+                let d = d as usize - stack.len();
+                let mut mask = !((1 << d) - 1);
+                while let Some(x) = stack.pop() {
+                    mask <<= 1;
+                    y = self.$add_pair(&x, &y, len & !mask)?;
+                }
+                Ok(y)
+            }
+        }
+
+        fn $add_pair(&self, x: &$cv, y: &$cv, len: u128) -> Result<$cv, S::Error> {
+            let cv = toa_core::$toa_pair(*x, *y, len);
+            let xy = [*x.as_bytes(), *y.as_bytes()];
+            self.store.add_pair(cv.as_bytes(), &bytemuck::cast(xy))?;
+            Ok(cv)
+        }
+    };
 }
 
 impl<S> Toa<S>
@@ -85,14 +139,15 @@ where
     S: ToaStore,
 {
     pub fn add(&self, data: &[u8], refs: &[Hash]) -> Result<Hash, S::Error> {
-        let root = toa_core::Root {
-            data_root: self.add_data(data)?,
-            refs_root: self.add_refs(refs)?,
+        let root = Root {
+            data: self.add_data(data)?,
+            refs: self.add_refs(refs)?,
             data_len: (data.len() as u128) << 3,
             refs_len: (refs.len() as u128) << 8,
         };
-        let hash = root.hash();
-        self.store.add_root(hash.as_bytes(), &root.to_bytes())?;
+        let hash = toa_core::root_hash(root.data, root.refs);
+        self.store
+            .add_root(hash.as_bytes(), bytemuck::cast_ref(&root))?;
         Ok(hash)
     }
 
@@ -105,7 +160,7 @@ where
         let Some(root) = root else {
             return Ok(None);
         };
-        let root = toa_core::Root::from_bytes(&root);
+        let root = bytemuck::cast(root);
         Ok(Some(Object { toa: self, root }))
     }
 
@@ -118,65 +173,12 @@ where
         })
     }
 
-    fn add_data(&self, data: &[u8]) -> Result<DataCv, S::Error> {
-        if data.len() <= CHUNK_SIZE as usize {
-            self.add_data_chunk(data)
-        } else {
-            let mut stack = arrayvec::ArrayVec::<DataCv, { 128 - 13 }>::new();
-            for (i, y) in data.chunks(CHUNK_SIZE as usize).enumerate() {
-                let mut y = self.add_data_chunk(y)?;
-                while stack.len() >= (i + 1).count_ones() as usize {
-                    let x = stack.pop().expect("at least one element");
-                    y = self.add_data_pair(&x, &y)?;
-                }
-                stack.push(y);
-            }
-            let y = stack.pop().expect("at least one element");
-            stack
-                .into_iter()
-                .rev()
-                .try_fold(y, |y, x| self.add_data_pair(&x, &y))
-        }
-    }
-
-    fn add_data_pair(&self, x: &DataCv, y: &DataCv) -> Result<DataCv, S::Error> {
-        let cv = toa_core::data_pair_cv(*x, *y);
-        let xy = [*x.as_bytes(), *y.as_bytes()];
-        self.store.add_pair(cv.as_bytes(), &bytemuck::cast(xy))?;
-        Ok(cv)
-    }
+    impl_add!(DataCv add_data add_data_pair add_data_chunk data u8   data_pair_cv data_chunk_cv);
+    impl_add!(RefsCv add_refs add_refs_pair add_refs_chunk refs Hash refs_pair_cv refs_chunk_cv);
 
     fn add_data_chunk(&self, chunk: &[u8]) -> Result<DataCv, S::Error> {
         let cv = toa_core::data_chunk_cv(chunk);
         self.store.add_chunk(cv.as_bytes(), chunk)?;
-        Ok(cv)
-    }
-
-    fn add_refs(&self, refs: &[Hash]) -> Result<RefsCv, S::Error> {
-        if refs.len() <= CHUNK_SIZE as usize / 32 {
-            self.add_refs_chunk(refs)
-        } else {
-            let mut stack = arrayvec::ArrayVec::<RefsCv, { 128 - 13 }>::new();
-            for (i, y) in refs.chunks(CHUNK_SIZE as usize / 32).enumerate() {
-                let mut y = self.add_refs_chunk(y)?;
-                while stack.len() >= (i + 1).count_ones() as usize {
-                    let x = stack.pop().expect("at least one element");
-                    y = self.add_refs_pair(&x, &y)?;
-                }
-                stack.push(y);
-            }
-            let y = stack.pop().expect("at least one element");
-            stack
-                .into_iter()
-                .rev()
-                .try_fold(y, |y, x| self.add_refs_pair(&x, &y))
-        }
-    }
-
-    fn add_refs_pair(&self, x: &RefsCv, y: &RefsCv) -> Result<RefsCv, S::Error> {
-        let cv = toa_core::refs_pair_cv(*x, *y);
-        let xy = [*x.as_bytes(), *y.as_bytes()];
-        self.store.add_pair(cv.as_bytes(), &bytemuck::cast(xy))?;
         Ok(cv)
     }
 
@@ -188,20 +190,10 @@ where
     }
 }
 
-impl<S> Object<S> {
-    pub fn into_root(self) -> toa_core::Root {
-        self.root
-    }
-}
-
 impl<'t, S> Object<&'t Toa<S>>
 where
     S: ToaStore,
 {
-    pub fn from_root(toa: &'t Toa<S>, root: toa_core::Root) -> Self {
-        Self { toa, root }
-    }
-
     /// Size of data blob **in bits**.
     pub fn data_len(&self) -> u128 {
         self.root.data_len
@@ -213,15 +205,11 @@ where
     }
 
     pub fn data(&self) -> Data<'t, S> {
-        Data::new(self.toa, self.root.data_root, (self.root.data_len + 7) >> 3)
+        Data::new(self.toa, self.root.data, (self.root.data_len + 7) >> 3)
     }
 
     pub fn refs(&self) -> Refs<'t, S> {
-        Refs::new(
-            self.toa,
-            self.root.refs_root,
-            (self.root.refs_len + 255) >> 8,
-        )
+        Refs::new(self.toa, self.root.refs, (self.root.refs_len + 255) >> 8)
     }
 }
 
