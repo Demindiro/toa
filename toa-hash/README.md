@@ -12,21 +12,36 @@ An object consists of two parts:
 - a blob of binary data
 - a blob of references
 
-The data and references blob are individually hashed,
-then aggregated in a 96-byte root structure which is then hashed
-with `D = DF_ROOT`.
+Each blob is hashed using the same tree hash algorithm,
+producing a 256-bit hash for each blob.
+The two hashes are XORed to produce a single root hash.
 
-| bytes | description                                   |
-| -----:|:--------------------------------------------- |
-|  31:0 | binary data hash                              |
-| 63:31 | references hash                               |
-| 79:64 | binary data length in bits (little-endian)    |
-| 95:80 | references length in bits (little-endian)     |
+> **Warning**
+>
+> To verify a root hash, the hash of both blobs must be verified too.
+> This is because an XOR is trivially reversible.
+> Consider:
+>
+>     Root = D xor E
+>
+> If an attacker wishes to substitute `D` with `D'` one simply calculates
+> `E'` such that:
+>
+>     E' = D' xor D xor E
+>
+>     D' xor E'  =  D' xor D' xor D xor E  =  D xor E  =  Root
+>
+> Verifying both D and E thwarts this attack, as it is impossible to find
+> a preimage of E'.
 
-The blobs are then split into chunks of 8192 bytes each.
+### Tree hash
+
+A blob is split into chunks of 8192 bytes each,
+with the last chunk being 8192 bytes or less.
 Each chunk is hashed individually with `D = DF_LEAF | (DF_DATA or DF_REFS)`,
 producing a "Chaining Value" (CV).
-Each pair of CVs is combined and hashed with `D = DF_DATA or DF_REFS`,
+Each pair of CVs is combined and suffixed with the total size of referenced
+chunks in bits, then  hashed with `D = DF_DATA or DF_REFS`,
 producing a new CV, forming a complete binary tree.
 
 ```
@@ -42,11 +57,45 @@ producing a new CV, forming a complete binary tree.
 > Smaller chunk sizes have more than 1% overhead.
 
 
+#### Example: hashing a blob of 4O000 bytes (320000 bits)
+
+```
+data = A || B || C || D || E
+
+|A| = 65536 bits
+|B| = 65536 bits
+|C| = 65536 bits
+|D| = 65536 bits
+|E| =  7232 bits
+
+a = H_chunk(A)
+b = H_chunk(B)
+c = H_chunk(C)
+d = H_chunk(D)
+e = H_chunk(E)
+
+t = H_pair(a, b, 65536 * 2)
+u = H_pair(c, d, 65536 * 2)
+v = H_pair(t, u, 65536 * 4)
+w = H_pair(v, e, 65536 * 4 + 7232)
+
+H(data) = w
+
+        w
+       / \
+      v   \
+     / \   \
+    /   \   \
+   t     u   \
+  / \   / \   \
+ a   b c   d   e
+```
+
+
 ### Domain flags
 
-- `DF_ROOT = 1 << 0`
-- `DF_DATA = 1 << 1`
-- `DF_REFS = 1 << 2`
-- `DF_LEAF = 1 << 3`
+- `DF_DATA = 1 << 0`
+- `DF_REFS = 1 << 1`
+- `DF_LEAF = 1 << 2`
 
 [turboshake128]: https://keccak.team/files/TurboSHAKE.pdf
