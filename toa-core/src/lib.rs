@@ -2,8 +2,6 @@
 
 pub use toa_hash::*;
 
-use core::fmt;
-
 #[derive(Clone, Copy, Debug)]
 pub enum CompressionAlgorithm {
     None = 0,
