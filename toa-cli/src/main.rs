@@ -277,8 +277,9 @@ where
     let mut objects = Vec::new();
     eprintln!("collecting keys...");
     dev.iter_with(|key| {
-        let obj = dev.get(&key).unwrap().into_root();
-        objects.push((key, obj));
+        //let obj = dev.get(&key).unwrap().into_root();
+        //objects.push((key, obj));
+        objects.push(key);
         false
     })
     .map_err(|e| format!("failure during store iteration: {e:?}"))?;
@@ -289,8 +290,10 @@ where
 
     eprintln!("traversing objects...");
     let mut n_ok @ mut n_fail = 0;
-    objects.into_iter().for_each(|(key, obj)| {
-        let obj = toa::Object::from_root(&*dev, obj);
+    //objects.into_iter().for_each(|(key, obj)| {
+    //let obj = toa::Object::from_root(&*dev, obj);
+    objects.into_iter().for_each(|key| {
+        let obj = dev.get(&key).unwrap();
         let mut hasher = toa_core::DataHasher::default();
         let mut buf = [0; 8192];
         let mut offt = 0;
@@ -302,14 +305,8 @@ where
             hasher.update(&buf[..n]);
             offt += n as u128;
         }
-        let hash = hasher.finalize();
-        let hash = toa_core::Root {
-            data_root: hash,
-            refs_root: toa_core::RefsHasher::default().finalize(),
-            data_len: obj.data_len(),
-            refs_len: 0,
-        }
-        .hash();
+        let data = hasher.finalize();
+        let hash = toa_core::root_hash(data, toa_core::RefsHasher::default().finalize());
         if key == hash {
             n_ok += 1;
         } else {
