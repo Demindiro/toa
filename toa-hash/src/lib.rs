@@ -98,13 +98,7 @@ impl TreeHasher {
     fn update(&mut self, mut data: &[u8]) {
         while let Some((mut y, n)) = self.chunk_update(data) {
             data = &data[n..];
-            let mut shift = 0;
-            while self.stack.len() >= self.chunk_pos().count_ones() as usize {
-                let x = self.stack.pop().expect("chunk_pos() >= 1");
-                shift += 1;
-                let len = ((CHUNK_SIZE as u128) << 3) << shift;
-                y = ts_pair(self.domain, x, y, len);
-            }
+            y = self.collapse(y);
             self.stack.push(y);
         }
     }
@@ -164,6 +158,17 @@ impl TreeHasher {
 
     fn chunk_is_empty(&self) -> bool {
         self.chunk_len() == 0
+    }
+
+    fn collapse(&mut self, mut y: Cv) -> Cv {
+        let mut shift = 0;
+        while self.stack.len() >= self.chunk_pos().count_ones() as usize {
+            let x = self.stack.pop().expect("chunk_pos() >= 1");
+            shift += 1;
+            let len = ((CHUNK_SIZE as u128) << 3) << shift;
+            y = ts_pair(self.domain, x, y, len);
+        }
+        y
     }
 }
 
