@@ -2,10 +2,6 @@ use std::{
     collections::{BTreeMap, btree_map},
     error::Error,
     ffi::{OsStr, OsString},
-    fs,
-    fs::File,
-    io,
-    io::{Read, Seek},
     ops,
     os::unix::ffi::OsStringExt,
     time::{Duration, SystemTime},
@@ -49,7 +45,7 @@ struct Node {
 
 impl Toa {
     fn new(path: &str) -> Result<(Self, Meta)> {
-        let db = toa_kv::sled::Db::open(path)?;
+        let db = toa_kv::sled::open(path)?;
         let toa = db.open_tree("toa")?;
         let meta = db.open_tree("meta")?;
         let inner = toa::Toa::new(toa::ToaKvStore(toa));
@@ -253,7 +249,6 @@ impl fuser::Filesystem for Fs {
                 0.. => mtime + Duration::from_micros(e.modified as u64),
             };
             let perm = e.permissions;
-            let perm = 0o777;
             let ino = self.increase_ref(parent, e.ty, len, key, perm, mtime, e.uid, e.gid);
             let attr = file_attr(ino, e.ty, len, mtime, perm, e.uid, e.gid);
             return reply.entry(&Duration::MAX, &attr, 0);

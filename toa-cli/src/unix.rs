@@ -1,8 +1,8 @@
-use crate::{InnerToa, Meta, Result, Stat, Toa, add_file, args_end, usage};
+use crate::{InnerToa, Result, Stat, Toa, add_file, args_end, usage};
 use chrono::prelude::*;
-use std::{fmt, fs, path::Path};
+use std::{fs, path::Path};
 use toa::{Hash, Object};
-use toa_unix::{Dir, DirItem, DirItemType, DirIter};
+use toa_unix::{Dir, DirItem, DirItemType};
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
 where
@@ -25,7 +25,7 @@ where
     let root = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (mut dev, mut meta) = Toa::open(&store)?;
+    let (mut dev, meta) = Toa::open(&store)?;
     let mut stat = Stat::default();
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
     println!("d {root_key:?} {root}");
@@ -222,7 +222,7 @@ fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
     let DirItem {
         ty,
         len,
-        name,
+        name: _,
         uid,
         gid,
         permissions,
@@ -244,5 +244,5 @@ fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
     dir.read_data(item.name, &mut name)
         .map_err(|e| format!("name: {e:?}"))?;
     let name = String::from_utf8_lossy(&name); // TODO use BStr
-    Ok(format!("{ty}{permissions} {uid}:{gid} {modified:?} {name}"))
+    Ok(format!("{ty}{permissions} {uid}:{gid} {modified:?} {len:>10} {name}"))
 }

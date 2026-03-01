@@ -1,5 +1,5 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
-#![forbid(unsafe_code, unused_must_use, elided_named_lifetimes)]
+#![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
 pub use toa_core::{self as core, Hash};
 

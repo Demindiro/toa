@@ -3,12 +3,10 @@ mod magic;
 mod unix;
 
 use std::{
-    collections::BTreeMap,
     error::Error,
     fs,
-    fs::File,
     io,
-    io::{Read, Seek, Write},
+    io::Write,
     ops,
 };
 use toa::{Hash, ToaStore};
@@ -31,7 +29,7 @@ struct Meta {
 
 impl Toa {
     fn open(store: &str) -> Result<(Self, Meta)> {
-        let db = toa_kv::sled::Db::open(store)
+        let db = toa_kv::sled::open(store)
             .map_err(|e| format!("failed to open store {store:?}: {e}"))?;
         let toa = db.open_tree("toa")?;
         let meta = db.open_tree("meta")?;
@@ -184,7 +182,7 @@ fn add_file(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
 fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
     let obj = dev.get(&key)?;
     let mut out = io::stdout().lock();
-    let mut buf = &mut [0; 1 << 13];
+    let buf = &mut [0; 1 << 13];
     let mut offt = 0;
     loop {
         let n = obj
@@ -207,7 +205,7 @@ where
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
 
-    let (mut dev, meta) =
+    let (mut dev, _) =
         Toa::open(&store).map_err(|e| format!("failed to create store builder: {e}"))?;
     let stat = add_files(&mut dev, args)?;
 

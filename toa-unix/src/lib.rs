@@ -1,7 +1,5 @@
 #![no_std]
 
-use chrono::prelude::*;
-use core::fmt;
 use toa::{Hash, Object};
 
 #[derive(Clone, Debug, Default)]
@@ -54,8 +52,6 @@ where
         }
     }
 }
-
-impl<T> Dir<Object<T>> {}
 
 impl<T> Dir<Object<&toa::Toa<T>>>
 where
