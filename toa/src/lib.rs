@@ -28,6 +28,8 @@ pub trait ToaStore {
 
     fn iter_roots_with(&self, f: &mut dyn FnMut(&[u8; 32])) -> Result<(), Self::Error>;
 
+    fn size_on_disk(&self) -> Result<u128, Self::Error>;
+
     fn has_chunk(&self, key: &[u8; 32]) -> Result<bool, Self::Error> {
         self.get_chunk(key).map(|x| x.is_some())
     }
@@ -86,6 +88,14 @@ struct Root {
 impl<S> Toa<S> {
     pub fn new(store: S) -> Self {
         Self { store }
+    }
+
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
     }
 }
 
@@ -430,6 +440,10 @@ where
                 (f)(x)
             })
             .map_err(ToaKvStoreError::Kv)
+    }
+
+    fn size_on_disk(&self) -> Result<u128, Self::Error> {
+        self.0.size_on_disk().map_err(ToaKvStoreError::Kv)
     }
 }
 

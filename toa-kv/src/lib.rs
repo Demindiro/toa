@@ -20,6 +20,8 @@ pub trait ToaKv {
         f: &mut dyn FnMut(Self::Key),
     ) -> Result<(), Self::Error>;
 
+    fn size_on_disk(&self) -> Result<u128, Self::Error>;
+
     fn has<'a>(&'a self, key: &[u8]) -> Result<bool, Self::Error> {
         self.get(key).map(|x| x.is_some())
     }
@@ -72,6 +74,12 @@ impl ToaKv for core::cell::RefCell<alloc::collections::BTreeMap<Box<[u8]>, Box<[
             .for_each(|x| (f)(x.clone()));
         Ok(())
     }
+
+    fn size_on_disk(&self) -> Result<u128, Self::Error> {
+        // TODO rough estimate
+        let x = self.borrow().iter().fold(core::mem::size_of_val(self), |s, x| s + core::mem::size_of::<[usize; 4]>() + x.0.len() + x.1.len());
+        Ok(x as u128)
+    }
 }
 
 #[cfg(feature = "sled")]
@@ -97,6 +105,12 @@ impl ToaKv for sled::Tree {
         f: &mut dyn FnMut(Self::Key),
     ) -> Result<(), Self::Error> {
         sled::Tree::scan_prefix(self, prefix).try_for_each(|x| Ok((f)(x?.0)))
+    }
+
+    fn size_on_disk(&self) -> Result<u128, Self::Error> {
+        // FIXME
+        //sled::Db::size_on_disk(self)
+        Ok(0)
     }
 }
 

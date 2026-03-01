@@ -11,7 +11,7 @@ use std::{
     io::{Read, Seek, Write},
     ops,
 };
-use toa::Hash;
+use toa::{Hash, ToaStore};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type InnerToa = toa::Toa<toa::ToaKvStore<toa_kv::sled::Tree>>;
@@ -56,15 +56,15 @@ impl ops::Deref for Toa {
 }
 
 impl Stat {
-    fn summarize(self, dev: &File) -> Result<()> {
-        let pack_size = dev
-            .metadata()
-            .map_err(|e| format!("failed to get store size: {e:?}"))?
-            .len();
-        let Self { size_sum } = self;
-        let ratio = size_sum as f64 / pack_size as f64;
-        println!("pack size: {pack_size}, files size: {size_sum}, ratio: {ratio}");
-        Ok(())
+    fn summarize(self, toa: &Toa) {
+        match toa.inner.store().size_on_disk() {
+            Err(e) => eprintln!("failed to get on-disk size: {e:?}"),
+            Ok(toa_size) => {
+                let Self { size_sum } = self;
+                let ratio = size_sum as f64 / toa_size as f64;
+                println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
+            }
+        }
     }
 }
 
@@ -213,6 +213,8 @@ where
     let (mut dev, meta) =
         Toa::open(&store).map_err(|e| format!("failed to create store builder: {e}"))?;
     let stat = add_files(&mut dev, args)?;
+
+    stat.summarize(&dev);
 
     Ok(())
 }
