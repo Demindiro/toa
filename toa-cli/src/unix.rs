@@ -244,5 +244,7 @@ fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
     dir.read_data(item.name, &mut name)
         .map_err(|e| format!("name: {e:?}"))?;
     let name = String::from_utf8_lossy(&name); // TODO use BStr
-    Ok(format!("{ty}{permissions} {uid}:{gid} {modified:?} {len:>10} {name}"))
+    Ok(format!(
+        "{ty}{permissions} {uid}:{gid} {modified:?} {len:>10} {name}"
+    ))
 }

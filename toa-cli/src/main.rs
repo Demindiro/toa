@@ -2,13 +2,7 @@
 mod magic;
 mod unix;
 
-use std::{
-    error::Error,
-    fs,
-    io,
-    io::Write,
-    ops,
-};
+use std::{error::Error, fs, io, io::Write, ops};
 use toa::{Hash, ToaStore};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;

@@ -77,7 +77,12 @@ impl ToaKv for core::cell::RefCell<alloc::collections::BTreeMap<Box<[u8]>, Box<[
 
     fn size_on_disk(&self) -> Result<u128, Self::Error> {
         // TODO rough estimate
-        let x = self.borrow().iter().fold(core::mem::size_of_val(self), |s, x| s + core::mem::size_of::<[usize; 4]>() + x.0.len() + x.1.len());
+        let x = self
+            .borrow()
+            .iter()
+            .fold(core::mem::size_of_val(self), |s, x| {
+                s + core::mem::size_of::<[usize; 4]>() + x.0.len() + x.1.len()
+            });
         Ok(x as u128)
     }
 }
