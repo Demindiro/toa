@@ -112,10 +112,7 @@ usage: {procname} <add|get|list>
         verify pack integrity
     unix new <pack> <directory>
     unix get <pack> <path>
-    unix ls <pack> [path]
-    unix scrub <pack>
-        verify directory tree integrity
-        this does not check file contents, only whether they're present"
+    unix ls <pack> [path]"
     );
     #[cfg(feature = "magic")]
     let s = s + "

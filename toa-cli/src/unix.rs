@@ -13,7 +13,6 @@ where
         "new" => cmd_new(procname, args),
         "get" => cmd_get(procname, args),
         "ls" => cmd_ls(procname, args),
-        "scrub" => cmd_scrub(procname, args),
         _ => Err(usage(procname)),
     }
 }
@@ -71,60 +70,6 @@ where
     }
 
     Ok(())
-}
-
-fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
-where
-    A: Iterator<Item = String>,
-{
-    todo!();
-    /*
-    let store = args.next().ok_or_else(|| usage(procname))?;
-    args_end(procname, args)?;
-
-    let (dev, dir) = open(&store)?;
-    // pre-collect + sorting makes a *huge* difference in performance
-    // larger caches would help, but that ooesn't scale as well as
-    // having a better iteration order.
-    //
-    // TODO binary heap will include duplicates
-    // might want to use something else, like a BTreeSet?
-    let dir = ObjectRawOrd(dev.get(&dir)?.into_root());
-    let mut stack = std::collections::BinaryHeap::from([dir]);
-    let mut n_ok @ mut n_fail = 0;
-    while let Some(dir) = stack.pop() {
-        let mut items =
-            DirIter::from_object(Object::from_root(&*dev, dir.0))?.collect::<Result<Vec<_>>>()?;
-        items.sort_by_key(|x| x.key);
-        for x in items {
-            match x.ty {
-                DirItemType::Dir => stack.push(ObjectRawOrd(dev.get(&x.key)?.into_root())),
-                DirItemType::File => {}
-                DirItemType::SymLink => continue,
-            }
-            let Ok(has) = dev
-                .contains_key(&x.key)
-                .inspect_err(|e| eprintln!("failed to fetch {:?}: {e:?}", x.key))
-            else {
-                n_fail += 1;
-                continue;
-            };
-            if !has {
-                println!("missing {:?}", x.key);
-                n_fail += 1;
-                continue;
-            } else {
-                n_ok += 1;
-            }
-        }
-    }
-
-    eprintln!("ok:{n_ok} fail:{n_fail}");
-
-    (n_fail == 0)
-        .then_some(())
-        .ok_or_else(|| "some objects missing".into())
-    */
 }
 
 fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
