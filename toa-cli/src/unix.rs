@@ -65,8 +65,8 @@ where
     println!("items: {}", dir.len());
     for x in dir.iter() {
         let (i, x) = x.map_err(|e| format!("{e:?}"))?;
-        let fmt = fmt_item(&dir, &x)?;
         let key = dir.get_ref(i).map_err(|e| format!("{e:?}"))?.unwrap();
+        let fmt = fmt_item(&dev, &dir, &x, &key)?;
         println!("{key}  {fmt}");
     }
 
@@ -215,7 +215,12 @@ fn path_to_utf8(path: &Path) -> Result<&str> {
         .ok_or_else(|| format!("{path:?} is invalid UTF-8").into())
 }
 
-fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
+fn fmt_item(
+    dev: &InnerToa,
+    dir: &Dir<Object<&InnerToa>>,
+    item: &DirItem,
+    key: &Hash,
+) -> Result<String> {
     let DirItem {
         ty,
         len,
@@ -225,6 +230,18 @@ fn fmt_item(dir: &Dir<Object<&InnerToa>>, item: &DirItem) -> Result<String> {
         permissions,
         modified,
     } = item;
+    let len = if *len == 0 {
+        let obj = dev
+            .get(key)
+            .map_err(|e| format!("fmt_item: {e:?}"))?
+            .ok_or("fmt_item: object not found")?;
+        match ty {
+            DirItemType::Dir => obj.refs().len(),
+            _ => obj.data().len(),
+        }
+    } else {
+        (*len).into()
+    };
     let ty = match ty {
         DirItemType::File => '-',
         DirItemType::Dir => 'd',
