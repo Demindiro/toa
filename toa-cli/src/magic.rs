@@ -23,7 +23,7 @@ where
     let db = magic::cookie::DatabasePaths::default();
     let cookie = cookie.load(&db)?;
 
-    let (dev, _meta) = Toa::open(&pack)?;
+    let dev = Toa::open(&pack)?;
     dev.iter_with(|key| {
         // TODO we can't load the entire file in memory as it may be hundred of GBs in size
         // For now loading just the 64KiB is likely sufficient,

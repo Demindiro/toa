@@ -17,10 +17,7 @@ type InnerToa = toa::Toa<toa::ToaKvStore<toa_kv::sled::Tree>>;
 
 struct Toa {
     inner: InnerToa,
-}
-
-struct Meta {
-    map: toa_kv::sled::Tree,
+    meta: BTreeMap<Box<str>, Hash>,
 }
 
 struct Fs {
@@ -44,12 +41,47 @@ struct Node {
 }
 
 impl Toa {
-    fn new(path: &str) -> Result<(Self, Meta)> {
+    fn new(path: &str) -> Result<Self> {
         let db = toa_kv::sled::open(path)?;
-        let toa = db.open_tree("toa")?;
-        let meta = db.open_tree("meta")?;
+        let toa = db.open_tree("")?;
         let inner = toa::Toa::new(toa::ToaKvStore(toa));
-        Ok((Self { inner }, Meta { map: meta }))
+
+        let root = inner
+            .store()
+            .0
+            .get(b"root")
+            .map_err(|e| format!("failed to get root: {e}"))?;
+        let mut meta = BTreeMap::default();
+
+        if let Some(root) = root {
+            let root =
+                Hash::from_bytes((*root).try_into().map_err(|_| "root key is not 32 bytes")?);
+
+            let root = inner
+                .get(&root)
+                .map_err(|e| format!("failed to get root from store: {e:?}"))?
+                .ok_or("root is missing from store")?;
+
+            let mut data = vec![0; root.data().len() as usize];
+            root.data()
+                .read_exact(0, &mut data)
+                .map_err(|e| format!("root: failed to read data: {e:?}"))?;
+            let mut offset = 0;
+            for i in 0..root.refs().len() {
+                let kl = usize::from(data[offset]);
+                offset += 1;
+                let k = &data[offset..][..kl];
+                let k = core::str::from_utf8(k).unwrap();
+                offset += kl;
+                let [v] = root
+                    .refs()
+                    .read_array(i)
+                    .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
+                meta.insert(k.into(), v);
+            }
+        }
+
+        Ok(Self { inner, meta })
     }
 
     fn get(&self, key: &Hash) -> Result<toa::Object<&InnerToa>> {
@@ -369,7 +401,7 @@ fn usage(procname: &str) -> Box<dyn Error> {
     format!("usage: {procname} <pack> <mount> [--allow-other]").into()
 }
 
-fn new_reader(pack: &str) -> Result<(Toa, Meta)> {
+fn new_reader(pack: &str) -> Result<Toa> {
     Toa::new(pack).map_err(|e| format!("failed to open pack {pack:?}: {e}").into())
 }
 
@@ -391,16 +423,11 @@ fn start() -> Result<()> {
         }
     }
 
-    let (dev, meta) = new_reader(&pack)?;
-    let root_key = meta
-        .map
+    let dev = new_reader(&pack)?;
+    let root_key = *dev
+        .meta
         .get("unix.root")
-        .unwrap()
-        .ok_or("\"unix.root\" not present in meta table")?
-        .as_ref()
-        .try_into()
-        .map(Hash::from_bytes)
-        .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
+        .ok_or("\"unix.root\" not present in meta table")?;
     let fs = Fs {
         dev,
         root: Node {

@@ -25,11 +25,12 @@ where
     let root = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (mut dev, meta) = Toa::open(&store)?;
+    let mut dev = Toa::open(&store)?;
     let mut stat = Stat::default();
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
     println!("d {root_key:?} {root}");
-    meta.insert("unix.root".into(), root_key.as_bytes());
+    dev.set_meta("unix.root", &root_key);
+    dev.save_root()?;
 
     Ok(())
 }
@@ -177,14 +178,10 @@ fn add_symlink(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
 }
 
 fn open(store: &str) -> Result<(Toa, Hash)> {
-    let (dev, meta) = Toa::open(store)?;
-    let key = meta
-        .get("unix.root")
+    let dev = Toa::open(store)?;
+    let key = dev
+        .meta("unix.root")
         .ok_or("meta key \"unix.root\" not found")?;
-    let key = (&*key)
-        .try_into()
-        .map(Hash::from_bytes)
-        .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
     Ok((dev, key))
 }
 
