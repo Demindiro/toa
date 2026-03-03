@@ -267,13 +267,12 @@ impl fuser::Filesystem for Fs {
             let len = if e.len != 0 {
                 e.len
             } else {
-                self.dev
-                    .get(&key)
-                    .unwrap()
-                    .data()
-                    .len()
-                    .try_into()
-                    .unwrap_or(u64::MAX)
+                let obj = self.dev.get(&key).unwrap();
+                let len = match e.ty {
+                    DirItemType::Dir => obj.refs().len(),
+                    _ => obj.data().len(),
+                };
+                len.try_into().unwrap_or(u64::MAX)
             };
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
