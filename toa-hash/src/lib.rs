@@ -12,10 +12,12 @@ const DF_LEAF: u8 = 1 << 2;
 
 const CHUNK_SIZE: usize = 1 << 13;
 
-#[derive(Clone)]
-pub struct DataHasher(TreeHasher);
-#[derive(Clone)]
-pub struct RefsHasher(TreeHasher);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Domain {
+    Data = DF_DATA,
+    Refs = DF_REFS,
+}
 
 /// Chaining value
 #[derive(
@@ -25,72 +27,19 @@ pub struct RefsHasher(TreeHasher);
 pub struct Hash([u8; 32]);
 
 #[derive(Clone)]
-struct TreeHasher {
+pub struct TreeHasher {
     stack: arrayvec::ArrayVec<Hash, { 128 - 13 }>,
-    domain: u8,
+    domain: Domain,
     chunk: TurboShake128,
     len: u128,
 }
 
-impl Default for DataHasher {
-    fn default() -> Self {
-        Self(TreeHasher::new(DF_DATA))
-    }
-}
-
-impl Default for RefsHasher {
-    fn default() -> Self {
-        Self(TreeHasher::new(DF_REFS))
-    }
-}
-
-impl DataHasher {
-    pub fn update<T>(&mut self, data: T)
-    where
-        T: AsRef<[u8]>,
-    {
-        self.0.update(data.as_ref())
-    }
-
-    pub fn chain<T>(self, data: T) -> Self
-    where
-        T: AsRef<[u8]>,
-    {
-        Self(self.0.chain(data.as_ref()))
-    }
-
-    pub fn finalize(self) -> Hash {
-        self.0.finalize()
-    }
-}
-
-impl RefsHasher {
-    pub fn update<T>(&mut self, data: T)
-    where
-        T: AsRef<[Hash]>,
-    {
-        self.0.update(bytemuck::cast_slice(data.as_ref()))
-    }
-
-    pub fn chain<T>(self, data: T) -> Self
-    where
-        T: AsRef<[Hash]>,
-    {
-        Self(self.0.chain(bytemuck::cast_slice(data.as_ref())))
-    }
-
-    pub fn finalize(self) -> Hash {
-        self.0.finalize()
-    }
-}
-
 impl TreeHasher {
-    fn new(domain: u8) -> Self {
-        assert!(domain == DF_DATA || domain == DF_REFS);
+    fn new(domain: Domain) -> Self {
         Self {
             domain,
             stack: Default::default(),
-            chunk: TurboShake128::from_core(TurboShake128Core::new(domain | DF_LEAF)),
+            chunk: TurboShake128::from_core(TurboShake128Core::new(domain as u8 | DF_LEAF)),
             len: 0,
         }
     }
@@ -122,7 +71,7 @@ impl TreeHasher {
         let mut mask = !((1 << d) - 1);
         while let Some(x) = self.stack.pop() {
             mask <<= 1;
-            y = ts_pair(self.domain, x, y, len & !mask);
+            y = hash_pair(self.domain, x, y, len & !mask);
         }
         y
     }
@@ -166,7 +115,7 @@ impl TreeHasher {
             let x = self.stack.pop().expect("chunk_pos() >= 1");
             shift += 1;
             let len = ((CHUNK_SIZE as u128) << 3) << shift;
-            y = ts_pair(self.domain, x, y, len);
+            y = hash_pair(self.domain, x, y, len);
         }
         y
     }
@@ -223,49 +172,25 @@ impl fmt::Debug for Hash {
     }
 }
 
-pub fn data_hash(data: &[u8]) -> Hash {
-    tree_hash(DF_DATA, data)
-}
-
-pub fn refs_hash(refs: &[Hash]) -> Hash {
-    tree_hash(DF_REFS, Hash::slice_as_bytes(refs).as_flattened())
+pub fn hash(domain: Domain, data: &[u8]) -> Hash {
+    TreeHasher::new(domain).chain(data).finalize()
 }
 
 /// # Panics
 ///
 /// If there are more than `CHUNK_SIZE` bytes.
-pub fn data_chunk_hash<T>(data: T) -> Hash
-where
-    T: AsRef<[u8]>,
-{
-    let data = data.as_ref();
+pub fn hash_chunk(domain: Domain, data: &[u8]) -> Hash {
     assert!(data.len() <= CHUNK_SIZE);
-    ts_hash(DF_DATA | DF_LEAF, data)
+    ts_hash(domain as u8 | DF_LEAF, data)
 }
 
-/// # Panics
-///
-/// If there are more than `CHUNK_SIZE / 32` items.
-pub fn refs_chunk_hash<T>(refs: T) -> Hash
-where
-    T: AsRef<[Hash]>,
-{
-    let refs = refs.as_ref();
-    assert!(refs.len() <= CHUNK_SIZE / 32);
-    ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs))
-}
-
-pub fn data_pair_hash(x: Hash, y: Hash, len: u128) -> Hash {
-    ts_pair(DF_DATA, x, y, len)
-}
-
-pub fn refs_pair_hash(x: Hash, y: Hash, len: u128) -> Hash {
-    ts_pair(DF_REFS, x, y, len)
-}
-
-/// `domain` must be either `DF_DATA` or `DF_REFS`.
-fn tree_hash(domain: u8, data: &[u8]) -> Hash {
-    TreeHasher::new(domain).chain(data).finalize()
+/// `len`: number of data *bits* of leaf nodes.
+pub fn hash_pair(domain: Domain, x: Hash, y: Hash, len: u128) -> Hash {
+    let mut buf = [0; 80];
+    buf[00..32].copy_from_slice(x.as_bytes());
+    buf[32..64].copy_from_slice(y.as_bytes());
+    buf[64..].copy_from_slice(&len.to_le_bytes());
+    ts_hash(domain as u8, &buf)
 }
 
 fn ts_hash(domain: u8, data: &[u8]) -> Hash {
@@ -277,21 +202,12 @@ fn ts_hash(domain: u8, data: &[u8]) -> Hash {
     Hash(cv)
 }
 
-/// `len`: number of data bits of leaf nodes.
-fn ts_pair(domain: u8, x: Hash, y: Hash, len: u128) -> Hash {
-    let mut buf = [0; 80];
-    buf[00..32].copy_from_slice(x.as_bytes());
-    buf[32..64].copy_from_slice(y.as_bytes());
-    buf[64..].copy_from_slice(&len.to_le_bytes());
-    ts_hash(domain, &buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn p(x: Hash, y: Hash, len: usize) -> Hash {
-        ts_pair(DF_DATA, x, y, (len as u128) << 3)
+        hash_pair(Domain::Data, x, y, (len as u128) << 3)
     }
     macro_rules! p {
         ($($f:ident $n:literal)*) => {
@@ -311,7 +227,7 @@ mod tests {
         let t = t.map(|x| [x; CHUNK_SIZE]);
         let cv = t.each_ref().map(|x| ts_hash(DF_DATA | DF_LEAF, x));
         let expect = (f)(cv);
-        let result = tree_hash(DF_DATA, t.as_flattened());
+        let result = hash(Domain::Data, t.as_flattened());
         assert_eq!(result, expect);
     }
 
@@ -323,7 +239,7 @@ mod tests {
     #[test]
     fn hash_tree_one_byte() {
         let expect = ts_hash(DF_DATA | DF_LEAF, b"x");
-        let result = tree_hash(DF_DATA, b"x");
+        let result = hash(Domain::Data, b"x");
         assert_eq!(result, expect);
     }
 
@@ -332,14 +248,14 @@ mod tests {
         let data = [b'x'; CHUNK_SIZE + 1];
         let a = ts_hash(DF_DATA | DF_LEAF, &data[..CHUNK_SIZE]);
         let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE..]);
-        assert_eq!(p(a, b, CHUNK_SIZE + 1), tree_hash(DF_DATA, &data));
+        assert_eq!(p(a, b, CHUNK_SIZE + 1), hash(Domain::Data, &data));
     }
     #[test]
     fn hash_tree_2_chunks_minus_one_byte() {
         let data = [b'x'; 2 * CHUNK_SIZE - 1];
         let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
         let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..]);
-        assert_eq!(p(a, b, 2 * CHUNK_SIZE - 1), tree_hash(DF_DATA, &data));
+        assert_eq!(p(a, b, 2 * CHUNK_SIZE - 1), hash(Domain::Data, &data));
     }
     #[test]
     fn hash_tree_2_chunks_plus_one_byte() {
@@ -349,7 +265,7 @@ mod tests {
         let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..]);
         assert_eq!(
             p(p2(a, b), c, 2 * CHUNK_SIZE + 1),
-            tree_hash(DF_DATA, &data)
+            hash(Domain::Data, &data)
         );
     }
     #[test]
@@ -360,7 +276,7 @@ mod tests {
         let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..]);
         assert_eq!(
             p(p2(a, b), c, 3 * CHUNK_SIZE - 1),
-            tree_hash(DF_DATA, &data)
+            hash(Domain::Data, &data)
         );
     }
     #[test]
@@ -373,7 +289,7 @@ mod tests {
         let ab = p2(a, b);
         let cd = p(c, d, CHUNK_SIZE + 1);
         let abcd = p(ab, cd, 3 * CHUNK_SIZE + 1);
-        assert_eq!(abcd, tree_hash(DF_DATA, &data));
+        assert_eq!(abcd, hash(Domain::Data, &data));
     }
 
     #[test]
