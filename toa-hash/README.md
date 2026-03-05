@@ -99,3 +99,38 @@ H(data) = w
 - `DF_LEAF = 1 << 2`
 
 [turboshake128]: https://keccak.team/files/TurboSHAKE.pdf
+
+
+
+## Design notes
+
+Documenting some hard decisions:
+
+### Combined data+references versus separate data & reference objects
+
+Just about any object type in any language is able to contain both plain data
+and references to other objects. It would make sense then to support the same.
+However, due to the need for precise scanning it is necessary to know which
+parts of an object are references and which plain data. An easy way to achieve
+this is to group data together and references together, then simply tracking
+the length of each group.
+
+The next and seemingly under-explored problem is how to design a hash that
+accounts for both of these groups. Domain separation is essential, so
+if using a tree hash these groups need to be hashed separately.
+Then both hashes need to be combined.
+
+An alternate approach is to allow only two types of objects:
+
+- An object which consists solely of data.
+- An object which consists solely of references.
+
+An object that needs both data and references can have its first reference
+point to a blob of data. This structure is not unlike LISPs, which have
+symbols/strings and lists.
+
+The former approach is theoretically more pure, as only one object type needs
+to exist and objects in most programming languages map more directly to it,
+but *the latter approach does not require combining hashes* of two trees.
+At least with the approaches the author attempted, this saves a non-trivial
+amount of complexity.
