@@ -14,7 +14,8 @@ There are two objects:
 
 Each blob is hashed using the same tree hash algorithm,
 producing a 256-bit hash for each blob.
-The two hashes are XORed to produce a single root hash.
+However, the leaf nodes use domain flags to differentiate between
+data chunks, reference chunks and pairs (parent nodes).
 
 > **Warning**
 >
@@ -94,9 +95,9 @@ H(data) = w
 
 ### Domain flags
 
-- `DF_DATA = 1 << 0`
-- `DF_REFS = 1 << 1`
-- `DF_LEAF = 1 << 2`
+- `DF_REFS = 1`
+- `DF_LEAF = 2`
+- `DF_PAIR = 3`
 
 [turboshake128]: https://keccak.team/files/TurboSHAKE.pdf
 

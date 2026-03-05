@@ -6,9 +6,9 @@ use sha3::{
     digest::{ExtendableOutput, Reset, Update, XofReader},
 };
 
-const DF_DATA: u8 = 1 << 0;
-const DF_REFS: u8 = 1 << 1;
-const DF_LEAF: u8 = 1 << 2;
+const DF_DATA: u8 = 1;
+const DF_REFS: u8 = 2;
+const DF_PAIR: u8 = 3;
 
 const CHUNK_SIZE: usize = 1 << 13;
 
@@ -29,7 +29,6 @@ pub struct Hash([u8; 32]);
 #[derive(Clone)]
 pub struct TreeHasher {
     stack: arrayvec::ArrayVec<Hash, { 128 - 13 }>,
-    domain: Domain,
     chunk: TurboShake128,
     len: u128,
 }
@@ -37,9 +36,8 @@ pub struct TreeHasher {
 impl TreeHasher {
     fn new(domain: Domain) -> Self {
         Self {
-            domain,
             stack: Default::default(),
-            chunk: TurboShake128::from_core(TurboShake128Core::new(domain as u8 | DF_LEAF)),
+            chunk: TurboShake128::from_core(TurboShake128Core::new(domain as u8)),
             len: 0,
         }
     }
@@ -71,7 +69,7 @@ impl TreeHasher {
         let mut mask = !((1 << d) - 1);
         while let Some(x) = self.stack.pop() {
             mask <<= 1;
-            y = hash_pair(self.domain, x, y, len & !mask);
+            y = hash_pair(x, y, len & !mask);
         }
         y
     }
@@ -115,7 +113,7 @@ impl TreeHasher {
             let x = self.stack.pop().expect("chunk_pos() >= 1");
             shift += 1;
             let len = ((CHUNK_SIZE as u128) << 3) << shift;
-            y = hash_pair(self.domain, x, y, len);
+            y = hash_pair(x, y, len);
         }
         y
     }
@@ -181,16 +179,16 @@ pub fn hash(domain: Domain, data: &[u8]) -> Hash {
 /// If there are more than `CHUNK_SIZE` bytes.
 pub fn hash_chunk(domain: Domain, data: &[u8]) -> Hash {
     assert!(data.len() <= CHUNK_SIZE);
-    ts_hash(domain as u8 | DF_LEAF, data)
+    ts_hash(domain as u8, data)
 }
 
 /// `len`: number of data *bits* of leaf nodes.
-pub fn hash_pair(domain: Domain, x: Hash, y: Hash, len: u128) -> Hash {
+pub fn hash_pair(x: Hash, y: Hash, len: u128) -> Hash {
     let mut buf = [0; 80];
     buf[00..32].copy_from_slice(x.as_bytes());
     buf[32..64].copy_from_slice(y.as_bytes());
     buf[64..].copy_from_slice(&len.to_le_bytes());
-    ts_hash(domain as u8, &buf)
+    ts_hash(DF_PAIR, &buf)
 }
 
 fn ts_hash(domain: u8, data: &[u8]) -> Hash {
@@ -207,7 +205,7 @@ mod tests {
     use super::*;
 
     fn p(x: Hash, y: Hash, len: usize) -> Hash {
-        hash_pair(Domain::Data, x, y, (len as u128) << 3)
+        hash_pair(x, y, (len as u128) << 3)
     }
     macro_rules! p {
         ($($f:ident $n:literal)*) => {
@@ -225,7 +223,7 @@ mod tests {
         let mut t = [0; N];
         t.iter_mut().enumerate().for_each(|(i, x)| *x = i as u8);
         let t = t.map(|x| [x; CHUNK_SIZE]);
-        let cv = t.each_ref().map(|x| ts_hash(DF_DATA | DF_LEAF, x));
+        let cv = t.each_ref().map(|x| ts_hash(DF_DATA, x));
         let expect = (f)(cv);
         let result = hash(Domain::Data, t.as_flattened());
         assert_eq!(result, expect);
@@ -233,12 +231,12 @@ mod tests {
 
     #[test]
     fn hash_tree_empty() {
-        test_chunks(|[]| ts_hash(DF_DATA | DF_LEAF, b""))
+        test_chunks(|[]| ts_hash(DF_DATA, b""))
     }
 
     #[test]
     fn hash_tree_one_byte() {
-        let expect = ts_hash(DF_DATA | DF_LEAF, b"x");
+        let expect = ts_hash(DF_DATA, b"x");
         let result = hash(Domain::Data, b"x");
         assert_eq!(result, expect);
     }
@@ -246,23 +244,23 @@ mod tests {
     #[test]
     fn hash_tree_chunk_plus_one_byte() {
         let data = [b'x'; CHUNK_SIZE + 1];
-        let a = ts_hash(DF_DATA | DF_LEAF, &data[..CHUNK_SIZE]);
-        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE..]);
+        let a = ts_hash(DF_DATA, &data[..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA, &data[CHUNK_SIZE..]);
         assert_eq!(p(a, b, CHUNK_SIZE + 1), hash(Domain::Data, &data));
     }
     #[test]
     fn hash_tree_2_chunks_minus_one_byte() {
         let data = [b'x'; 2 * CHUNK_SIZE - 1];
-        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
-        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..]);
+        let a = ts_hash(DF_DATA, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA, &data[CHUNK_SIZE * 1..][..]);
         assert_eq!(p(a, b, 2 * CHUNK_SIZE - 1), hash(Domain::Data, &data));
     }
     #[test]
     fn hash_tree_2_chunks_plus_one_byte() {
         let data = [b'x'; 2 * CHUNK_SIZE + 1];
-        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
-        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
-        let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..]);
+        let a = ts_hash(DF_DATA, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
+        let c = ts_hash(DF_DATA, &data[CHUNK_SIZE * 2..][..]);
         assert_eq!(
             p(p2(a, b), c, 2 * CHUNK_SIZE + 1),
             hash(Domain::Data, &data)
@@ -271,9 +269,9 @@ mod tests {
     #[test]
     fn hash_tree_3_chunks_minus_one_byte() {
         let data = [b'x'; 3 * CHUNK_SIZE - 1];
-        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
-        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
-        let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..]);
+        let a = ts_hash(DF_DATA, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
+        let c = ts_hash(DF_DATA, &data[CHUNK_SIZE * 2..][..]);
         assert_eq!(
             p(p2(a, b), c, 3 * CHUNK_SIZE - 1),
             hash(Domain::Data, &data)
@@ -282,10 +280,10 @@ mod tests {
     #[test]
     fn hash_tree_3_chunks_plus_one_byte() {
         let data = [b'x'; 3 * CHUNK_SIZE + 1];
-        let a = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
-        let b = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
-        let c = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 2..][..CHUNK_SIZE]);
-        let d = ts_hash(DF_DATA | DF_LEAF, &data[CHUNK_SIZE * 3..][..]);
+        let a = ts_hash(DF_DATA, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+        let b = ts_hash(DF_DATA, &data[CHUNK_SIZE * 1..][..CHUNK_SIZE]);
+        let c = ts_hash(DF_DATA, &data[CHUNK_SIZE * 2..][..CHUNK_SIZE]);
+        let d = ts_hash(DF_DATA, &data[CHUNK_SIZE * 3..][..]);
         let ab = p2(a, b);
         let cd = p(c, d, CHUNK_SIZE + 1);
         let abcd = p(ab, cd, 3 * CHUNK_SIZE + 1);
