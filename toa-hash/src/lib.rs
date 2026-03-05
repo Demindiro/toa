@@ -22,11 +22,11 @@ pub struct RefsHasher(TreeHasher);
     Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, bytemuck::Pod, bytemuck::Zeroable,
 )]
 #[repr(transparent)]
-struct Cv([u8; 32]);
+pub struct Hash([u8; 32]);
 
 #[derive(Clone)]
 struct TreeHasher {
-    stack: arrayvec::ArrayVec<Cv, { 128 - 13 }>,
+    stack: arrayvec::ArrayVec<Hash, { 128 - 13 }>,
     domain: u8,
     chunk: TurboShake128,
     len: u128,
@@ -59,8 +59,8 @@ impl DataHasher {
         Self(self.0.chain(data.as_ref()))
     }
 
-    pub fn finalize(self) -> DataCv {
-        DataCv(self.0.finalize())
+    pub fn finalize(self) -> Hash {
+        self.0.finalize()
     }
 }
 
@@ -79,8 +79,8 @@ impl RefsHasher {
         Self(self.0.chain(bytemuck::cast_slice(data.as_ref())))
     }
 
-    pub fn finalize(self) -> RefsCv {
-        RefsCv(self.0.finalize())
+    pub fn finalize(self) -> Hash {
+        self.0.finalize()
     }
 }
 
@@ -108,7 +108,7 @@ impl TreeHasher {
         self
     }
 
-    fn finalize(mut self) -> Cv {
+    fn finalize(mut self) -> Hash {
         let len = self.len << 3;
         let mut y = if !self.chunk_is_empty() {
             self.chunk_take()
@@ -130,7 +130,7 @@ impl TreeHasher {
     /// # Returns
     ///
     /// `None` if the chunk isn't full, otherwise CV and amount of bytes consumed.
-    fn chunk_update(&mut self, data: &[u8]) -> Option<(Cv, usize)> {
+    fn chunk_update(&mut self, data: &[u8]) -> Option<(Hash, usize)> {
         if data.is_empty() {
             return None;
         }
@@ -141,11 +141,11 @@ impl TreeHasher {
         self.chunk_is_empty().then(|| (self.chunk_take(), n))
     }
 
-    fn chunk_take(&mut self) -> Cv {
+    fn chunk_take(&mut self) -> Hash {
         let mut hash = [0; 32];
         self.chunk.clone().finalize_xof().read(&mut hash);
         self.chunk.reset();
-        Cv(hash)
+        Hash(hash)
     }
 
     fn chunk_len(&self) -> usize {
@@ -160,7 +160,7 @@ impl TreeHasher {
         self.chunk_len() == 0
     }
 
-    fn collapse(&mut self, mut y: Cv) -> Cv {
+    fn collapse(&mut self, mut y: Hash) -> Hash {
         let mut shift = 0;
         while self.stack.len() >= self.chunk_pos().count_ones() as usize {
             let x = self.stack.pop().expect("chunk_pos() >= 1");
@@ -172,77 +172,32 @@ impl TreeHasher {
     }
 }
 
-macro_rules! impl_hash {
-    ($name:ident) => {
-        #[derive(
-            Clone,
-            Copy,
-            Default,
-            PartialEq,
-            Eq,
-            PartialOrd,
-            Ord,
-            Hash,
-            bytemuck::Pod,
-            bytemuck::Zeroable,
-        )]
-        #[repr(transparent)]
-        pub struct $name(Cv);
+impl Hash {
+    pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
+        bytemuck::cast_slice(slice)
+    }
 
-        impl $name {
-            pub fn slice_as_bytes(slice: &[Self]) -> &[[u8; 32]] {
-                bytemuck::cast_slice(slice)
-            }
+    pub fn slice_as_bytes_mut(slice: &mut [Self]) -> &mut [[u8; 32]] {
+        bytemuck::cast_slice_mut(slice)
+    }
 
-            pub fn slice_as_bytes_mut(slice: &mut [Self]) -> &mut [[u8; 32]] {
-                bytemuck::cast_slice_mut(slice)
-            }
+    pub fn slice_from_bytes(slice: &[[u8; 32]]) -> &[Self] {
+        bytemuck::cast_slice(slice)
+    }
 
-            pub fn slice_from_bytes(slice: &[[u8; 32]]) -> &[Self] {
-                bytemuck::cast_slice(slice)
-            }
-
-            pub fn as_bytes(&self) -> &[u8; 32] {
-                self.0.as_bytes()
-            }
-
-            pub fn from_bytes(bytes: [u8; 32]) -> Self {
-                Self(Cv(bytes))
-            }
-
-            /// # Panics
-            ///
-            /// If `bytes.len() != 32`.
-            pub fn from_slice(bytes: &[u8]) -> Self {
-                Self::from_bytes(bytes.try_into().expect("length of hash not 32 bytes"))
-            }
-
-            pub fn to_hex(&self) -> [u8; 64] {
-                self.0.to_hex()
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-
-        impl fmt::Debug for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-    };
-}
-
-impl_hash!(Hash);
-impl_hash!(DataCv);
-impl_hash!(RefsCv);
-
-impl Cv {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// # Panics
+    ///
+    /// If `bytes.len() != 32`.
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        Self::from_bytes(bytes.try_into().expect("length of hash not 32 bytes"))
     }
 
     pub fn to_hex(&self) -> [u8; 64] {
@@ -256,83 +211,74 @@ impl Cv {
     }
 }
 
-impl fmt::Display for Cv {
+impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         core::str::from_utf8(&self.to_hex()).expect("ascii").fmt(f)
     }
 }
 
-impl fmt::Debug for Cv {
+impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-pub fn hash(data: &[u8], refs: &[Hash]) -> Hash {
-    let refs = Hash::slice_as_bytes(refs).as_flattened();
-    let data = DataCv(tree_hash(DF_DATA, data));
-    let refs = RefsCv(tree_hash(DF_REFS, refs));
-    root_hash(data, refs)
+pub fn data_hash(data: &[u8]) -> Hash {
+    tree_hash(DF_DATA, data)
 }
 
-pub fn root_hash(data: DataCv, refs: RefsCv) -> Hash {
-    let x = data.as_bytes().iter();
-    let y = refs.as_bytes().iter();
-    let mut z = [0; 32];
-    for ((x, y), z) in x.zip(y).zip(z.iter_mut()) {
-        *z = x ^ y;
-    }
-    Hash(Cv(z))
+pub fn refs_hash(refs: &[Hash]) -> Hash {
+    tree_hash(DF_REFS, Hash::slice_as_bytes(refs).as_flattened())
 }
 
 /// # Panics
 ///
 /// If there are more than `CHUNK_SIZE` bytes.
-pub fn data_chunk_cv<T>(data: T) -> DataCv
+pub fn data_chunk_hash<T>(data: T) -> Hash
 where
     T: AsRef<[u8]>,
 {
     let data = data.as_ref();
     assert!(data.len() <= CHUNK_SIZE);
-    DataCv(ts_hash(DF_DATA | DF_LEAF, data))
+    ts_hash(DF_DATA | DF_LEAF, data)
 }
 
 /// # Panics
 ///
 /// If there are more than `CHUNK_SIZE / 32` items.
-pub fn refs_chunk_cv<T>(refs: T) -> RefsCv
+pub fn refs_chunk_hash<T>(refs: T) -> Hash
 where
     T: AsRef<[Hash]>,
 {
     let refs = refs.as_ref();
     assert!(refs.len() <= CHUNK_SIZE / 32);
-    RefsCv(ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs)))
+    ts_hash(DF_REFS | DF_LEAF, bytemuck::cast_slice(refs))
 }
 
-pub fn data_pair_cv(x: DataCv, y: DataCv, len: u128) -> DataCv {
-    DataCv(ts_pair(DF_DATA, x.0, y.0, len))
+pub fn data_pair_hash(x: Hash, y: Hash, len: u128) -> Hash {
+    ts_pair(DF_DATA, x, y, len)
 }
 
-pub fn refs_pair_cv(x: RefsCv, y: RefsCv, len: u128) -> RefsCv {
-    RefsCv(ts_pair(DF_REFS, x.0, y.0, len))
+pub fn refs_pair_hash(x: Hash, y: Hash, len: u128) -> Hash {
+    ts_pair(DF_REFS, x, y, len)
 }
 
 /// `domain` must be either `DF_DATA` or `DF_REFS`.
-fn tree_hash(domain: u8, data: &[u8]) -> Cv {
+fn tree_hash(domain: u8, data: &[u8]) -> Hash {
     TreeHasher::new(domain).chain(data).finalize()
 }
 
-fn ts_hash(domain: u8, data: &[u8]) -> Cv {
+fn ts_hash(domain: u8, data: &[u8]) -> Hash {
     let mut cv = [0; 32];
     TurboShake128::from_core(TurboShake128Core::new(domain))
         .chain(data)
         .finalize_xof()
         .read(&mut cv);
-    Cv(cv)
+    Hash(cv)
 }
 
 /// `len`: number of data bits of leaf nodes.
-fn ts_pair(domain: u8, x: Cv, y: Cv, len: u128) -> Cv {
+fn ts_pair(domain: u8, x: Hash, y: Hash, len: u128) -> Hash {
     let mut buf = [0; 80];
     buf[00..32].copy_from_slice(x.as_bytes());
     buf[32..64].copy_from_slice(y.as_bytes());
@@ -344,12 +290,12 @@ fn ts_pair(domain: u8, x: Cv, y: Cv, len: u128) -> Cv {
 mod tests {
     use super::*;
 
-    fn p(x: Cv, y: Cv, len: usize) -> Cv {
+    fn p(x: Hash, y: Hash, len: usize) -> Hash {
         ts_pair(DF_DATA, x, y, (len as u128) << 3)
     }
     macro_rules! p {
         ($($f:ident $n:literal)*) => {
-            $(fn $f(x: Cv, y: Cv) -> Cv {
+            $(fn $f(x: Hash, y: Hash) -> Hash {
                 p(x, y, CHUNK_SIZE*$n)
             })*
         };
@@ -358,7 +304,7 @@ mod tests {
 
     fn test_chunks<const N: usize, F>(f: F)
     where
-        F: FnOnce([Cv; N]) -> Cv,
+        F: FnOnce([Hash; N]) -> Hash,
     {
         let mut t = [0; N];
         t.iter_mut().enumerate().for_each(|(i, x)| *x = i as u8);
@@ -470,17 +416,17 @@ mod tests {
     }
 
     #[test]
-    fn cv_to_hex() {
+    fn hash_to_hex() {
         assert_eq!(
-            Cv([0; 32]).to_hex(),
+            Hash([0; 32]).to_hex(),
             *b"0000000000000000000000000000000000000000000000000000000000000000"
         );
         assert_eq!(
-            Cv([1; 32]).to_hex(),
+            Hash([1; 32]).to_hex(),
             *b"0101010101010101010101010101010101010101010101010101010101010101"
         );
         assert_eq!(
-            Cv([0xf7; 32]).to_hex(),
+            Hash([0xf7; 32]).to_hex(),
             *b"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7"
         );
     }

@@ -8,11 +8,11 @@ fn f<M: Measurement>(len: usize, c: &mut BenchmarkGroup<M>) {
     let x = vec![b'x'; len];
     let x = black_box(&*x);
     c.throughput(Throughput::Bytes(len as u64));
-    c.bench_function(&format!("len={len}"), |b| b.iter(|| toa_hash::hash(x, &[])));
+    c.bench_function(&format!("len={len}"), |b| b.iter(|| toa_hash::data_hash(x)));
 }
 
 fn bench(c: &mut Criterion) {
-    c.bench_function("empty", |b| b.iter(|| toa_hash::hash(b"", &[])));
+    c.bench_function("empty", |b| b.iter(|| toa_hash::data_hash(b"")));
     let c = &mut c.benchmark_group("hash");
     for n in [
         1,

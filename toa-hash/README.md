@@ -7,10 +7,10 @@ It supports sparse files of up to 2^128 bits (2^125 bytes).
 
 ## Specification
 
-An object consists of two parts:
+There are two objects:
 
-- a blob of binary data
-- a blob of references
+- "data objects", consisting of plain bytes.
+- "reference objects", consisting of references to other objects.
 
 Each blob is hashed using the same tree hash algorithm,
 producing a 256-bit hash for each blob.
