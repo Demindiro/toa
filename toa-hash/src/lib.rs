@@ -210,6 +210,13 @@ macro_rules! impl_hash {
                 Self(Cv(bytes))
             }
 
+            /// # Panics
+            ///
+            /// If `bytes.len() != 32`.
+            pub fn from_slice(bytes: &[u8]) -> Self {
+                Self::from_bytes(bytes.try_into().expect("length of hash not 32 bytes"))
+            }
+
             pub fn to_hex(&self) -> [u8; 64] {
                 self.0.to_hex()
             }
