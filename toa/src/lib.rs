@@ -565,10 +565,9 @@ impl<'a> Typed<'a, Blob<fs::File>> {
         if buf.is_empty() {
             return Ok(0);
         }
-        let offt = (offset % CHUNK_SIZE) as u64;
         self.blobs
             .chunks_full
-            .read_at(self.location.offset() + offt, buf)
+            .read_at(self.location.offset() + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(len)
     }
@@ -583,12 +582,15 @@ impl<'a> Typed<'a, Blob<fs::File>> {
             .chunks_partial
             .read_at(self.location.offset(), nb)
             .map_err(ReadError::Io)?;
-        let n = usize::from(u16::from_le_bytes(*nb));
-        let n = (align8(n) >> 3).min(buf.len());
+        let n = align8(u16::from_le_bytes(*nb)) >> 3;
+        let n = buf.len().min(u128::from(n).saturating_sub(offset) as usize);
         let buf = &mut buf[..n];
+        if buf.is_empty() {
+            return Ok(0);
+        }
         self.blobs
             .chunks_partial
-            .read_at(self.location.offset() + 2, buf)
+            .read_at(self.location.offset() + 2 + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(n)
     }

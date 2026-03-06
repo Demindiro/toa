@@ -1,12 +1,14 @@
-#![no_std]
+use std::{fs, io};
+use toa::{Blob, Data, Hash, Object, ReadExactError, Refs, Toa};
 
-use toa::{Hash, Object};
+pub struct Dir<'a, T> {
+    refs: Refs<'a, T>,
+    data: Data<'a, T>,
+    len: u64,
+}
 
-#[derive(Clone, Debug, Default)]
-pub struct Dir<T>(T);
-
-pub struct DirIter<T> {
-    dir: Dir<T>,
+pub struct DirIter<'a, T> {
+    dir: Dir<'a, T>,
     cur: u64,
 }
 
@@ -35,17 +37,30 @@ pub struct DirData {
     len: u64,
 }
 
-impl<T> Dir<T> {
-    pub fn new(object: T) -> Self {
-        Self(object)
+impl<'a> Dir<'a, Blob<fs::File>> {
+    pub fn new(toa: &'a Toa<Blob<fs::File>>, refs: &Hash) -> Result<Self, io::Error> {
+        let Some(refs) = toa.get(refs)? else { todo!() };
+        let Object::Refs(refs) = refs else { todo!() };
+        let [data] = refs.read_array(0).unwrap_or_else(|e| todo!("{e:?}"));
+        let Some(data) = toa.get(&data)? else { todo!() };
+        let Object::Data(data) = data else { todo!() };
+        let len = (refs.len()? - 1).try_into().unwrap_or(u64::MAX);
+        Ok(Self { refs, data, len })
     }
 }
 
-impl<T> Dir<T>
-where
-    T: Clone,
-{
-    pub fn iter(&self) -> DirIter<T> {
+impl<T> Clone for Dir<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            refs: self.refs,
+            data: self.data,
+            len: self.len,
+        }
+    }
+}
+
+impl<'a, T> Dir<'a, T> {
+    pub fn iter(&self) -> DirIter<'a, T> {
         DirIter {
             dir: self.clone(),
             cur: 0,
@@ -53,23 +68,20 @@ where
     }
 }
 
-impl<T> Dir<Object<&toa::Toa<T>>>
-where
-    T: toa::ToaStore,
-{
+impl<'a> Dir<'a, Blob<fs::File>> {
     pub fn len(&self) -> u64 {
-        self.0.refs().len().try_into().unwrap_or(u64::MAX)
+        self.len
     }
 
     pub fn inside_bounds(&self, index: u64) -> bool {
-        u128::from(index) < self.0.refs().len()
+        index < self.len
     }
 
-    pub fn get(&self, index: u64) -> Result<Option<DirItem>, toa::ReadExactError<T::Error>> {
+    pub fn get(&self, index: u64) -> Result<Option<DirItem>, toa::ReadExactError<io::Error>> {
         let offset = u128::from(index) * 32;
         self.inside_bounds(index)
             .then(|| {
-                let x = self.0.data().read_array::<32>(offset)?;
+                let x = self.data.read_array::<32>(offset)?;
 
                 let [a, b, name_len, d, e, f, g, h, x @ ..] = x;
                 let ty_perms = u16::from_le_bytes([a, b]);
@@ -105,10 +117,10 @@ where
             .transpose()
     }
 
-    pub fn get_ref(&self, index: u64) -> Result<Option<Hash>, toa::ReadExactError<T::Error>> {
+    pub fn get_ref(&self, index: u64) -> Result<Option<Hash>, toa::ReadExactError<io::Error>> {
         let offset = u128::from(index);
         self.inside_bounds(index)
-            .then(|| self.0.refs().read_array(offset).map(|[x]| x))
+            .then(|| self.refs.read_array(1 + offset).map(|[x]| x))
             .transpose()
     }
 
@@ -116,16 +128,13 @@ where
         &self,
         data: DirData,
         out: &mut [u8],
-    ) -> Result<(), toa::ReadExactError<T::Error>> {
-        self.0.data().read_exact(data.offset.into(), out)
+    ) -> Result<(), toa::ReadExactError<io::Error>> {
+        self.data.read_exact(data.offset.into(), out)
     }
 }
 
-impl<T> Iterator for DirIter<Object<&toa::Toa<T>>>
-where
-    T: toa::ToaStore,
-{
-    type Item = Result<(u64, DirItem), toa::ReadExactError<T::Error>>;
+impl Iterator for DirIter<'_, Blob<fs::File>> {
+    type Item = Result<(u64, DirItem), toa::ReadExactError<io::Error>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.dir

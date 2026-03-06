@@ -1,6 +1,9 @@
 use crate::{InnerToa, Result, Stat, Toa, add_file, args_end, usage};
 use chrono::prelude::*;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use toa::{Hash, Object};
 use toa_unix::{Dir, DirItem, DirItemType};
 
@@ -25,6 +28,8 @@ where
     let root = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
+    let store = PathBuf::from(store);
+
     let mut dev = Toa::open(&store)?;
     let mut stat = Stat::default();
     let root_key = add_dir(&mut dev, &root, &mut stat)?;
@@ -43,6 +48,8 @@ where
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
+    let store = PathBuf::from(store);
+
     let (dev, dir) = open(&store)?;
     let file = traverse_path(&dev, &path, dir)?;
     crate::dump_object(&dev, &file)?;
@@ -59,9 +66,11 @@ where
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
+    let store = PathBuf::from(store);
+
     let (dev, dir) = open(&store)?;
     let dir = traverse_path(&dev, path, dir)?;
-    let dir = Dir::new(dev.get(&dir)?);
+    let dir = Dir::new(&dev, &dir)?;
     println!("items: {}", dir.len());
     for x in dir.iter() {
         let (i, x) = x.map_err(|e| format!("{e:?}"))?;
@@ -141,8 +150,6 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let data = entries.iter().fold(names_offset, |s, x| s + x.name.len());
     let mut data = Vec::with_capacity(data);
     let mut names_offset = u64::try_from(names_offset).expect("usize <= u64");
-    let mut refs = Vec::with_capacity(entries.len());
-
     for e in &entries {
         let prev_len = data.len();
         data.extend(e.type_perms.to_le_bytes());
@@ -152,32 +159,37 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
         data.extend(e.gid.to_le_bytes());
         data.extend(names_offset.to_le_bytes());
         data.extend(e.modified.to_le_bytes());
-        refs.push(e.key);
         assert_eq!(prev_len, data.len() - 32);
         names_offset += e.name.len() as u64;
     }
     for e in &entries {
         data.extend(e.name.as_bytes());
     }
-
-    let x = dev
-        .add(&data, &refs)
+    let data = dev
+        .add_data(&data)
         .map_err(|e| format!("failed to add : {e:?}"))?;
-    Ok(x)
+
+    let mut refs = Vec::with_capacity(1 + entries.len());
+    refs.push(data);
+    refs.extend(entries.iter().map(|e| e.key));
+    let refs = dev
+        .add_refs(&refs)
+        .map_err(|e| format!("failed to add : {e:?}"))?;
+    Ok(refs)
 }
 
-fn add_symlink(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let link =
         fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
     let link = path_to_utf8(&link)?;
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
     let key = dev
-        .add(link.as_bytes(), &[])
+        .add_data(link.as_bytes())
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
 }
 
-fn open(store: &str) -> Result<(Toa, Hash)> {
+fn open(store: &Path) -> Result<(Toa, Hash)> {
     let dev = Toa::open(store)?;
     let key = dev
         .meta("unix.root")
@@ -191,7 +203,7 @@ fn traverse_path(dev: &Toa, path: &str, mut start: Hash) -> Result<Hash> {
         if !is_dir {
             return Err(format!("{p:?} is not a directory").into());
         }
-        let dir = Dir::new(dev.get(&start)?);
+        let dir = Dir::new(dev, &start)?;
         for x in dir.iter() {
             let (i, x) = x.map_err(|e| format!("{e:?}"))?;
             if x.name.len() != p.len() as u64 {
@@ -217,7 +229,7 @@ fn path_to_utf8(path: &Path) -> Result<&str> {
 
 fn fmt_item(
     dev: &InnerToa,
-    dir: &Dir<Object<&InnerToa>>,
+    dir: &Dir<toa::Blob<fs::File>>,
     item: &DirItem,
     key: &Hash,
 ) -> Result<String> {
@@ -235,9 +247,9 @@ fn fmt_item(
             .get(key)
             .map_err(|e| format!("fmt_item: {e:?}"))?
             .ok_or("fmt_item: object not found")?;
-        match ty {
-            DirItemType::Dir => obj.refs().len(),
-            _ => obj.data().len(),
+        match obj {
+            Object::Data(x) => x.len()?,
+            Object::Refs(x) => x.len()? - 1,
         }
     } else {
         (*len).into()

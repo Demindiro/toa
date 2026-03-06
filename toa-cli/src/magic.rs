@@ -23,7 +23,8 @@ where
     let db = magic::cookie::DatabasePaths::default();
     let cookie = cookie.load(&db)?;
 
-    let dev = Toa::open(&pack)?;
+    let dev = Toa::open(&std::path::PathBuf::from(pack))?;
+    let buf = &mut [0; 1 << 13];
     dev.iter_with(|key| {
         // TODO we can't load the entire file in memory as it may be hundred of GBs in size
         // For now loading just the 64KiB is likely sufficient,
@@ -35,8 +36,11 @@ where
         // OTOH, it appears even `file` itself can't check the end of files,
         // so perhaps it doesn't matter?
         //println!("{key:?} {}");
-        let buf = &mut [0; 1 << 16];
-        let n = dev.get(&key).expect("exists").data().read(0, buf).unwrap();
+        let obj = dev.get(&key).expect("exists");
+        let toa::Object::Data(obj) = obj else {
+            return false;
+        };
+        let n = obj.read(0, buf).unwrap();
         let ty = cookie.buffer(&buf[..n]).unwrap();
         println!("{key} {ty}");
         false

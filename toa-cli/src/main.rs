@@ -2,11 +2,18 @@
 mod magic;
 mod unix;
 
-use std::{collections::BTreeMap, error::Error, fs, io, io::Write, ops};
-use toa::{Hash, ToaStore};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fs, io,
+    io::Write,
+    ops,
+    path::{Path, PathBuf},
+};
+use toa::{Hash, Object};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerToa = toa::Toa<toa::ToaKvStore<toa_kv::sled::Tree>>;
+type InnerToa = toa::Toa<toa::Blob<fs::File>>;
 
 struct Toa {
     inner: InnerToa,
@@ -19,42 +26,39 @@ struct Stat {
 }
 
 impl Toa {
-    fn open(store: &str) -> Result<Self> {
-        let db = toa_kv::sled::open(store)
-            .map_err(|e| format!("failed to open store {store:?}: {e}"))?;
+    fn open(path: &Path) -> Result<Self> {
+        let inner = toa::Toa::open(path)?;
 
-        let toa = db.open_tree("")?;
-        let inner = toa::Toa::new(toa::ToaKvStore(toa));
-
-        let root = inner
-            .store()
-            .0
-            .get(b"root")
-            .map_err(|e| format!("failed to get root: {e}"))?;
+        let root = inner.root();
         let mut meta = BTreeMap::default();
 
-        if let Some(root) = root {
-            let root =
-                Hash::from_bytes((*root).try_into().map_err(|_| "root key is not 32 bytes")?);
-
-            let root = inner
+        if root != Hash::default() {
+            let refs = inner
                 .get(&root)
                 .map_err(|e| format!("failed to get root from store: {e:?}"))?
                 .ok_or("root is missing from store")?;
-
-            let mut data = vec![0; root.data().len() as usize];
-            root.data()
-                .read_exact(0, &mut data)
-                .map_err(|e| format!("root: failed to read data: {e:?}"))?;
+            let Object::Refs(refs) = refs else { todo!() };
+            let Ok([data]) = refs.read_array(0) else {
+                todo!()
+            };
+            let Ok(Some(data)) = inner.get(&data) else {
+                todo!()
+            };
+            let Object::Data(data) = data else { todo!() };
+            let data = {
+                let mut b = vec![0; data.len()? as usize];
+                data.read_exact(0, &mut b)
+                    .map_err(|e| format!("root: failed to read data: {e:?}"))?;
+                b
+            };
             let mut offset = 0;
-            for i in 0..root.refs().len() {
+            for i in 1..refs.len()? {
                 let kl = usize::from(data[offset]);
                 offset += 1;
                 let k = &data[offset..][..kl];
                 let k = core::str::from_utf8(k).unwrap();
                 offset += kl;
-                let [v] = root
-                    .refs()
+                let [v] = refs
                     .read_array(i)
                     .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
                 meta.insert(k.into(), v);
@@ -64,28 +68,34 @@ impl Toa {
         Ok(Self { inner, meta })
     }
 
-    fn get(&self, key: &Hash) -> Result<toa::Object<&InnerToa>> {
+    fn get(&self, key: &Hash) -> Result<toa::Object<toa::Blob<fs::File>>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query store: {e:?}"))?
             .ok_or_else(|| format!("no object with key {key:?}").into())
     }
 
-    fn save_root(&self) -> Result<()> {
+    fn save_root(&mut self) -> Result<()> {
         let mut data =
             Vec::with_capacity(self.meta.keys().fold(self.meta.len(), |s, x| s + x.len()));
-        let mut hashes = Vec::with_capacity(self.meta.len());
-        for (k, v) in self.meta.iter() {
+        for k in self.meta.keys() {
             let kl = u8::try_from(k.len()).map_err(|_| format!("meta key {k:?} too long"))?;
             data.push(kl);
             data.extend(k.bytes());
-            hashes.push(*v);
         }
         let root = self
-            .inner
-            .add(&data, &hashes)
-            .map_err(|e| format!("failed to save root: {e:?}"))?;
-        self.inner.store().0.insert(b"root", root.as_bytes())?;
+            .add_data(&data)
+            .map_err(|e| format!("failed to create meta data: {e:?}"))?;
+
+        let mut hashes = Vec::with_capacity(1 + self.meta.len());
+        hashes.push(root);
+        hashes.extend(self.meta.values());
+        let root = self
+            .add_refs(&hashes)
+            .map_err(|e| format!("failed to create meta refs: {e:?}"))?;
+
+        self.set_root(root)
+            .map_err(|e| format!("failed to set root: {e:?}"))?;
         Ok(())
     }
 
@@ -106,16 +116,18 @@ impl ops::Deref for Toa {
     }
 }
 
+impl ops::DerefMut for Toa {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
 impl Stat {
     fn summarize(self, toa: &Toa) {
-        match toa.inner.store().size_on_disk() {
-            Err(e) => eprintln!("failed to get on-disk size: {e:?}"),
-            Ok(toa_size) => {
-                let Self { size_sum } = self;
-                let ratio = size_sum as f64 / toa_size as f64;
-                println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
-            }
-        }
+        let toa_size = toa.inner.size_on_disk();
+        let Self { size_sum } = self;
+        let ratio = size_sum as f64 / toa_size as f64;
+        println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
     }
 }
 
@@ -123,8 +135,6 @@ fn usage(procname: &str) -> Box<dyn Error> {
     let s = format!(
         "\
 usage: {procname} <add|get|list>
-    new <pack> [files...]
-        initialize a new pack
     get <pack> <key>
         dump object data to stdout (may contain raw bytes!)
     list <pack>
@@ -170,7 +180,7 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N]> {
     Ok(k)
 }
 
-fn add_files<A>(dev: &Toa, args: A) -> Result<Stat>
+fn add_files<A>(dev: &mut Toa, args: A) -> Result<Stat>
 where
     A: Iterator<Item = String>,
 {
@@ -182,7 +192,7 @@ where
     Ok(stat)
 }
 
-fn add_file(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let data = fs::OpenOptions::new()
         .read(true)
         .open(path)
@@ -197,19 +207,21 @@ fn add_file(dev: &Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     };
     stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
     let key = dev
-        .add(&data, &[])
+        .add_data(&data)
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
 }
 
 fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
     let obj = dev.get(&key)?;
+    let Object::Data(obj) = obj else {
+        todo!("dump refs?")
+    };
     let mut out = io::stdout().lock();
     let buf = &mut [0; 1 << 13];
     let mut offt = 0;
     loop {
         let n = obj
-            .data()
             .read(offt, buf)
             .map_err(|e| format!("failed to read object: {e:?}"))?;
         if n == 0 {
@@ -222,20 +234,6 @@ fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
     Ok(())
 }
 
-fn cmd_new<A>(procname: &str, mut args: A) -> Result<()>
-where
-    A: Iterator<Item = String>,
-{
-    let store = args.next().ok_or_else(|| usage(procname))?;
-
-    let mut dev = Toa::open(&store).map_err(|e| format!("failed to create store builder: {e}"))?;
-    let stat = add_files(&mut dev, args)?;
-
-    stat.summarize(&dev);
-
-    Ok(())
-}
-
 fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -243,6 +241,8 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     let key = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
+
+    let store = PathBuf::from(store);
 
     let key = toa::Hash::from_bytes(parse_hex(&key)?);
     let dev = Toa::open(&store)?;
@@ -257,6 +257,8 @@ where
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
+
+    let store = PathBuf::from(store);
 
     let dev = Toa::open(&store)?;
     dev.iter_with(|key| {
@@ -275,55 +277,10 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
+    let store = PathBuf::from(store);
+
     let dev = Toa::open(&store)?;
-    // first collect keys,
-    // then sort based on offset to ensure we iterate over all data linearly
-    let mut objects = Vec::new();
-    eprintln!("collecting keys...");
-    dev.iter_with(|key| {
-        //let obj = dev.get(&key).unwrap().into_root();
-        //objects.push((key, obj));
-        objects.push(key);
-        false
-    })
-    .map_err(|e| format!("failure during store iteration: {e:?}"))?;
-
-    eprintln!("sorting keys...");
-    // TODO we just lost this capability :(
-    //objects.sort_by_key(|x| x.1.offset());
-
-    eprintln!("traversing objects...");
-    let mut n_ok @ mut n_fail = 0;
-    //objects.into_iter().for_each(|(key, obj)| {
-    //let obj = toa::Object::from_root(&*dev, obj);
-    objects.into_iter().for_each(|key| {
-        let obj = dev.get(&key).unwrap();
-        let mut hasher = toa_core::DataHasher::default();
-        let mut buf = [0; 8192];
-        let mut offt = 0;
-        loop {
-            let n = obj.data().read(offt, &mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            offt += n as u128;
-        }
-        let data = hasher.finalize();
-        let hash = toa_core::root_hash(data, toa_core::RefsHasher::default().finalize());
-        if key == hash {
-            n_ok += 1;
-        } else {
-            println!("fail ({key:?} != {hash})");
-            n_fail += 1;
-        }
-    });
-
-    println!("ok:{n_ok}, fail:{n_fail}");
-
-    (n_fail == 0)
-        .then_some(())
-        .ok_or_else(|| "some objects are corrupt".into())
+    todo!("implement Toa::scrub");
 }
 
 fn start() -> Result<()> {
@@ -332,7 +289,6 @@ fn start() -> Result<()> {
     let procname = procname.as_deref().unwrap_or("toa-cli");
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
-        "new" => cmd_new(procname, args),
         "get" => cmd_get(procname, args),
         "list" => cmd_list(procname, args),
         "scrub" => cmd_scrub(procname, args),
