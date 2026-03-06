@@ -1,48 +1,39 @@
-mod unix;
-
-use appender::{Hash, Object, ObjectRaw, cache::MicroLru};
 use std::{
     collections::{BTreeMap, btree_map},
     error::Error,
-    ffi::OsStr,
-    fs,
-    fs::File,
-    io,
-    io::{Read, Seek},
-    ops,
+    ffi::{OsStr, OsString},
+    fs, ops,
+    os::unix::ffi::OsStringExt,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
+use toa::{Blob, Data, Hash, Object};
+use toa_unix::DirItemType;
 
-const MAGIC: [u8; 16] = *b"Appender\x20\x26\x02\x06\0\0\0\0";
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerReader = appender::Reader<File, MicroLru<Box<[u8]>>>;
+type InnerToa = toa::Toa<Blob<fs::File>>;
 
-struct Reader {
-    inner: InnerReader,
-}
-
-#[derive(Default)]
-struct Meta {
-    map: BTreeMap<Box<str>, Box<[u8]>>,
+struct Toa {
+    inner: InnerToa,
+    meta: BTreeMap<Box<str>, Hash>,
 }
 
 struct Fs {
-    dev: Reader,
+    dev: Toa,
     root: Node,
     nodes: BTreeMap<u64, Node>,
-    nodes_rev: BTreeMap<u64, u64>,
+    nodes_rev: BTreeMap<Hash, u64>,
     ino_counter: u64,
 }
 
-#[derive(Clone, Copy)]
 struct Node {
     parent_ino: u64,
-    obj: ObjectRaw,
     refcount: u64,
-    ty: unix::DirItemType,
+    ty: DirItemType,
+    len: u64,
     key: Hash,
     mtime: SystemTime,
     perm: u16,
@@ -50,40 +41,49 @@ struct Node {
     gid: u32,
 }
 
-impl Reader {
-    fn new(path: &str) -> Result<(Self, Meta)> {
-        let mut dev = fs::OpenOptions::new().read(true).open(path)?;
-        let mut buf = [0; 16];
-        dev.read_exact(&mut buf)?;
-        if buf != MAGIC {
-            return Err("bad magic".into());
+impl Toa {
+    fn new(path: &Path) -> Result<Self> {
+        let inner = toa::Toa::open(path)?;
+        let mut meta = BTreeMap::default();
+
+        let root = inner.root();
+
+        let refs = inner
+            .get(&root)
+            .map_err(|e| format!("failed to get root from store: {e:?}"))?
+            .ok_or("root is missing from store")?;
+        let Object::Refs(refs) = refs else { todo!() };
+
+        let data = {
+            let Ok([data]) = refs.read_array(0) else {
+                todo!()
+            };
+            let Ok(Some(data)) = inner.get(&data) else {
+                todo!()
+            };
+            let Object::Data(data) = data else { todo!() };
+            let mut b = vec![0; data.len()? as usize];
+            data.read_exact(0, &mut b)
+                .map_err(|e| format!("root: failed to read data: {e:?}"))?;
+            b
+        };
+        let mut offset = 0;
+        for i in 1..refs.len()? {
+            let kl = usize::from(data[offset]);
+            offset += 1;
+            let k = &data[offset..][..kl];
+            let k = core::str::from_utf8(k).unwrap();
+            offset += kl;
+            let [v] = refs
+                .read_array(i)
+                .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
+            meta.insert(k.into(), v);
         }
 
-        let mut buf = [0; 76];
-        dev.seek(io::SeekFrom::End(-76))
-            .map_err(|e| format!("seek to trailer failed: {e}"))?;
-        dev.read_exact(&mut buf)
-            .map_err(|e| format!("read of trailer failed: {e}"))?;
-
-        let [a, b, c, d, buf @ ..] = buf;
-        let len = u32::from_le_bytes([a, b, c, d]);
-        dev.seek(io::SeekFrom::End(-76 - i64::from(len)))
-            .map_err(|e| format!("seek to meta table failed: {e}"))?;
-        let mut meta = Vec::new();
-        (&mut dev)
-            .take(u64::from(len))
-            .read_to_end(&mut meta)
-            .map_err(|e| format!("seek of meta table failed: {e}"))?;
-
-        let meta = parse_meta(&meta).map_err(|e| format!("parsing of meta table failed: {e}"))?;
-
-        let packref = appender::PackRef(buf);
-        let inner = InnerReader::new(dev, Default::default(), packref)
-            .map_err(|e| format!("failed to initialize reader: {e:?}"))?;
-        Ok((Reader { inner }, meta))
+        Ok(Self { inner, meta })
     }
 
-    fn get(&self, key: &Hash) -> Result<appender::Object<'_, InnerReader>> {
+    fn get(&self, key: &Hash) -> Result<Object<'_, Blob<fs::File>>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query pack: {e:?}"))?
@@ -91,8 +91,8 @@ impl Reader {
     }
 }
 
-impl ops::Deref for Reader {
-    type Target = InnerReader;
+impl ops::Deref for Toa {
+    type Target = InnerToa;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -106,25 +106,22 @@ impl Fs {
             .or_else(|| self.nodes.get(&ino))
     }
 
-    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, unix::Dir<'_>)> {
+    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, toa_unix::Dir<'_, Blob<fs::File>>)> {
         self.get_ino(ino)
-            .filter(|x| x.ty == unix::DirItemType::Dir)
-            .map(|x| {
-                let d = unix::Dir::new(Object::from_raw(x.obj, &self.dev)).unwrap();
-                (x, d)
-            })
+            .filter(|x| matches!(&x.ty, DirItemType::Dir))
+            .map(|x| (x, toa_unix::Dir::new(&self.dev, &x.key).unwrap()))
     }
 
-    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Object<'_, InnerReader>)> {
+    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Data<'_, Blob<fs::File>>)> {
         self.get_ino(ino)
-            .filter(|x| x.ty == unix::DirItemType::File)
-            .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
+            .filter(|x| matches!(&x.ty, DirItemType::File))
+            .map(|x| (x, self.dev.get(&x.key).unwrap().into_data().unwrap()))
     }
 
-    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Object<'_, InnerReader>)> {
+    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Data<'_, Blob<fs::File>>)> {
         self.get_ino(ino)
-            .filter(|x| x.ty == unix::DirItemType::SymLink)
-            .map(|x| (x, Object::from_raw(x.obj, &*self.dev)))
+            .filter(|x| matches!(&x.ty, DirItemType::SymLink))
+            .map(|x| (x, self.dev.get(&x.key).unwrap().into_data().unwrap()))
     }
 
     /// # Returns
@@ -133,25 +130,25 @@ impl Fs {
     fn increase_ref(
         &mut self,
         parent_ino: u64,
+        ty: DirItemType,
+        len: u64,
         key: Hash,
-        obj: ObjectRaw,
-        ty: unix::DirItemType,
         perm: u16,
         mtime: SystemTime,
         uid: u32,
         gid: u32,
     ) -> u64 {
-        let ino = *self.nodes_rev.entry(obj.offset()).or_insert_with(|| {
+        let ino = *self.nodes_rev.entry(key).or_insert_with(|| {
             let ino = self.ino_counter;
             self.ino_counter += 1;
             ino
         });
         let node = self.nodes.entry(ino).or_insert_with(|| Node {
             parent_ino,
-            obj,
-            refcount: 0,
             ty,
+            len,
             key,
+            refcount: 0,
             perm,
             mtime,
             uid,
@@ -188,13 +185,7 @@ impl fuser::Filesystem for Fs {
             .get_ino(ino)
             .unwrap_or_else(|| panic!("ino {ino} not found"));
         let attr = file_attr(
-            ino,
-            node.obj.len(),
-            node.ty,
-            node.mtime,
-            node.perm,
-            node.uid,
-            node.gid,
+            ino, node.ty, node.len, node.mtime, node.perm, node.uid, node.gid,
         );
         reply.attr(&Duration::MAX, &attr)
     }
@@ -229,11 +220,15 @@ impl fuser::Filesystem for Fs {
                         break;
                     };
                     let ty = match e.ty {
-                        unix::DirItemType::File => fuser::FileType::RegularFile,
-                        unix::DirItemType::Dir => fuser::FileType::Directory,
-                        unix::DirItemType::SymLink => fuser::FileType::Symlink,
+                        toa_unix::DirItemType::File => fuser::FileType::RegularFile,
+                        toa_unix::DirItemType::Dir => fuser::FileType::Directory,
+                        toa_unix::DirItemType::SymLink => fuser::FileType::Symlink,
+                        toa_unix::DirItemType::Unknown { .. } => todo!(),
                     };
-                    reply.add(u64::MAX, i + 1, ty, e.name)
+                    let mut nam = vec![0; e.name.len() as usize];
+                    dir.read_data(e.name, &mut nam).unwrap();
+                    let nam = OsString::from_vec(nam);
+                    reply.add(u64::MAX, i + 1, ty, nam)
                 }
             };
             if end {
@@ -259,14 +254,23 @@ impl fuser::Filesystem for Fs {
         };
         for i in 0.. {
             let Some(e) = dir.get(i).unwrap() else { break };
-            if e.name != name {
+            if e.name.len() != name.len() as u64 {
                 continue;
             }
-            let obj = match e.ty {
-                unix::DirItemType::File | unix::DirItemType::Dir => {
-                    self.dev.get(&e.key).unwrap().to_raw()
-                }
-                unix::DirItemType::SymLink => dir.symlink_slice(&e),
+            let mut nam = vec![0; name.len()];
+            dir.read_data(e.name, &mut nam).unwrap();
+            if name.as_bytes() != &*nam {
+                continue;
+            }
+            let key = dir.get_ref(i).unwrap().unwrap();
+            let len = if e.len != 0 {
+                e.len
+            } else {
+                let len = match self.dev.get(&key).unwrap() {
+                    Object::Data(x) => x.len().unwrap(),
+                    Object::Refs(x) => x.len().unwrap(),
+                };
+                len.try_into().unwrap_or(u64::MAX)
             };
             let mtime = SystemTime::UNIX_EPOCH;
             let mtime = match e.modified {
@@ -274,9 +278,8 @@ impl fuser::Filesystem for Fs {
                 0.. => mtime + Duration::from_micros(e.modified as u64),
             };
             let perm = e.permissions;
-            let perm = 0o777;
-            let ino = self.increase_ref(parent, e.key, obj, e.ty, perm, mtime, e.uid, e.gid);
-            let attr = file_attr(ino, obj.len(), e.ty, mtime, perm, e.uid, e.gid);
+            let ino = self.increase_ref(parent, e.ty, len, key, perm, mtime, e.uid, e.gid);
+            let attr = file_attr(ino, e.ty, len, mtime, perm, e.uid, e.gid);
             return reply.entry(&Duration::MAX, &attr, 0);
         }
         reply.error(libc::ENOENT)
@@ -302,13 +305,9 @@ impl fuser::Filesystem for Fs {
             //reply.error(libc::ENOTDIR)
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX);
-        // kernel gets confused if you don't fill the entire buffer...
-        let data = file
-            .read_exact(offset as u64, size)
-            .unwrap()
-            .into_bytes()
-            .unwrap();
-        reply.data(&data)
+        let mut buf = vec![0; size as usize];
+        let n = file.read(offset as u128, &mut buf).unwrap();
+        reply.data(&buf[..n])
     }
 
     fn readlink(&mut self, _: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
@@ -316,12 +315,9 @@ impl fuser::Filesystem for Fs {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
-        let data = symlink
-            .read_exact(0, usize::MAX)
-            .unwrap()
-            .into_bytes()
-            .unwrap();
-        reply.data(&data)
+        let buf = &mut vec![0; symlink.len().unwrap() as usize];
+        symlink.read_exact(0, buf).unwrap();
+        reply.data(buf)
     }
 
     fn listxattr(
@@ -349,16 +345,16 @@ impl fuser::Filesystem for Fs {
         reply: fuser::ReplyXattr,
     ) {
         match name.as_encoded_bytes() {
-            self::XATTR_NAME_HASH_TOA => match size {
-                0 => reply.size(64),
-                ..64 => reply.error(libc::ERANGE),
-                64.. => {
-                    let Some(x) = self.get_ino(ino) else {
-                        return reply.error(libc::ENOENT);
-                    };
-                    reply.data(&x.key.to_hex())
+            self::XATTR_NAME_HASH_TOA => {
+                let Some(x) = self.get_ino(ino) else {
+                    return reply.error(libc::ENOENT);
+                };
+                match size {
+                    0 => reply.size(64),
+                    ..64 => reply.error(libc::ERANGE),
+                    64.. => reply.data(&x.key.to_hex()),
                 }
-            },
+            }
             _ => reply.error(libc::ENODATA),
         }
     }
@@ -366,17 +362,18 @@ impl fuser::Filesystem for Fs {
 
 fn file_attr(
     ino: u64,
+    ty: DirItemType,
     len: u64,
-    ty: unix::DirItemType,
     mtime: SystemTime,
     perm: u16,
     uid: u32,
     gid: u32,
 ) -> fuser::FileAttr {
     let kind = match ty {
-        unix::DirItemType::File => fuser::FileType::RegularFile,
-        unix::DirItemType::Dir => fuser::FileType::Directory,
-        unix::DirItemType::SymLink => fuser::FileType::Symlink,
+        DirItemType::File => fuser::FileType::RegularFile,
+        DirItemType::Dir => fuser::FileType::Directory,
+        DirItemType::SymLink => fuser::FileType::Symlink,
+        DirItemType::Unknown { .. } => todo!(),
     };
     fuser::FileAttr {
         ino,
@@ -401,64 +398,38 @@ fn usage(procname: &str) -> Box<dyn Error> {
     format!("usage: {procname} <pack> <mount> [--allow-other]").into()
 }
 
-fn new_reader(pack: &str) -> Result<(Reader, Meta)> {
-    Reader::new(pack).map_err(|e| format!("failed to open pack {pack:?}: {e}").into())
-}
-
-fn parse_meta(mut buf: &[u8]) -> Result<Meta> {
-    let mut meta = Meta::default();
-    while let [key_len, b @ ..] = buf {
-        let (key, b) = b.split_at(usize::from(*key_len));
-        let [x, y, b @ ..] = b else { todo!() };
-        let value_len = u16::from_le_bytes([*x, *y]);
-        let (value, b) = b.split_at(usize::from(value_len));
-        buf = b;
-        let key = core::str::from_utf8(key).expect("key is not UTF-8");
-        let prev = meta.map.insert(key.into(), value.into());
-        assert!(prev.is_none(), "duplicate key {key:?}");
-    }
-    Ok(meta)
-}
-
 fn start() -> Result<()> {
     env_logger::init();
 
     let mut allow_other = false;
 
-    let mut args = std::env::args();
-    let procname = args.next();
-    let procname = procname.as_deref().unwrap_or("appender-fuse");
+    let mut args = std::env::args_os();
+    let procname = args.next().map(|x| x.to_string_lossy().into_owned());
+    let procname = procname.as_deref().unwrap_or("toa-fuse");
 
     let pack = args.next().ok_or_else(|| usage(procname))?;
     let mount = args.next().ok_or_else(|| usage(procname))?;
     while let Some(x) = args.next() {
-        match &*x {
-            "--allow-other" => allow_other = true,
+        match x.to_str() {
+            Some("--allow-other") => allow_other = true,
             _ => return Err(usage(procname)),
         }
     }
 
-    let (dev, meta) = new_reader(&pack)?;
-    let root_key = meta
-        .map
+    let pack = PathBuf::from(pack);
+    let dev = Toa::new(&pack).map_err(|e| format!("failed to open pack {pack:?}: {e}"))?;
+    let root_key = *dev
+        .meta
         .get("unix.root")
-        .map(|x| &**x)
-        .ok_or("\"unix.root\" not present in meta table")?
-        .try_into()
-        .map(Hash::from_bytes)
-        .map_err(|_| "\"unix.root\" value is not 32 bytes")?;
-    let root = dev
-        .get(&root_key)
-        .map_err(|e| format!("failed to get root object: {e}"))?
-        .to_raw();
+        .ok_or("\"unix.root\" not present in meta table")?;
     let fs = Fs {
         dev,
         root: Node {
             key: root_key,
-            obj: root,
+            ty: DirItemType::Dir,
+            len: 0, // "directory size" is a meaningless metric on UNIX so don't even bother
             parent_ino: 0,
             refcount: 1,
-            ty: unix::DirItemType::Dir,
             uid: 0,
             gid: 0,
             mtime: SystemTime::UNIX_EPOCH,
@@ -469,7 +440,7 @@ fn start() -> Result<()> {
         ino_counter: 2,
     };
     let mut opt = vec![
-        fuser::MountOption::FSName("appender".into()),
+        fuser::MountOption::FSName("toa".into()),
         //fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
         fuser::MountOption::NoDev,

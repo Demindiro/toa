@@ -1,5 +1,5 @@
 [package]
-name = "appender-cli"
+name = "toa-cli"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,9 +8,10 @@ default = ["magic"]
 magic = ["dep:magic"]
 
 [dependencies]
-appender = { path = "../appender", features = ["std", "rayon"] }
+toa = { path = "../toa", features = [] }
 chrono = { version = "0.4.42", default-features = false, features = ["std"] }
 memmap2 = { version = "0.9.9", default-features = false }
 rand = { version = "0.8.0" }
 magic = { version = "0.16.7", optional = true }
 toa-core = { path = "../toa-core" }
+toa-unix = { path = "../toa-unix" }
