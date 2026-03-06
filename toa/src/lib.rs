@@ -26,20 +26,16 @@ pub struct Blob<T> {
     len: u64,
 }
 
-#[derive(Clone)]
 pub enum Object<'a, T> {
     Data(Data<'a, T>),
     Refs(Refs<'a, T>),
 }
 
-#[derive(Clone)]
 pub struct Data<'a, T>(Typed<'a, T>);
-#[derive(Clone)]
 pub struct Refs<'a, T>(Typed<'a, T>);
 
 type Map = BTreeMap<Hash, FileRef>;
 
-#[derive(Clone, Copy)]
 struct Typed<'a, T> {
     blobs: &'a BlobsTyped<T>,
     map: &'a Map,
@@ -422,6 +418,71 @@ impl<'a, T> Typed<'a, T> {
     }
 }
 
+impl<'a> Data<'a, Blob<fs::File>> {
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
+    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
+        self.0.read(offset, buf)
+    }
+
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
+    pub fn read_exact(
+        &self,
+        offset: u128,
+        buf: &mut [u8],
+    ) -> Result<(), ReadExactError<io::Error>> {
+        self.0.read_exact(offset, buf)
+    }
+
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
+    pub fn read_array<const N: usize>(
+        &self,
+        offset: u128,
+    ) -> Result<[u8; N], ReadExactError<io::Error>> {
+        self.0.read_array(offset)
+    }
+
+    pub fn len(&self) -> io::Result<u128> {
+        self.0.len_bits().map(|x| x >> 3)
+    }
+}
+
+impl<'a> Refs<'a, Blob<fs::File>> {
+    /// # Note
+    ///
+    /// Offset is in *hashes*.
+    pub fn read_exact(
+        &self,
+        offset: u128,
+        buf: &mut [Hash],
+    ) -> Result<(), ReadExactError<io::Error>> {
+        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
+        self.0.read_exact(offset, bytemuck::cast_slice_mut(buf))
+    }
+
+    /// # Note
+    ///
+    /// Offset is in *hashes*.
+    pub fn read_array<const N: usize>(
+        &self,
+        offset: u128,
+    ) -> Result<[Hash; N], ReadExactError<io::Error>> {
+        // bytemuck is being annoying, so reimplement using read_exact
+        let mut buf = [Hash::default(); N];
+        self.read_exact(offset, &mut buf)?;
+        Ok(buf)
+    }
+
+    pub fn len(&self) -> io::Result<u128> {
+        self.0.len_bits().map(|x| x >> 8)
+    }
+}
+
 impl<'a> Typed<'a, Blob<fs::File>> {
     pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
         match self.location.ty().0 {
@@ -542,6 +603,32 @@ impl<T> From<ReadError<T>> for ReadExactError<T> {
         }
     }
 }
+
+impl<T> Clone for Data<'_, T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> Clone for Refs<'_, T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> Clone for Typed<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            blobs: self.blobs,
+            map: self.map,
+            location: self.location,
+        }
+    }
+}
+
+impl<T> Copy for Data<'_, T> {}
+impl<T> Copy for Refs<'_, T> {}
+impl<T> Copy for Typed<'_, T> {}
 
 impl fmt::Debug for FileRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
