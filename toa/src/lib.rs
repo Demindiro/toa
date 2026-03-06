@@ -321,7 +321,7 @@ impl BlobsTyped<Blob<fs::File>> {
     fn load_chunks_partial(&mut self, map: &mut Map, domain: Domain) -> io::Result<()> {
         let mut reader = io::BufReader::new(&mut self.chunks_partial.file);
         let mut buf = vec![0; CHUNK_SIZE as usize];
-        let mut len = &mut [0; 2];
+        let len = &mut [0; 2];
         while read_exact_or_none(&mut reader, len)? {
             let len = u16::from_le_bytes(*len) >> 3;
             reader.read_exact(&mut buf[..usize::from(len)])?;
@@ -360,9 +360,6 @@ impl FileRef {
     const TY_CHUNK_FULL: u64 = 2;
     const TY_CHUNK_PARTIAL: u64 = 4;
     const TY_PAIR: u64 = 6;
-
-    const TY_DATA: u64 = 0;
-    const TY_REFS: u64 = 1;
 
     fn new(offset: u64, ty: u64, domain: Domain) -> Self {
         assert!(ty < 8);
@@ -565,7 +562,6 @@ impl<'a> Typed<'a, Blob<fs::File>> {
         let x = self.with_key(x).unwrap();
         let y = self.with_key(y).unwrap();
         let xl = len.next_power_of_two() >> 1;
-        let yl = len - xl;
         let n = xl.saturating_sub(offset).min(buf.len() as u128) as usize;
         let (xb, yb) = buf.split_at_mut(n);
         Ok(x.read(offset, xb)? + y.read(offset.saturating_sub(xl), yb)?)
@@ -669,13 +665,6 @@ where
     }
 }
 
-fn advance8(x: &mut u64, y: u64) -> u64 {
-    let y = align8(y);
-    let z = *x;
-    *x += y;
-    z
-}
-
 fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
     let x = Hash::from_slice(&bytes[0..32]);
     let y = Hash::from_slice(&bytes[32..64]);
@@ -686,7 +675,6 @@ fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
     type Toa = super::Toa<Blob<fs::File>>;
 

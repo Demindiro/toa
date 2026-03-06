@@ -1,5 +1,5 @@
 use std::{fs, io};
-use toa::{Blob, Data, Hash, Object, ReadExactError, Refs, Toa};
+use toa::{Blob, Data, Hash, Object, Refs, Toa};
 
 pub struct Dir<'a, T> {
     refs: Refs<'a, T>,

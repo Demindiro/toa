@@ -180,18 +180,6 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N]> {
     Ok(k)
 }
 
-fn add_files<A>(dev: &mut Toa, args: A) -> Result<Stat>
-where
-    A: Iterator<Item = String>,
-{
-    let mut stat = Stat::default();
-    for file in args {
-        let key = add_file(dev, &file, &mut stat)?;
-        println!("{key:?} {file}");
-    }
-    Ok(stat)
-}
-
 fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let data = fs::OpenOptions::new()
         .read(true)
