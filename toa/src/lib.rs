@@ -131,6 +131,10 @@ impl Toa<Blob<fs::File>> {
             .add(Domain::Refs, bytemuck::cast_slice(refs), &mut self.map)
     }
 
+    pub fn size_on_disk(&self) -> u64 {
+        self.data.size_on_disk() + self.refs.size_on_disk()
+    }
+
     pub fn root(&self) -> Hash {
         self.root
     }
@@ -147,6 +151,12 @@ impl Toa<Blob<fs::File>> {
         let mut x = PathBuf::from(&*self.dir);
         x.push(name);
         x
+    }
+}
+
+impl<T> Blob<T> {
+    pub fn size_on_disk(&self) -> u64 {
+        self.len
     }
 }
 
@@ -339,6 +349,12 @@ impl BlobsTyped<Blob<fs::File>> {
             self.pairs.len += buf.len() as u64;
         }
         Ok(())
+    }
+
+    pub fn size_on_disk(&self) -> u64 {
+        self.chunks_full.size_on_disk()
+            + self.chunks_partial.size_on_disk()
+            + self.pairs.size_on_disk()
     }
 }
 
