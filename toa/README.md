@@ -24,6 +24,7 @@ for mapping all hashes to file offsets.
 File offsets are all aligned to 8 bytes,
 leaving the 3 lower bits for type tagging.
 
+Lastly, exactly one root can be kept track of at any time.
 
 ### Full chunks file
 

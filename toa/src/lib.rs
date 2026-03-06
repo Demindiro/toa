@@ -17,6 +17,8 @@ pub struct Toa<T> {
     data: BlobsTyped<T>,
     refs: BlobsTyped<T>,
     map: Map,
+    root: Hash,
+    dir: Box<Path>,
 }
 
 pub struct Blob<T> {
@@ -70,15 +72,29 @@ pub enum ReadExactError<S> {
 
 impl Toa<Blob<fs::File>> {
     pub fn open(path: &Path) -> io::Result<Self> {
+        let dir = PathBuf::from(path).into_boxed_path();
         let mut map = Map::default();
         let f = |x| {
-            let mut p = PathBuf::from(path);
+            let mut p = PathBuf::from(dir.clone());
             p.push(x);
             p
         };
         let data = BlobsTyped::open_at(&f("data"), &mut map, Domain::Data)?;
         let refs = BlobsTyped::open_at(&f("refs"), &mut map, Domain::Refs)?;
-        Ok(Self { data, refs, map })
+        let mut root = [0; 32];
+        match fs::OpenOptions::new().read(true).open(&f("root.bin")) {
+            Ok(mut x) => x.read_exact(&mut root)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let root = Hash::from_bytes(root);
+        Ok(Self {
+            data,
+            refs,
+            map,
+            root,
+            dir,
+        })
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
@@ -113,6 +129,24 @@ impl Toa<Blob<fs::File>> {
     pub fn add_refs(&mut self, refs: &[Hash]) -> io::Result<Hash> {
         self.refs
             .add(Domain::Refs, bytemuck::cast_slice(refs), &mut self.map)
+    }
+
+    pub fn root(&self) -> Hash {
+        self.root
+    }
+
+    pub fn set_root(&mut self, new_root: Hash) -> io::Result<()> {
+        let (f, nf) = (self.file_path("root.bin"), self.file_path("new_root.bin"));
+        fs::write(&nf, new_root.as_bytes())?;
+        fs::rename(&nf, &f)?;
+        self.root = new_root;
+        Ok(())
+    }
+
+    fn file_path(&self, name: &str) -> PathBuf {
+        let mut x = PathBuf::from(&*self.dir);
+        x.push(name);
+        x
     }
 }
 
@@ -158,7 +192,7 @@ impl BlobsTyped<Blob<fs::File>> {
                 .open(path)
                 .map(|file| Blob { file, len: 0 })
         };
-        fs::create_dir(path)?;
+        fs::create_dir_all(path)?;
         let mut s = Self {
             chunks_full: f("chunks_full.bin")?,
             chunks_partial: f("chunks_partial.bin")?,
