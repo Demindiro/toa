@@ -5,6 +5,10 @@ to other objects.
 It is a tree hash using [TurboSHAKE128][turboshake128] as core.
 It supports sparse files of up to 2^128 bits (2^125 bytes).
 
+> **Warning** this hash is specifically designed for Toa.
+> It is *not* suitable as a MAC due to the lack of a root flag,
+> which is necessary for subtree-freeness (a non-goal of this hash).
+
 ## Specification
 
 There are two objects:
