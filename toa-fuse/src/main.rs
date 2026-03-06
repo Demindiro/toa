@@ -2,18 +2,19 @@ use std::{
     collections::{BTreeMap, btree_map},
     error::Error,
     ffi::{OsStr, OsString},
-    ops,
+    fs, ops,
     os::unix::ffi::OsStringExt,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
-use toa::{Hash, Object};
+use toa::{Blob, Data, Hash, Object};
 use toa_unix::DirItemType;
 
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerToa = toa::Toa<toa::ToaKvStore<toa_kv::sled::Tree>>;
+type InnerToa = toa::Toa<Blob<fs::File>>;
 
 struct Toa {
     inner: InnerToa,
@@ -41,50 +42,48 @@ struct Node {
 }
 
 impl Toa {
-    fn new(path: &str) -> Result<Self> {
-        let db = toa_kv::sled::open(path)?;
-        let toa = db.open_tree("")?;
-        let inner = toa::Toa::new(toa::ToaKvStore(toa));
-
-        let root = inner
-            .store()
-            .0
-            .get(b"root")
-            .map_err(|e| format!("failed to get root: {e}"))?;
+    fn new(path: &Path) -> Result<Self> {
+        let inner = toa::Toa::open(path)?;
         let mut meta = BTreeMap::default();
 
-        if let Some(root) = root {
-            let root =
-                Hash::from_bytes((*root).try_into().map_err(|_| "root key is not 32 bytes")?);
+        let root = inner.root();
 
-            let root = inner
-                .get(&root)
-                .map_err(|e| format!("failed to get root from store: {e:?}"))?
-                .ok_or("root is missing from store")?;
+        let refs = inner
+            .get(&root)
+            .map_err(|e| format!("failed to get root from store: {e:?}"))?
+            .ok_or("root is missing from store")?;
+        let Object::Refs(refs) = refs else { todo!() };
 
-            let mut data = vec![0; root.data().len() as usize];
-            root.data()
-                .read_exact(0, &mut data)
+        let data = {
+            let Ok([data]) = refs.read_array(0) else {
+                todo!()
+            };
+            let Ok(Some(data)) = inner.get(&data) else {
+                todo!()
+            };
+            let Object::Data(data) = data else { todo!() };
+            let mut b = vec![0; data.len()? as usize];
+            data.read_exact(0, &mut b)
                 .map_err(|e| format!("root: failed to read data: {e:?}"))?;
-            let mut offset = 0;
-            for i in 0..root.refs().len() {
-                let kl = usize::from(data[offset]);
-                offset += 1;
-                let k = &data[offset..][..kl];
-                let k = core::str::from_utf8(k).unwrap();
-                offset += kl;
-                let [v] = root
-                    .refs()
-                    .read_array(i)
-                    .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
-                meta.insert(k.into(), v);
-            }
+            b
+        };
+        let mut offset = 0;
+        for i in 1..refs.len()? {
+            let kl = usize::from(data[offset]);
+            offset += 1;
+            let k = &data[offset..][..kl];
+            let k = core::str::from_utf8(k).unwrap();
+            offset += kl;
+            let [v] = refs
+                .read_array(i)
+                .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
+            meta.insert(k.into(), v);
         }
 
         Ok(Self { inner, meta })
     }
 
-    fn get(&self, key: &Hash) -> Result<toa::Object<&InnerToa>> {
+    fn get(&self, key: &Hash) -> Result<Object<'_, Blob<fs::File>>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query pack: {e:?}"))?
@@ -107,22 +106,22 @@ impl Fs {
             .or_else(|| self.nodes.get(&ino))
     }
 
-    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, toa_unix::Dir<Object<&InnerToa>>)> {
+    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, toa_unix::Dir<'_, Blob<fs::File>>)> {
         self.get_ino(ino)
             .filter(|x| matches!(&x.ty, DirItemType::Dir))
-            .map(|x| (x, toa_unix::Dir::new(self.dev.get(&x.key).unwrap())))
+            .map(|x| (x, toa_unix::Dir::new(&self.dev, &x.key).unwrap()))
     }
 
-    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Object<&InnerToa>)> {
+    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Data<'_, Blob<fs::File>>)> {
         self.get_ino(ino)
             .filter(|x| matches!(&x.ty, DirItemType::File))
-            .map(|x| (x, self.dev.get(&x.key).unwrap()))
+            .map(|x| (x, self.dev.get(&x.key).unwrap().into_data().unwrap()))
     }
 
-    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Object<&InnerToa>)> {
+    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Data<'_, Blob<fs::File>>)> {
         self.get_ino(ino)
             .filter(|x| matches!(&x.ty, DirItemType::SymLink))
-            .map(|x| (x, self.dev.get(&x.key).unwrap()))
+            .map(|x| (x, self.dev.get(&x.key).unwrap().into_data().unwrap()))
     }
 
     /// # Returns
@@ -267,10 +266,9 @@ impl fuser::Filesystem for Fs {
             let len = if e.len != 0 {
                 e.len
             } else {
-                let obj = self.dev.get(&key).unwrap();
-                let len = match e.ty {
-                    DirItemType::Dir => obj.refs().len(),
-                    _ => obj.data().len(),
+                let len = match self.dev.get(&key).unwrap() {
+                    Object::Data(x) => x.len().unwrap(),
+                    Object::Refs(x) => x.len().unwrap(),
                 };
                 len.try_into().unwrap_or(u64::MAX)
             };
@@ -308,7 +306,7 @@ impl fuser::Filesystem for Fs {
         };
         let size = usize::try_from(size).unwrap_or(usize::MAX);
         let mut buf = vec![0; size as usize];
-        let n = file.data().read(offset as u128, &mut buf).unwrap();
+        let n = file.read(offset as u128, &mut buf).unwrap();
         reply.data(&buf[..n])
     }
 
@@ -317,8 +315,8 @@ impl fuser::Filesystem for Fs {
             return reply.error(libc::ENOENT);
             //reply.error(libc::ENOTDIR)
         };
-        let buf = &mut vec![0; symlink.data().len() as usize];
-        symlink.data().read_exact(0, buf).unwrap();
+        let buf = &mut vec![0; symlink.len().unwrap() as usize];
+        symlink.read_exact(0, buf).unwrap();
         reply.data(buf)
     }
 
@@ -400,29 +398,26 @@ fn usage(procname: &str) -> Box<dyn Error> {
     format!("usage: {procname} <pack> <mount> [--allow-other]").into()
 }
 
-fn new_reader(pack: &str) -> Result<Toa> {
-    Toa::new(pack).map_err(|e| format!("failed to open pack {pack:?}: {e}").into())
-}
-
 fn start() -> Result<()> {
     env_logger::init();
 
     let mut allow_other = false;
 
-    let mut args = std::env::args();
-    let procname = args.next();
+    let mut args = std::env::args_os();
+    let procname = args.next().map(|x| x.to_string_lossy().into_owned());
     let procname = procname.as_deref().unwrap_or("toa-fuse");
 
     let pack = args.next().ok_or_else(|| usage(procname))?;
     let mount = args.next().ok_or_else(|| usage(procname))?;
     while let Some(x) = args.next() {
-        match &*x {
-            "--allow-other" => allow_other = true,
+        match x.to_str() {
+            Some("--allow-other") => allow_other = true,
             _ => return Err(usage(procname)),
         }
     }
 
-    let dev = new_reader(&pack)?;
+    let pack = PathBuf::from(pack);
+    let dev = Toa::new(&pack).map_err(|e| format!("failed to open pack {pack:?}: {e}"))?;
     let root_key = *dev
         .meta
         .get("unix.root")
