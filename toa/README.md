@@ -9,16 +9,12 @@ The store has two categories of files:
 
 The essential files are designed to be parseable with a simple linear scan.
 
-Essential files are:
+The store is split in two identical parts, one for data objects
+and another for refs objects. Each store has three essential files:
 
-- Full data chunks file, with chunk data of 8KiB each.
-- Full refs chunks file, with chunk refs of 8KiB each.
-- Partial data chunks file, with chunk data strictly less than 8KiB.
-- Partial refs chunks file, with chunk data strictly less than 8KiB.
-- Data pairs file, containing pairs of 64 bytes each.
-- Refs pairs file, containing pairs of 64 bytes each.
-- Roots file, containing roots of 96 bytes each.
-- Small objects, with root, data and references inline.
+- Full chunks file, with chunk data of 8KiB each.
+- Partial chunks file, with chunk data strictly less than 8KiB.
+- Pairs file, containing pairs of 80 bytes each.
 
 Note the lack of index files. These are considered acceleration files as they
 can be generated from only the essential files.
@@ -54,30 +50,3 @@ size of chunks referenced.
 |  31:0 | left CV            |
 | 63:32 | right CV           |
 | 79:64 | length (bits)      |
-
-
-### Roots file
-
-The roots file is a blob with a size a multiple of 64 bytes.
-
-| bytes | name                |
-| -----:|:------------------- |
-|  31:0 | data hash           |
-| 63:32 | refs hash           |
-
-
-### Small objects
-
-The small objects file is not strictly necessary, but a useful optimization
-to more compactly store small objects.
-
-Each object starts with a 32-bit header.
-
-| bits  | name                  |
-| -----:|:--------------------- |
-|  11:0 | refs length (hashes)  |
-| 31:12 | data length (bytes)   |
-
-The header is immediately followed by hashes, then bytes.
-
-All objects start on a 8-byte boundary.

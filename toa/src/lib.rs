@@ -1,71 +1,63 @@
-#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
 pub use toa_core::{self as core, Hash};
 
-use ::core::mem;
-use toa_core::{DataCv, RefsCv};
-
-const NAMESPACE_ROOTS: u8 = 1;
-const NAMESPACE_PAIRS: u8 = 2;
-const NAMESPACE_CHUNKS: u8 = 3;
+use ::core::{mem, ops};
+use std::{
+    collections::btree_map::{BTreeMap, Entry},
+    fs,
+    io::{self, Read, Seek, Write},
+    path::{Path, PathBuf},
+};
+use toa_core::Domain;
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
-pub trait ToaStore {
-    type Error;
-    type Chunk<'a>: AsRef<[u8]>
-    where
-        Self: 'a;
-
-    fn add_chunk(&self, key: &[u8; 32], value: &[u8]) -> Result<(), Self::Error>;
-    fn add_pair(&self, key: &[u8; 32], value: &[u8; 64]) -> Result<(), Self::Error>;
-    fn add_root(&self, key: &[u8; 32], value: &[u8; 96]) -> Result<(), Self::Error>;
-
-    fn get_chunk<'a>(&'a self, key: &[u8; 32]) -> Result<Option<Self::Chunk<'a>>, Self::Error>;
-    fn get_pair(&self, key: &[u8; 32]) -> Result<Option<[u8; 64]>, Self::Error>;
-    fn get_root(&self, key: &[u8; 32]) -> Result<Option<[u8; 96]>, Self::Error>;
-
-    fn iter_roots_with(&self, f: &mut dyn FnMut(&[u8; 32])) -> Result<(), Self::Error>;
-
-    fn size_on_disk(&self) -> Result<u128, Self::Error>;
-
-    fn has_chunk(&self, key: &[u8; 32]) -> Result<bool, Self::Error> {
-        self.get_chunk(key).map(|x| x.is_some())
-    }
-    fn has_pair(&self, key: &[u8; 32]) -> Result<bool, Self::Error> {
-        self.get_pair(key).map(|x| x.is_some())
-    }
-    fn has_root(&self, key: &[u8; 32]) -> Result<bool, Self::Error> {
-        self.get_root(key).map(|x| x.is_some())
-    }
+pub struct Toa<T> {
+    data: BlobsTyped<T>,
+    refs: BlobsTyped<T>,
+    map: Map,
 }
 
-pub struct Toa<S> {
-    store: S,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ToaKvStore<T>(pub T);
-
-#[derive(Clone, Debug)]
-pub enum ToaKvStoreError<T> {
-    InvalidPair,
-    InvalidRoot,
-    Kv(T),
+pub struct Blob<T> {
+    file: T,
+    len: u64,
 }
 
 #[derive(Clone)]
-pub struct Object<S> {
-    toa: S,
-    root: Root,
+pub enum Object<'a, T> {
+    Data(Data<'a, T>),
+    Refs(Refs<'a, T>),
 }
+
+#[derive(Clone)]
+pub struct Data<'a, T>(Typed<'a, T>);
+#[derive(Clone)]
+pub struct Refs<'a, T>(Typed<'a, T>);
+
+type Map = BTreeMap<Hash, FileRef>;
+
+#[derive(Clone, Copy)]
+struct Typed<'a, T> {
+    blobs: &'a BlobsTyped<T>,
+    map: &'a Map,
+    location: FileRef,
+}
+
+struct BlobsTyped<T> {
+    chunks_full: T,
+    chunks_partial: T,
+    pairs: T,
+}
+
+#[derive(Clone, Copy)]
+struct FileRef(u64);
 
 #[derive(Debug)]
 pub enum ReadError<S> {
     MissingChunk,
     MissingPair,
-    Store(S),
+    Io(S),
 }
 
 #[derive(Debug)]
@@ -73,377 +65,419 @@ pub enum ReadExactError<S> {
     MissingChunk,
     MissingPair,
     Truncated,
-    Store(S),
+    Io(S),
 }
 
-#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
-#[repr(C)]
-struct Root {
-    data: DataCv,
-    refs: RefsCv,
-    data_len: u128,
-    refs_len: u128,
-}
-
-impl<S> Toa<S> {
-    pub fn new(store: S) -> Self {
-        Self { store }
-    }
-
-    pub fn store(&self) -> &S {
-        &self.store
-    }
-
-    pub fn store_mut(&mut self) -> &mut S {
-        &mut self.store
-    }
-}
-
-macro_rules! impl_add {
-    ($cv:ident $add:ident $add_pair:ident $add_chunk:ident $arg:ident $elem:ident $toa_pair:ident $toa_chunk:ident) => {
-        fn $add(&self, $arg: &[$elem]) -> Result<$cv, S::Error> {
-            if $arg.len() <= CHUNK_SIZE as usize / mem::size_of::<$elem>() {
-                self.$add_chunk($arg)
-            } else {
-                let mut stack = arrayvec::ArrayVec::<$cv, { 128 - 13 }>::new();
-                let mut it = $arg.chunks_exact(CHUNK_SIZE as usize / mem::size_of::<$elem>());
-                for (i, y) in (&mut it).enumerate() {
-                    let mut y = self.$add_chunk(y)?;
-                    let mut len = 1 << 16;
-                    while stack.len() >= (i + 1).count_ones() as usize {
-                        let x = stack.pop().expect("at least one element");
-                        len <<= 1;
-                        y = self.$add_pair(&x, &y, len)?;
-                    }
-                    stack.push(y);
-                }
-
-                let mut y = if !it.remainder().is_empty() {
-                    self.$add_chunk(it.remainder())?
-                } else {
-                    stack.pop().expect("at least one element")
-                };
-                let len = ($arg.len() as u128) * 8;
-                let d = len.next_power_of_two().trailing_zeros();
-                let d = d as usize - stack.len();
-                let mut mask = !((1 << d) - 1);
-                while let Some(x) = stack.pop() {
-                    mask <<= 1;
-                    y = self.$add_pair(&x, &y, len & !mask)?;
-                }
-                Ok(y)
-            }
-        }
-
-        fn $add_pair(&self, x: &$cv, y: &$cv, len: u128) -> Result<$cv, S::Error> {
-            let cv = toa_core::$toa_pair(*x, *y, len);
-            let xy = [*x.as_bytes(), *y.as_bytes()];
-            self.store.add_pair(cv.as_bytes(), &bytemuck::cast(xy))?;
-            Ok(cv)
-        }
-    };
-}
-
-impl<S> Toa<S>
-where
-    S: ToaStore,
-{
-    pub fn add(&self, data: &[u8], refs: &[Hash]) -> Result<Hash, S::Error> {
-        let root = Root {
-            data: self.add_data(data)?,
-            refs: self.add_refs(refs)?,
-            data_len: (data.len() as u128) << 3,
-            refs_len: (refs.len() as u128) << 8,
+impl Toa<Blob<fs::File>> {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let mut map = Map::default();
+        let f = |x| {
+            let mut p = PathBuf::from(path);
+            p.push(x);
+            p
         };
-        let hash = toa_core::root_hash(root.data, root.refs);
-        self.store
-            .add_root(hash.as_bytes(), bytemuck::cast_ref(&root))?;
-        Ok(hash)
+        let data = BlobsTyped::open_at(&f("data"), &mut map, Domain::Data)?;
+        let refs = BlobsTyped::open_at(&f("refs"), &mut map, Domain::Refs)?;
+        Ok(Self { data, refs, map })
     }
 
-    pub fn contains_key(&self, key: &Hash) -> Result<bool, S::Error> {
-        self.store.has_root(key.as_bytes())
+    pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
+        Ok(self.map.contains_key(key))
     }
 
-    pub fn get<'a>(&'a self, key: &Hash) -> Result<Option<Object<&'a Self>>, S::Error> {
-        let root = self.store.get_root(key.as_bytes())?;
-        let Some(root) = root else {
+    pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, Blob<fs::File>>>> {
+        let Some(x) = Typed::new(self, *key) else {
             return Ok(None);
         };
-        let root = bytemuck::cast(root);
-        Ok(Some(Object { toa: self, root }))
+        let x = match x.location.ty().1 {
+            Domain::Data => Object::Data(Data(x)),
+            Domain::Refs => Object::Refs(Refs(x)),
+        };
+        Ok(Some(x))
     }
 
-    pub fn iter_with<F>(&self, mut f: F) -> Result<(), S::Error>
+    pub fn iter_with<F>(&self, mut f: F) -> io::Result<()>
     where
         F: FnMut(Hash) -> bool,
     {
-        self.store.iter_roots_with(&mut |x| {
-            (f)(Hash::from_bytes(*x));
+        self.map.keys().for_each(|x| {
+            f(*x);
+        });
+        Ok(())
+    }
+
+    pub fn add_data(&mut self, data: &[u8]) -> io::Result<Hash> {
+        self.data.add(Domain::Data, data, &mut self.map)
+    }
+
+    pub fn add_refs(&mut self, refs: &[Hash]) -> io::Result<Hash> {
+        self.refs
+            .add(Domain::Refs, bytemuck::cast_slice(refs), &mut self.map)
+    }
+}
+
+impl Blob<fs::File> {
+    /// # Returns
+    ///
+    /// Offset.
+    fn append(&mut self, data: &[u8]) -> io::Result<u64> {
+        self.append_many(&[data])
+    }
+
+    /// # Returns
+    ///
+    /// Offset.
+    fn append_many(&mut self, data: &[&[u8]]) -> io::Result<u64> {
+        let o = self.len;
+        let mut len = 0;
+        for x in data {
+            self.file.write_all(x)?;
+            len += x.len() as u64;
+        }
+        let pad = 0u64.wrapping_sub(len) & 7;
+        self.file.write_all(&[0; 8][..pad as usize])?;
+        self.len += len + pad;
+        debug_assert!(self.len % 8 == 0, "{}", self.len);
+        Ok(o)
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)
+    }
+}
+
+impl BlobsTyped<Blob<fs::File>> {
+    fn open_at(path: &Path, map: &mut Map, domain: Domain) -> io::Result<Self> {
+        let f = |name: &str| -> io::Result<_> {
+            let mut path = PathBuf::from(path);
+            path.push(name);
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(path)
+                .map(|file| Blob { file, len: 0 })
+        };
+        fs::create_dir(path)?;
+        let mut s = Self {
+            chunks_full: f("chunks_full.bin")?,
+            chunks_partial: f("chunks_partial.bin")?,
+            pairs: f("pairs.bin")?,
+        };
+        s.load(map, domain)?;
+        Ok(s)
+    }
+
+    fn add(&mut self, domain: Domain, data: &[u8], map: &mut Map) -> io::Result<Hash> {
+        if data.len() <= CHUNK_SIZE as usize {
+            self.add_chunk(domain, data, map)
+        } else {
+            let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
+            let mut it = data.chunks_exact(CHUNK_SIZE as usize);
+            for (i, y) in (&mut it).enumerate() {
+                let mut y = self.add_chunk(domain, y, map)?;
+                let mut len = 1 << 16;
+                while stack.len() >= (i + 1).count_ones() as usize {
+                    let x = stack.pop().expect("at least one element");
+                    len <<= 1;
+                    y = self.add_pair(domain, &x, &y, len, map)?;
+                }
+                stack.push(y);
+            }
+
+            let mut y = if !it.remainder().is_empty() {
+                self.add_chunk(domain, it.remainder(), map)?
+            } else {
+                stack.pop().expect("at least one element")
+            };
+            let len = (data.len() as u128) * 8;
+            let d = len.next_power_of_two().trailing_zeros();
+            let d = d as usize - stack.len();
+            let mut mask = !((1 << d) - 1);
+            while let Some(x) = stack.pop() {
+                mask <<= 1;
+                y = self.add_pair(domain, &x, &y, len & !mask, map)?;
+            }
+            Ok(y)
+        }
+    }
+
+    fn add_chunk(&mut self, domain: Domain, chunk: &[u8], map: &mut Map) -> io::Result<Hash> {
+        let key = toa_core::hash_chunk(domain, chunk);
+        if let Entry::Vacant(e) = map.entry(key) {
+            e.insert(self.store_chunk(domain, chunk)?);
+        }
+        Ok(key)
+    }
+
+    fn add_pair(
+        &mut self,
+        domain: Domain,
+        x: &Hash,
+        y: &Hash,
+        len: u128,
+        map: &mut Map,
+    ) -> io::Result<Hash> {
+        let key = toa_core::hash_pair(*x, *y, len);
+        if let Entry::Vacant(e) = map.entry(key) {
+            e.insert(self.store_pair(domain, x, y, len)?);
+        }
+        Ok(key)
+    }
+
+    fn store_chunk(&mut self, domain: Domain, bytes: &[u8]) -> io::Result<FileRef> {
+        if let Ok(bytes) = bytes.try_into() {
+            self.store_chunk_full(domain, bytes)
+        } else {
+            self.store_chunk_partial(domain, bytes)
+        }
+    }
+
+    fn store_chunk_full(
+        &mut self,
+        domain: Domain,
+        bytes: &[u8; CHUNK_SIZE as usize],
+    ) -> io::Result<FileRef> {
+        let offt = self.chunks_full.append(bytes)?;
+        Ok(FileRef::new_chunk_full(domain, offt))
+    }
+
+    fn store_chunk_partial(&mut self, domain: Domain, bytes: &[u8]) -> io::Result<FileRef> {
+        assert!(bytes.len() < CHUNK_SIZE as usize, "partial chunk too large");
+        let hdr = u16::try_from(bytes.len() << 3)
+            .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
+        let offt = self
+            .chunks_partial
+            .append_many(&[&hdr.to_le_bytes(), bytes])?;
+        Ok(FileRef::new_chunk_partial(domain, offt))
+    }
+
+    fn store_pair(&mut self, domain: Domain, x: &Hash, y: &Hash, len: u128) -> io::Result<FileRef> {
+        let mut buf = [0; 80];
+        buf[00..32].copy_from_slice(x.as_bytes());
+        buf[32..64].copy_from_slice(y.as_bytes());
+        buf[64..].copy_from_slice(&len.to_le_bytes());
+        let offt = self.pairs.append(&buf)?;
+        Ok(FileRef::new_pair(domain, offt))
+    }
+
+    fn load(&mut self, map: &mut Map, domain: Domain) -> io::Result<()> {
+        self.load_chunks_full(map, domain)?;
+        self.load_chunks_partial(map, domain)?;
+        self.load_pairs(map, domain)?;
+        Ok(())
+    }
+
+    fn load_chunks_full(&mut self, map: &mut Map, domain: Domain) -> io::Result<()> {
+        let mut buf = vec![0; CHUNK_SIZE as usize];
+        while read_exact_or_none(&mut self.chunks_full.file, &mut buf)? {
+            let key = toa_core::hash_chunk(domain, &buf);
+            map.insert(key, FileRef::new_chunk_full(domain, self.chunks_full.len));
+            self.chunks_full.len += buf.len() as u64;
+        }
+        Ok(())
+    }
+
+    fn load_chunks_partial(&mut self, map: &mut Map, domain: Domain) -> io::Result<()> {
+        let mut reader = io::BufReader::new(&mut self.chunks_partial.file);
+        let mut buf = vec![0; CHUNK_SIZE as usize];
+        let mut len = &mut [0; 2];
+        while read_exact_or_none(&mut reader, len)? {
+            let len = u16::from_le_bytes(*len);
+            reader.read_exact(&mut buf[..usize::from(len)])?;
+            let key = toa_core::hash_chunk(domain, &buf[..usize::from(len)]);
+            map.insert(
+                key,
+                FileRef::new_chunk_partial(domain, self.chunks_partial.len),
+            );
+            self.chunks_partial.len += 2 + u64::from(len);
+        }
+        Ok(())
+    }
+
+    fn load_pairs(&mut self, map: &mut Map, domain: Domain) -> io::Result<()> {
+        let mut reader = io::BufReader::new(&mut self.chunks_partial.file);
+        let mut buf = [0; 80];
+        while read_exact_or_none(&mut reader, &mut buf)? {
+            let ([x, y], len) = bytes_to_pair(buf);
+            let key = toa_core::hash_pair(x, y, len);
+            map.insert(key, FileRef::new_chunk_partial(domain, self.pairs.len));
+            self.pairs.len += buf.len() as u64;
+        }
+        Ok(())
+    }
+}
+
+impl FileRef {
+    const TY_CHUNK_FULL: u64 = 2;
+    const TY_CHUNK_PARTIAL: u64 = 4;
+    const TY_PAIR: u64 = 6;
+
+    const TY_DATA: u64 = 0;
+    const TY_REFS: u64 = 1;
+
+    fn new(offset: u64, ty: u64, domain: Domain) -> Self {
+        assert!(ty < 8);
+        assert!(offset % 8 == 0);
+        Self(offset | ty | u64::from(domain == Domain::Refs))
+    }
+
+    fn new_pair(domain: Domain, offset: u64) -> Self {
+        Self::new(offset, Self::TY_PAIR, domain)
+    }
+
+    fn new_chunk_full(domain: Domain, offset: u64) -> Self {
+        Self::new(offset, Self::TY_CHUNK_FULL, domain)
+    }
+
+    fn new_chunk_partial(domain: Domain, offset: u64) -> Self {
+        Self::new(offset, Self::TY_CHUNK_PARTIAL, domain)
+    }
+
+    fn ty(&self) -> (u64, Domain) {
+        let domain = if self.0 & 1 == 0 {
+            Domain::Data
+        } else {
+            Domain::Refs
+        };
+        (self.0 & 6, domain)
+    }
+
+    fn offset(&self) -> u64 {
+        self.0 & !7
+    }
+}
+
+impl<'a, T> Typed<'a, T> {
+    fn new(toa: &'a Toa<T>, key: Hash) -> Option<Self> {
+        let location = *toa.map.get(&key)?;
+        let blobs = match location.ty().1 {
+            Domain::Data => &toa.data,
+            Domain::Refs => &toa.refs,
+        };
+        Some(Self {
+            blobs,
+            map: &toa.map,
+            location,
         })
     }
 
-    impl_add!(DataCv add_data add_data_pair add_data_chunk data u8   data_pair_cv data_chunk_cv);
-    impl_add!(RefsCv add_refs add_refs_pair add_refs_chunk refs Hash refs_pair_cv refs_chunk_cv);
-
-    fn add_data_chunk(&self, chunk: &[u8]) -> Result<DataCv, S::Error> {
-        let cv = toa_core::data_chunk_cv(chunk);
-        self.store.add_chunk(cv.as_bytes(), chunk)?;
-        Ok(cv)
-    }
-
-    fn add_refs_chunk(&self, chunk: &[Hash]) -> Result<RefsCv, S::Error> {
-        let refs = Hash::slice_as_bytes(chunk).as_flattened();
-        let cv = toa_core::refs_chunk_cv(chunk);
-        self.store.add_chunk(cv.as_bytes(), refs)?;
-        Ok(cv)
+    fn with_key(&self, key: Hash) -> Option<Self> {
+        Some(Self {
+            location: *self.map.get(&key)?,
+            ..*self
+        })
     }
 }
 
-impl<'t, S> Object<&'t Toa<S>>
-where
-    S: ToaStore,
-{
-    /// Size of data blob **in bits**.
-    pub fn data_len(&self) -> u128 {
-        self.root.data_len
-    }
-
-    /// Size of references blob **in bits**.
-    pub fn refs_len(&self) -> u128 {
-        self.root.refs_len
-    }
-
-    pub fn data(&self) -> Data<'t, S> {
-        Data::new(self.toa, self.root.data, (self.root.data_len + 7) >> 3)
-    }
-
-    pub fn refs(&self) -> Refs<'t, S> {
-        Refs::new(self.toa, self.root.refs, (self.root.refs_len + 255) >> 8)
-    }
-}
-
-macro_rules! impl_cv {
-    ($cv:ident $root:ident $pair:ident $chunk:ident $ty:ident $docname:literal) => {
-        pub enum $root<'a, S> {
-            Pair($pair<'a, S>),
-            Chunk($chunk<'a, S>),
-        }
-
-        pub struct $pair<'a, S> {
-            toa: &'a Toa<S>,
-            root: $cv,
-            len: u128,
-        }
-
-        pub struct $chunk<'a, S> {
-            toa: &'a Toa<S>,
-            root: $cv,
-        }
-
-        impl<'t, S> $root<'t, S>
-        where
-            S: ToaStore,
-        {
-            pub fn read(
-                &self,
-                offset: u128,
-                buf: &mut [$ty],
-            ) -> Result<usize, ReadError<S::Error>> {
-                match self {
-                    Self::Pair(x) => x.read(offset, buf),
-                    Self::Chunk(x) => x.read(offset, buf),
-                }
-            }
-
-            pub fn read_exact(
-                &self,
-                offset: u128,
-                buf: &mut [$ty],
-            ) -> Result<(), ReadExactError<S::Error>> {
-                if self.len().saturating_sub(offset) < buf.len() as u128 {
-                    return Err(ReadExactError::Truncated);
-                }
-                self.read(offset, buf).map(|_| ()).map_err(|x| x.into())
-            }
-
-            pub fn read_array<const N: usize>(
-                &self,
-                offset: u128,
-            ) -> Result<[$ty; N], ReadExactError<S::Error>> {
-                let mut buf = [<$ty>::default(); N];
-                self.read_exact(offset, &mut buf)?;
-                Ok(buf)
-            }
-
-            #[doc = "Size of data blob **in "]
-            #[doc = $docname]
-            #[doc = "** (rounded up)."]
-            pub fn len(&self) -> u128 {
-                match self {
-                    Self::Chunk(x) => x.len(),
-                    Self::Pair(x) => x.len(),
-                }
-            }
-
-            fn new(toa: &'t Toa<S>, root: $cv, len: u128) -> Self {
-                if len <= (CHUNK_SIZE / mem::size_of::<$ty>() as u128) {
-                    Self::Chunk($chunk { toa, root })
-                } else {
-                    Self::Pair($pair { toa, root, len })
-                }
-            }
-        }
-
-        impl<'t, S> $pair<'t, S>
-        where
-            S: ToaStore,
-        {
-            pub fn read(
-                &self,
-                offset: u128,
-                buf: &mut [$ty],
-            ) -> Result<usize, ReadError<S::Error>> {
-                if buf.is_empty() || offset >= self.len {
-                    return Ok(0);
-                }
-                let x = self
-                    .toa
-                    .store
-                    .get_pair(self.root.as_bytes())
-                    .map_err(ReadError::Store)?
-                    .ok_or(ReadError::MissingPair)?;
-                let y = $cv::from_bytes(x[32..].try_into().unwrap());
-                let x = $cv::from_bytes(x[..32].try_into().unwrap());
-                let xl = self.len.next_power_of_two() >> 1;
-                let yl = self.len - xl;
-                let x = $root::new(self.toa, x, xl);
-                let y = $root::new(self.toa, y, yl);
-                let n = xl.saturating_sub(offset).min(buf.len() as u128) as usize;
-                let (xb, yb) = buf.split_at_mut(n);
-                Ok(x.read(offset, xb)? + y.read(offset.saturating_sub(xl), yb)?)
-            }
-
-            fn len(&self) -> u128 {
-                self.len
-            }
-        }
-
-        impl<'t, S> $chunk<'t, S>
-        where
-            S: ToaStore,
-        {
-            pub fn read(
-                &self,
-                offset: u128,
-                buf: &mut [$ty],
-            ) -> Result<usize, ReadError<S::Error>> {
-                let offset = offset * mem::size_of::<$ty>() as u128;
-                if offset >= CHUNK_SIZE {
-                    return Ok(0);
-                }
-                let buf = bytemuck::cast_slice_mut(buf);
-                let x = self
-                    .toa
-                    .store
-                    .get_chunk(self.root.as_bytes())
-                    .map_err(ReadError::Store)?
-                    .ok_or(ReadError::MissingChunk)?;
-                let x = &x.as_ref()[offset as usize..];
-                let n = x.len().min(buf.len());
-                buf[..n].copy_from_slice(&x[..n]);
-                Ok(n / mem::size_of::<$ty>())
-            }
-
-            fn len(&self) -> u128 {
-                self.toa
-                    .store
-                    .get_chunk(self.root.as_bytes())
-                    .unwrap_or(None)
-                    .map_or(0, |x| (x.as_ref().len() / mem::size_of::<$ty>()) as u128)
-            }
-        }
-    };
-}
-
-impl_cv!(DataCv Data DataPair DataChunk u8   "bytes");
-impl_cv!(RefsCv Refs RefsPair RefsChunk Hash "hashes");
-
-impl<T> ToaKvStore<T>
-where
-    T: toa_kv::ToaKv,
-{
-    fn get<'a>(&'a self, namespace: u8, key: &[u8; 32]) -> Result<Option<T::Get<'a>>, T::Error> {
-        let mut k = [0; 33];
-        k[0] = namespace;
-        k[1..].copy_from_slice(key);
-        self.0.get(&k)
-    }
-
-    fn set<'a>(&'a self, namespace: u8, key: &[u8; 32], value: &[u8]) -> Result<(), T::Error> {
-        let mut k = [0; 33];
-        k[0] = namespace;
-        k[1..].copy_from_slice(key);
-        if self.0.has(key)? {
-            Ok(())
-        } else {
-            self.0.set(&k, value)
+impl<'a> Typed<'a, Blob<fs::File>> {
+    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
+        match self.location.ty().0 {
+            FileRef::TY_CHUNK_FULL => self.read_chunk_full(offset, buf),
+            FileRef::TY_CHUNK_PARTIAL => self.read_chunk_partial(offset, buf),
+            FileRef::TY_PAIR => self.read_pair(offset, buf),
+            _ => unreachable!("invalid FileRef type"),
         }
     }
-}
 
-impl<T> ToaStore for ToaKvStore<T>
-where
-    T: toa_kv::ToaKv,
-{
-    type Error = ToaKvStoreError<T::Error>;
-    type Chunk<'a>
-        = T::Get<'a>
-    where
-        Self: 'a;
-
-    fn add_chunk(&self, key: &[u8; 32], value: &[u8]) -> Result<(), Self::Error> {
-        self.set(NAMESPACE_CHUNKS, key, value)
-            .map_err(ToaKvStoreError::Kv)
-    }
-    fn add_pair(&self, key: &[u8; 32], value: &[u8; 64]) -> Result<(), Self::Error> {
-        self.set(NAMESPACE_PAIRS, key, value)
-            .map_err(ToaKvStoreError::Kv)
-    }
-    fn add_root(&self, key: &[u8; 32], value: &[u8; 96]) -> Result<(), Self::Error> {
-        self.set(NAMESPACE_ROOTS, key, value)
-            .map_err(ToaKvStoreError::Kv)
+    pub fn read_exact(
+        &self,
+        offset: u128,
+        buf: &mut [u8],
+    ) -> Result<(), ReadExactError<io::Error>> {
+        let n = self.read(offset, buf)?;
+        if n != buf.len() {
+            return Err(ReadExactError::Truncated);
+        }
+        Ok(())
     }
 
-    fn get_chunk<'a>(&'a self, key: &[u8; 32]) -> Result<Option<Self::Chunk<'a>>, Self::Error> {
-        self.get(NAMESPACE_CHUNKS, key).map_err(ToaKvStoreError::Kv)
-    }
-    fn get_pair(&self, key: &[u8; 32]) -> Result<Option<[u8; 64]>, Self::Error> {
-        self.get(NAMESPACE_PAIRS, key)
-            .map_err(ToaKvStoreError::Kv)?
-            .map(|x| <[u8; 64]>::try_from(x.as_ref()))
-            .transpose()
-            .map_err(|_| ToaKvStoreError::InvalidPair)
-    }
-    fn get_root(&self, key: &[u8; 32]) -> Result<Option<[u8; 96]>, Self::Error> {
-        self.get(NAMESPACE_ROOTS, key)
-            .map_err(ToaKvStoreError::Kv)?
-            .map(|x| <[u8; 96]>::try_from(x.as_ref()))
-            .transpose()
-            .map_err(|_| ToaKvStoreError::InvalidRoot)
+    pub fn read_array<const N: usize>(
+        &self,
+        offset: u128,
+    ) -> Result<[u8; N], ReadExactError<io::Error>> {
+        let mut buf = [0; N];
+        self.read_exact(offset, &mut buf)?;
+        Ok(buf)
     }
 
-    fn iter_roots_with(&self, f: &mut dyn FnMut(&[u8; 32])) -> Result<(), Self::Error> {
-        self.0
-            .iter_prefix_with(&[NAMESPACE_ROOTS], &mut |x| {
-                let x: &[u8; 32] = x.as_ref()[1..].try_into().unwrap();
-                (f)(x)
-            })
-            .map_err(ToaKvStoreError::Kv)
+    pub fn len_bits(&self) -> io::Result<u128> {
+        match self.location.ty().0 {
+            FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
+            FileRef::TY_CHUNK_PARTIAL => {
+                let len = &mut [0; 2];
+                self.blobs
+                    .chunks_partial
+                    .read_at(self.location.offset(), len)?;
+                Ok(u128::from(u16::from_le_bytes(*len)))
+            }
+            FileRef::TY_PAIR => {
+                let len = &mut [0; 16];
+                self.blobs.pairs.read_at(self.location.offset() + 64, len)?;
+                Ok(u128::from_le_bytes(*len))
+            }
+            _ => unreachable!("invalid FileRef type"),
+        }
     }
 
-    fn size_on_disk(&self) -> Result<u128, Self::Error> {
-        self.0.size_on_disk().map_err(ToaKvStoreError::Kv)
+    fn read_pair(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut pair = [0; 80];
+        self.blobs
+            .pairs
+            .read_at(self.location.offset(), &mut pair)
+            .map_err(ReadError::Io)?;
+        let ([x, y], len) = bytes_to_pair(pair);
+
+        let len = align8(len) >> 3;
+        if offset >= len {
+            return Ok(0);
+        }
+
+        let x = self.with_key(x).unwrap();
+        let y = self.with_key(y).unwrap();
+        let xl = len.next_power_of_two() >> 1;
+        let yl = len - xl;
+        let n = xl.saturating_sub(offset).min(buf.len() as u128) as usize;
+        let (xb, yb) = buf.split_at_mut(n);
+        Ok(x.read(offset, xb)? + y.read(offset.saturating_sub(xl), yb)?)
+    }
+
+    fn read_chunk_full(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
+        let len = buf.len().min(CHUNK_SIZE.saturating_sub(offset) as usize);
+        let buf = &mut buf[..len];
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let offt = (offset % CHUNK_SIZE) as u64;
+        self.blobs
+            .chunks_full
+            .read_at(self.location.offset() + offt, buf)
+            .map_err(ReadError::Io)?;
+        Ok(len)
+    }
+
+    fn read_chunk_partial(
+        &self,
+        offset: u128,
+        buf: &mut [u8],
+    ) -> Result<usize, ReadError<io::Error>> {
+        let nb = &mut [0; 2];
+        self.blobs
+            .chunks_partial
+            .read_at(self.location.offset(), nb)
+            .map_err(ReadError::Io)?;
+        let n = usize::from(u16::from_le_bytes(*nb));
+        let n = (align8(n) >> 3).min(buf.len());
+        let buf = &mut buf[..n];
+        self.blobs
+            .chunks_partial
+            .read_at(self.location.offset() + 2, buf)
+            .map_err(ReadError::Io)?;
+        Ok(n)
     }
 }
 
@@ -452,66 +486,91 @@ impl<T> From<ReadError<T>> for ReadExactError<T> {
         match x {
             ReadError::MissingChunk => Self::MissingChunk,
             ReadError::MissingPair => Self::MissingPair,
-            ReadError::Store(x) => Self::Store(x),
+            ReadError::Io(x) => Self::Io(x),
         }
     }
+}
+
+fn align8<T>(x: T) -> T
+where
+    T: ops::Add<Output = T> + ops::Not<Output = T> + ops::BitAnd<Output = T> + From<u8>,
+{
+    (x + T::from(7)) & !T::from(7)
+}
+
+fn read_exact_or_none<T>(io: &mut T, buf: &mut [u8]) -> io::Result<bool>
+where
+    T: Read,
+{
+    match io.read_exact(buf) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => return Err(e),
+    }
+}
+
+fn advance8(x: &mut u64, y: u64) -> u64 {
+    let y = align8(y);
+    let z = *x;
+    *x += y;
+    z
+}
+
+fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
+    let x = Hash::from_slice(&bytes[0..32]);
+    let y = Hash::from_slice(&bytes[32..64]);
+    let len = u128::from_le_bytes(bytes[64..].try_into().expect("16 bytes"));
+    ([x, y], len)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{cell::RefCell, collections::BTreeMap};
+    use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-    type Toa = super::Toa<ToaKvStore<RefCell<BTreeMap<Box<[u8]>, Box<[u8]>>>>>;
+    type Toa = super::Toa<Blob<fs::File>>;
 
-    struct TestBuild {
-        builder: Toa,
+    struct Test {
+        toa: Toa,
+        tempdir: tempfile::TempDir,
     }
 
-    struct TestRead {
-        reader: Toa,
-    }
-
-    impl TestBuild {
-        fn finish(self) -> TestRead {
-            TestRead {
-                reader: self.builder,
-            }
-        }
-
+    impl Test {
         fn add(&mut self, data: &[u8]) -> Hash {
-            let key = self.builder.add(data, &[]).expect("add failed");
-            assert_eq!(key, toa_core::hash(data, &[]));
+            let key = self.toa.add_data(data).expect("add_data failed");
+            assert_eq!(key, toa_core::hash(Domain::Data, data));
             key
         }
-    }
 
-    impl TestRead {
         fn assert_eq(&self, key: &Hash, value: &[u8]) {
             let o = self
-                .reader
+                .toa
                 .get(&key)
                 .expect("get failed")
                 .expect("object does not exist");
-            assert_eq!(o.data_len(), (value.len() as u128) << 3);
+            let o = match o {
+                Object::Data(o) => o,
+                Object::Refs(_) => panic!("expected data, got refs"),
+            };
+            assert_eq!(o.0.len_bits().unwrap(), (value.len() as u128) << 3);
             let x = &mut *vec![0; value.len()];
-            let n = o.data().read(0, x).expect("read failed");
+            let n = o.0.read(0, x).expect("read failed");
             assert_eq!(n, value.len());
             let f = String::from_utf8_lossy;
             assert!(x == value, "{:?} <> {:?}", f(&x), f(value));
         }
     }
 
-    fn init() -> TestBuild {
-        let builder = Toa::new(Default::default());
-        TestBuild { builder }
+    fn init() -> Test {
+        let tempdir = tempfile::tempdir().expect("failed to create tempdir");
+        let toa = Toa::open(tempdir.path()).expect("toa init failed");
+        Test { toa, tempdir }
     }
 
     #[test]
     fn insert_one_empty() {
         let mut s = init();
         let key = s.add(b"");
-        let s = s.finish();
         s.assert_eq(&key, &[]);
     }
 
@@ -519,7 +578,6 @@ mod test {
     fn insert_one() {
         let mut s = init();
         let key = s.add(b"Hello, world!");
-        let s = s.finish();
         s.assert_eq(&key, b"Hello, world!");
     }
 
@@ -528,7 +586,6 @@ mod test {
         let mut s = init();
         let a = s.add(b"Hello, world!");
         let b = s.add(b"Greetings!");
-        let s = s.finish();
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Greetings!");
     }
@@ -538,7 +595,6 @@ mod test {
         let mut s = init();
         let f = |x| format!("A number {x}").into_bytes();
         let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
-        let s = s.finish();
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));
@@ -551,7 +607,6 @@ mod test {
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
         let k = s.add(&v);
-        let s = s.finish();
         s.assert_eq(&k, &v);
     }
 
@@ -562,7 +617,6 @@ mod test {
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
         let k = s.add(&v);
-        let s = s.finish();
         s.assert_eq(&k, &v);
     }
 
@@ -573,7 +627,6 @@ mod test {
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
         let k = s.add(&v);
-        let s = s.finish();
         s.assert_eq(&k, &v);
     }
 
@@ -582,7 +635,6 @@ mod test {
         let mut s = init();
         let v = vec![0; 1 << 20];
         let k = s.add(&v);
-        let s = s.finish();
         s.assert_eq(&k, &v);
     }
 
@@ -593,7 +645,6 @@ mod test {
         let keys = (0..=255)
             .map(|x| (x, s.add(&vec![x; n])))
             .collect::<Vec<_>>();
-        let s = s.finish();
         keys.iter().for_each(|(x, k)| s.assert_eq(k, &vec![*x; n]));
     }
 }
