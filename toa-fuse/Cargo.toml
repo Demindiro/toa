@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-toa    = { path = "../toa"   , features = ["std"] }
-toa-kv = { path = "../toa-kv", features = ["sled"] }
+toa    = { path = "../toa"   , features = [] }
 toa-unix = { path = "../toa-unix" }
 env_logger = "0.11.8"
 fuser = "0.16.0"
