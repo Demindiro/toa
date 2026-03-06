@@ -396,6 +396,18 @@ impl FileRef {
     }
 }
 
+impl<'a, T> Object<'a, T> {
+    pub fn into_data(self) -> Option<Data<'a, T>> {
+        let Self::Data(x) = self else { return None };
+        Some(x)
+    }
+
+    pub fn into_refs(self) -> Option<Refs<'a, T>> {
+        let Self::Refs(x) = self else { return None };
+        Some(x)
+    }
+}
+
 impl<'a, T> Typed<'a, T> {
     fn new(toa: &'a Toa<T>, key: Hash) -> Option<Self> {
         let location = *toa.map.get(&key)?;
