@@ -2,7 +2,7 @@
 
 pub use toa_core::{self as core, Hash};
 
-use ::core::{mem, ops};
+use ::core::{fmt, mem, ops};
 use std::{
     collections::btree_map::{BTreeMap, Entry},
     fs,
@@ -327,25 +327,27 @@ impl BlobsTyped<Blob<fs::File>> {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut len = &mut [0; 2];
         while read_exact_or_none(&mut reader, len)? {
-            let len = u16::from_le_bytes(*len);
+            let len = u16::from_le_bytes(*len) >> 3;
             reader.read_exact(&mut buf[..usize::from(len)])?;
             let key = toa_core::hash_chunk(domain, &buf[..usize::from(len)]);
             map.insert(
                 key,
                 FileRef::new_chunk_partial(domain, self.chunks_partial.len),
             );
-            self.chunks_partial.len += 2 + u64::from(len);
+            let pad = -(2 + len as i64) & 7;
+            reader.seek(io::SeekFrom::Current(pad))?;
+            self.chunks_partial.len += align8(2 + u64::from(len));
         }
         Ok(())
     }
 
     fn load_pairs(&mut self, map: &mut Map, domain: Domain) -> io::Result<()> {
-        let mut reader = io::BufReader::new(&mut self.chunks_partial.file);
+        let mut reader = io::BufReader::new(&mut self.pairs.file);
         let mut buf = [0; 80];
         while read_exact_or_none(&mut reader, &mut buf)? {
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_core::hash_pair(x, y, len);
-            map.insert(key, FileRef::new_chunk_partial(domain, self.pairs.len));
+            map.insert(key, FileRef::new_pair(domain, self.pairs.len));
             self.pairs.len += buf.len() as u64;
         }
         Ok(())
@@ -541,6 +543,13 @@ impl<T> From<ReadError<T>> for ReadExactError<T> {
     }
 }
 
+impl fmt::Debug for FileRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (ty, domain) = self.ty();
+        write!(f, "{ty:?}:{domain:?}:{}", self.offset())
+    }
+}
+
 fn align8<T>(x: T) -> T
 where
     T: ops::Add<Output = T> + ops::Not<Output = T> + ops::BitAnd<Output = T> + From<u8>,
@@ -696,5 +705,22 @@ mod test {
             .map(|x| (x, s.add(&vec![x; n])))
             .collect::<Vec<_>>();
         keys.iter().for_each(|(x, k)| s.assert_eq(k, &vec![*x; n]));
+    }
+
+    #[test]
+    fn reload() {
+        let mut s = init();
+        let a = s.add(b"Hello, world!");
+        let b = s.add(b"Hello, planet!");
+        let c = s.add(&vec![b'x'; 1 << 15]);
+        let Test { toa, tempdir } = s;
+        dbg!(&toa.map);
+        let _ = toa;
+        let toa = Toa::open(tempdir.path()).expect("reload");
+        dbg!(&toa.map);
+        let s = Test { toa, tempdir };
+        s.assert_eq(&a, b"Hello, world!");
+        s.assert_eq(&b, b"Hello, planet!");
+        s.assert_eq(&c, &vec![b'x'; 1 << 15]);
     }
 }
