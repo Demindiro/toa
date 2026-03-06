@@ -37,6 +37,8 @@ where
     dev.set_meta("unix.root", &root_key);
     dev.save_root()?;
 
+    stat.summarize(&dev);
+
     Ok(())
 }
 

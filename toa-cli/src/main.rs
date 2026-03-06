@@ -68,7 +68,7 @@ impl Toa {
         Ok(Self { inner, meta })
     }
 
-    fn get(&self, key: &Hash) -> Result<toa::Object<toa::Blob<fs::File>>> {
+    fn get(&self, key: &Hash) -> Result<Object<'_, toa::Blob<fs::File>>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query store: {e:?}"))?
