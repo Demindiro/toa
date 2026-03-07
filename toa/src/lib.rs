@@ -219,8 +219,9 @@ impl BlobsTyped<Blob<fs::File>> {
             self.add_chunk(domain, data, map)
         } else {
             let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
-            let mut it = data.chunks_exact(CHUNK_SIZE as usize);
-            for (i, y) in (&mut it).enumerate() {
+            let split_n = ((data.len() - 1) & 0x1fff) + 1;
+            let (perfect, tail) = data.split_at(data.len() - split_n);
+            for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
                 let mut y = self.add_chunk(domain, y, map)?;
                 let mut len = 1 << 16;
                 while stack.len() >= (i + 1).count_ones() as usize {
@@ -231,18 +232,20 @@ impl BlobsTyped<Blob<fs::File>> {
                 stack.push(y);
             }
 
-            let mut y = if !it.remainder().is_empty() {
-                self.add_chunk(domain, it.remainder(), map)?
-            } else {
-                stack.pop().expect("at least one element")
-            };
-            let len = (data.len() as u128) * 8;
-            let d = len.next_power_of_two().trailing_zeros();
-            let d = d as usize - stack.len();
-            let mut mask = !((1 << d) - 1);
+            let len = (data.len() as u128) << 3;
+            let mut y = self.add_chunk(domain, tail, map)?;
+            let mut mask = 0xffff;
+            let top_i = len.wrapping_sub(1); // special-case for len=0
             while let Some(x) = stack.pop() {
-                mask <<= 1;
-                y = self.add_pair(domain, &x, &y, len & !mask, map)?;
+                debug_assert_eq!(
+                    (top_i & !mask).count_ones(),
+                    1 + stack.len() as u32,
+                    "length bits should correlate to stack depth"
+                );
+                let bits = (top_i & !mask).trailing_zeros();
+                mask = (1 << (bits + 1)) - 1;
+                let pair_len = (top_i & mask) + 1;
+                y = self.add_pair(domain, &x, &y, pair_len, map)?;
             }
             Ok(y)
         }
