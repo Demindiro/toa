@@ -43,10 +43,13 @@ impl TreeHasher {
     }
 
     fn update(&mut self, mut data: &[u8]) {
-        while let Some((mut y, n)) = self.chunk_update(data) {
+        while !data.is_empty() {
+            let (y, n) = self.chunk_update(data);
             data = &data[n..];
-            y = self.collapse(y);
-            self.stack.push(y);
+            if let Some(y) = y {
+                let y = self.collapse(y);
+                self.stack.push(y);
+            }
         }
     }
 
@@ -57,35 +60,38 @@ impl TreeHasher {
 
     fn finalize(mut self) -> Hash {
         let len = self.len << 3;
-        let mut y = if !self.chunk_is_empty() {
-            self.chunk_take()
-        } else if let Some(y) = self.stack.pop() {
-            y
-        } else {
-            return self.chunk_take();
-        };
-        let d = len.next_power_of_two().trailing_zeros();
-        let d = d as usize - self.stack.len();
-        let mut mask = !((1 << d) - 1);
+        let mut y = self.chunk_take();
+        let mut mask = 0xffff;
+        let top_i = len.wrapping_sub(1); // special-case for len=0
         while let Some(x) = self.stack.pop() {
-            mask <<= 1;
-            y = hash_pair(x, y, len & !mask);
+            debug_assert_eq!(
+                (top_i & !mask).count_ones(),
+                1 + self.stack.len() as u32,
+                "length bits should correlate to stack depth"
+            );
+            let bits = (top_i & !mask).trailing_zeros();
+            mask = (1 << (bits + 1)) - 1;
+            let pair_len = (top_i & mask) + 1;
+            y = hash_pair(x, y, pair_len);
         }
         y
     }
 
     /// # Returns
     ///
-    /// `None` if the chunk isn't full, otherwise CV and amount of bytes consumed.
-    fn chunk_update(&mut self, data: &[u8]) -> Option<(Hash, usize)> {
+    /// - `None` if the chunk isn't full, otherwise Hash of chunk.
+    /// - amount of bytes consumed.
+    fn chunk_update(&mut self, data: &[u8]) -> (Option<Hash>, usize) {
         if data.is_empty() {
-            return None;
+            return (None, 0);
         }
+        let hash = self.chunk_is_full().then(|| self.chunk_take());
         let n = data.len().min(CHUNK_SIZE - self.chunk_len());
+        debug_assert_ne!(n, 0, "some data should be consumed");
         let data = &data[..n];
         self.chunk.update(data);
         self.len += n as u128;
-        self.chunk_is_empty().then(|| (self.chunk_take(), n))
+        (hash, n)
     }
 
     fn chunk_take(&mut self) -> Hash {
@@ -99,17 +105,14 @@ impl TreeHasher {
         self.len as usize % CHUNK_SIZE
     }
 
-    fn chunk_pos(&self) -> u128 {
-        self.len / CHUNK_SIZE as u128
-    }
-
-    fn chunk_is_empty(&self) -> bool {
-        self.chunk_len() == 0
+    fn chunk_is_full(&self) -> bool {
+        // 8192 = 0 (mod 8192)
+        self.len > 0 && self.chunk_len() == 0
     }
 
     fn collapse(&mut self, mut y: Hash) -> Hash {
         let mut shift = 0;
-        while self.stack.len() >= self.chunk_pos().count_ones() as usize {
+        while self.stack.len() >= ((self.len - 1) & !0x1fff).count_ones() as usize {
             let x = self.stack.pop().expect("chunk_pos() >= 1");
             shift += 1;
             let len = ((CHUNK_SIZE as u128) << 3) << shift;
@@ -214,7 +217,7 @@ mod tests {
             })*
         };
     }
-    p!(p2 2 p3 3 p4 4 p5 5 p6 6 p7 7 p8 8 p9 9);
+    p!(p2 2 p3 3 p4 4 p5 5 p6 6 p7 7 p8 8 p9 9 p12 12);
 
     fn test_chunks<const N: usize, F>(f: F)
     where
@@ -327,6 +330,63 @@ mod tests {
         test_chunks(|[a, b, c, d, e, f, g, h, i]| {
             p9(p8(p4(p2(a, b), p2(c, d)), p4(p2(e, f), p2(g, h))), i)
         })
+    }
+
+    // Works fine because of TreeHasher::collapse()
+    #[test]
+    fn hash_tree_12_chunks() {
+        test_chunks(|[a, b, c, d, e, f, g, h, i, j, k, l]| {
+            let abcd = p4(p2(a, b), p2(c, d));
+            let efgh = p4(p2(e, f), p2(g, h));
+            let ijkl = p4(p2(i, j), p2(k, l));
+            p12(p8(abcd, efgh), ijkl)
+        })
+    }
+
+    // Doesn't work because there may be nodes missing between
+    // root node and right-most subtree.
+    // Apparently previous tests did not catch this despite expectations...
+    // or maybe they did and I was being totally silly. I do remember having
+    // issues before...
+    //
+    // In fact, there might be nodes missing at any level between subtrees
+    // on the right side. This will be annoying to test...
+    //
+    // ```
+    //                .----------o----------.
+    //        .------o------.                '
+    //    .--o--.         .--o--.         .--o--.
+    // .-o-.   .-o-.   .-o-.   .-o-.   .-o-.   .-o-.
+    // x   x   x   x   x   x   x   x   x   x   x   p
+    // ```
+    #[test]
+    fn hash_tree_11_chunks_plus_one_byte() {
+        let data = vec![b'x'; 11 * CHUNK_SIZE + 1];
+        let f2 = |i: usize, n: usize| {
+            let data = &data[CHUNK_SIZE * i..][..n];
+            let a = ts_hash(DF_DATA, &data[CHUNK_SIZE * 0..][..CHUNK_SIZE]);
+            let b = ts_hash(DF_DATA, &data[CHUNK_SIZE * 1..]);
+            let x = p(a, b, n);
+            assert_eq!(x, hash(Domain::Data, data));
+            x
+        };
+        let f4 = |i: usize, n: usize| {
+            let data = &data[CHUNK_SIZE * i..][..n];
+            let ln = n.next_power_of_two() >> 1;
+            let rn = n - ln;
+            let ab = f2(i + 0, ln);
+            let cd = f2(i + 2, rn);
+            let x = p(ab, cd, n);
+            assert_eq!(x, hash(Domain::Data, data));
+            x
+        };
+        let abcd = f4(0, 4 * CHUNK_SIZE);
+        let efgh = f4(4, 4 * CHUNK_SIZE);
+        let ijkl = f4(8, 3 * CHUNK_SIZE + 1);
+        assert_eq!(
+            p(p8(abcd, efgh), ijkl, data.len()),
+            hash(Domain::Data, &data)
+        );
     }
 
     #[test]

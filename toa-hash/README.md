@@ -139,3 +139,119 @@ to exist and objects in most programming languages map more directly to it,
 but *the latter approach does not require combining hashes* of two trees.
 At least with the approaches the author attempted, this saves a non-trivial
 amount of complexity.
+
+### Determining length of a pair
+
+This turns out to be tricky to get right, so the algorithm is described here.
+
+Recall that the tree is a full binary tree. It is not balanced however.
+Only the subtree on the left of the root is a perfect binary tree.
+A stack can be used to construct the parent hashes with limited memory.
+
+Determining when to collapse the stack is easy for a perfect binary tree
+with full leaf nodes: Count the number of 1 bits in the length, then
+keep merging values from the top of the stack until the stack depth
+matches the number of bits.
+
+Collapsing the stack for the right-most side of the tree is non-trivial and
+easy to get wrong, since levels may be skipped when collapsing the stack.
+Which levels to skip can be determined using only the total length.
+The main idea is to exploit the need to match every right subtree with a
+_perfect_ left subtree. A perfect subtree always has a length a power of 2.
+
+1. Set `mask = 0xffff`
+2. Apply `(not mask)` to the `top_i` (see below)
+3. Count the number of trailing zero bits
+4. Set `mask = ((1 << (bits + 1)) - 1)`
+5. Merge 2 top stack elements with `pair_len = len & mask`
+6. Repeat from (2) until stack is empty
+
+With this scheme there is another edge case however: trees where the final
+chunk is full. This should be handled by first subtracting epsilon from the
+length. i.e. `top_i = length - ε`.
+
+It is also important to **not eagerly commit full chunks to a perfect tree**.
+See case 4.000, 6.000 and 12.000 in the examples below.
+
+
+Examples:
+
+```
+floor(1.xxx - ε) = 1 = 0b1
+.-t-.   1
+x   p
+^   ^
+
+floor(2.xxx - ε) = 2 = 0b10
+  .---t-.    1
+.-o-.   '    0
+x   x   p
+  ^     ^
+
+floor(3.000 - ε) = 2 = 0b10
+  .---t-.     1
+.-o-.   '     0
+x   x   x
+  ^     ^
+
+floor(3.xxx - ε) = 3 = 0b11
+  .---t---.     1
+.-o-.   .-t-.   1
+x   x   x   p
+  ^     ^   ^
+
+floor(4.000 - ε) = 3 = 0b11
+  .---t---.     1
+.-o-.   .-t-.   1     !!!
+x   x   x   x
+  ^     ^   ^
+
+floor(4.xxx - ε) = 4 = 0b100
+      .-------t-.   1
+  .---o---.     |   0
+.-o-.   .-o-.   '   0
+x   x   x   x   p
+      ^       ^
+
+floor(5.xxx - ε) = 5 = 0b101
+      .-----t-----.         1
+  .---o---.       '         0
+.-o-.   .-o-.   .-t-.       1
+x   x   x   x   x   p
+      ^         ^   ^
+
+floor(6.000 - ε) = 5 = 0b101
+      .-------t---.         1
+  .---o---.       '         0
+.-o-.   .-o-.   .-t-.       1        !!!
+x   x   x   x   x   x
+      ^         ^   ^
+
+floor(6.xxx - ε) = 6 = 0b110
+      .-------t------.      1
+  .---o---.       .--t--.   1
+.-o-.   .-o-.   .-o-.   '   0
+x   x   x   x   x   x   p
+
+floor(7.xxx - ε) = 7 = 0b111
+      .-------t-------.         1
+  .---o---.       .---t---.     1
+.-o-.   .-o-.   .-o-.   .-t-.   1
+x   x   x   x   x   x   x   p
+
+floor(11.xxx - ε) = 11 = 0b1011
+	          .---------------t-------.        1
+      .-------o-------.               '        0
+  .---o---.       .---o---.       .---t---.    1
+.-o-.   .-o-.   .-o-.   .-o-.   .-o-.   .-t-.  1
+x   x   x   x   x   x   x   x   x   x   x   p
+              ^                   ^     ^   ^
+
+floor(12.000 - ε) = 11 = 0b1011
+	          .---------------t-------.        1
+      .-------o-------.               '        0
+  .---o---.       .---o---.       .---t---.    1
+.-o-.   .-o-.   .-o-.   .-o-.   .-o-.   .-t-.  1        !!!
+x   x   x   x   x   x   x   x   x   x   x   x
+              ^                   ^     ^   ^
+```
