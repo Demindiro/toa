@@ -3,15 +3,19 @@
 use core::cell::RefCell;
 use toa::{Hash, Object};
 
+/// Like a slice but shorter and designed for repeating.
+#[derive(Debug)]
+struct ShortSlice<'a>(&'a [u8]);
+
 #[derive(arbitrary::Arbitrary, Debug)]
 enum Op<'a> {
     AddData {
-        bytes: &'a [u8],
-        repeat: u8,
+        bytes: ShortSlice<'a>,
+        repeat: u16,
     },
     AddRefs {
-        slots: &'a [u8],
-        repeat: u8,
+        slots: ShortSlice<'a>,
+        repeat: u16,
     },
     // use u24 instead of usize because 64-bit usize is excessive + not consistent between
     // 32/64-bit platforms
@@ -35,6 +39,13 @@ thread_local! {
     });
 }
 
+impl<'a> arbitrary::Arbitrary<'a> for ShortSlice<'a> {
+    fn arbitrary(s: &mut arbitrary::Unstructured<'a>) -> Result<Self, arbitrary::Error> {
+        let n = s.arbitrary_len::<u8>()? % 256;
+        s.bytes(n).map(Self)
+    }
+}
+
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
     let tempdir = tempfile::tempdir().unwrap();
     let mut toa = toa::Toa::open(tempdir.path()).unwrap();
@@ -54,15 +65,15 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                     .map(|&i| objs.get(usize::from(i)).map(|x: &(_, _)| x.1))
                     .collect::<Option<Vec<_>>>()
             };
-            let rept = |x: &[u8], n: u8| (0..n).flat_map(|_| x).copied().collect::<Vec<_>>();
+            let rept = |x: &[u8], n: u16| (0..n).flat_map(|_| x).copied().collect::<Vec<_>>();
             match op {
                 Op::AddData { bytes, repeat } => {
-                    let bytes = rept(bytes, repeat);
+                    let bytes = rept(bytes.0, repeat);
                     let key = toa.add_data(&bytes).unwrap();
                     objs.push((bytes, key));
                 }
                 Op::AddRefs { slots, repeat } => {
-                    let slots = rept(slots, repeat);
+                    let slots = rept(slots.0, repeat);
                     let Some(refs) = collect_refs(&slots) else {
                         continue;
                     };
