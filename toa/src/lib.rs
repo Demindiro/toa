@@ -465,6 +465,14 @@ impl<'a> Refs<'a, Blob<fs::File>> {
     /// # Note
     ///
     /// Offset is in *hashes*.
+    pub fn read(&self, offset: u128, buf: &mut [Hash]) -> Result<usize, ReadError<io::Error>> {
+        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
+        self.0.read(offset, bytemuck::cast_slice_mut(buf))
+    }
+
+    /// # Note
+    ///
+    /// Offset is in *hashes*.
     pub fn read_exact(
         &self,
         offset: u128,
