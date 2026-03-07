@@ -616,6 +616,35 @@ impl<'a> Typed<'a, Blob<fs::File>> {
             .map_err(ReadError::Io)?;
         Ok(n)
     }
+
+    #[cfg(test)]
+    fn dump_tree(&self, depth: usize) {
+        print!("{:>depth$}    ", "");
+        match self.location.ty().0 {
+            FileRef::TY_CHUNK_FULL => println!("F"),
+            FileRef::TY_CHUNK_PARTIAL => {
+                let nb = self
+                    .blobs
+                    .chunks_partial
+                    .read_at_array(self.location.offset())
+                    .map(u16::from_le_bytes)
+                    .unwrap();
+                println!("{}", nb);
+            }
+            FileRef::TY_PAIR => {
+                let ([x, y], len) = self
+                    .blobs
+                    .pairs
+                    .read_at_array(self.location.offset())
+                    .map(bytes_to_pair)
+                    .unwrap();
+                println!("{}", len);
+                self.with_key(x).unwrap().dump_tree(depth + 2);
+                self.with_key(y).unwrap().dump_tree(depth + 2);
+            }
+            _ => unreachable!("invalid FileRef type"),
+        }
+    }
 }
 
 impl<T> From<ReadError<T>> for ReadExactError<T> {
