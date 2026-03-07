@@ -184,6 +184,12 @@ impl Blob<fs::File> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)
     }
+
+    fn read_at_array<const N: usize>(&self, offset: u64) -> io::Result<[u8; N]> {
+        let mut buf = [0; N];
+        self.read_at(offset, &mut buf)?;
+        Ok(buf)
+    }
 }
 
 impl BlobsTyped<Blob<fs::File>> {
@@ -534,18 +540,17 @@ impl<'a> Typed<'a, Blob<fs::File>> {
     pub fn len_bits(&self) -> io::Result<u128> {
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
-            FileRef::TY_CHUNK_PARTIAL => {
-                let len = &mut [0; 2];
-                self.blobs
-                    .chunks_partial
-                    .read_at(self.location.offset(), len)?;
-                Ok(u128::from(u16::from_le_bytes(*len)))
-            }
-            FileRef::TY_PAIR => {
-                let len = &mut [0; 16];
-                self.blobs.pairs.read_at(self.location.offset() + 64, len)?;
-                Ok(u128::from_le_bytes(*len))
-            }
+            FileRef::TY_CHUNK_PARTIAL => self
+                .blobs
+                .chunks_partial
+                .read_at_array(self.location.offset())
+                .map(u16::from_le_bytes)
+                .map(u128::from),
+            FileRef::TY_PAIR => self
+                .blobs
+                .pairs
+                .read_at_array(self.location.offset() + 64)
+                .map(u128::from_le_bytes),
             _ => unreachable!("invalid FileRef type"),
         }
     }
@@ -555,12 +560,12 @@ impl<'a> Typed<'a, Blob<fs::File>> {
             return Ok(0);
         }
 
-        let mut pair = [0; 80];
-        self.blobs
+        let ([x, y], len) = self
+            .blobs
             .pairs
-            .read_at(self.location.offset(), &mut pair)
+            .read_at_array(self.location.offset())
+            .map(bytes_to_pair)
             .map_err(ReadError::Io)?;
-        let ([x, y], len) = bytes_to_pair(pair);
 
         let len = align8(len) >> 3;
         if offset >= len {
@@ -593,12 +598,13 @@ impl<'a> Typed<'a, Blob<fs::File>> {
         offset: u128,
         buf: &mut [u8],
     ) -> Result<usize, ReadError<io::Error>> {
-        let nb = &mut [0; 2];
-        self.blobs
+        let nb = self
+            .blobs
             .chunks_partial
-            .read_at(self.location.offset(), nb)
+            .read_at_array(self.location.offset())
+            .map(u16::from_le_bytes)
             .map_err(ReadError::Io)?;
-        let n = align8(u16::from_le_bytes(*nb)) >> 3;
+        let n = align8(nb) >> 3;
         let n = buf.len().min(u128::from(n).saturating_sub(offset) as usize);
         let buf = &mut buf[..n];
         if buf.is_empty() {
