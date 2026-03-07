@@ -184,6 +184,12 @@ impl Blob<fs::File> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)
     }
+
+    fn read_at_array<const N: usize>(&self, offset: u64) -> io::Result<[u8; N]> {
+        let mut buf = [0; N];
+        self.read_at(offset, &mut buf)?;
+        Ok(buf)
+    }
 }
 
 impl BlobsTyped<Blob<fs::File>> {
@@ -213,8 +219,9 @@ impl BlobsTyped<Blob<fs::File>> {
             self.add_chunk(domain, data, map)
         } else {
             let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
-            let mut it = data.chunks_exact(CHUNK_SIZE as usize);
-            for (i, y) in (&mut it).enumerate() {
+            let split_n = ((data.len() - 1) & 0x1fff) + 1;
+            let (perfect, tail) = data.split_at(data.len() - split_n);
+            for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
                 let mut y = self.add_chunk(domain, y, map)?;
                 let mut len = 1 << 16;
                 while stack.len() >= (i + 1).count_ones() as usize {
@@ -225,18 +232,20 @@ impl BlobsTyped<Blob<fs::File>> {
                 stack.push(y);
             }
 
-            let mut y = if !it.remainder().is_empty() {
-                self.add_chunk(domain, it.remainder(), map)?
-            } else {
-                stack.pop().expect("at least one element")
-            };
-            let len = (data.len() as u128) * 8;
-            let d = len.next_power_of_two().trailing_zeros();
-            let d = d as usize - stack.len();
-            let mut mask = !((1 << d) - 1);
+            let len = (data.len() as u128) << 3;
+            let mut y = self.add_chunk(domain, tail, map)?;
+            let mut mask = 0xffff;
+            let top_i = len.wrapping_sub(1); // special-case for len=0
             while let Some(x) = stack.pop() {
-                mask <<= 1;
-                y = self.add_pair(domain, &x, &y, len & !mask, map)?;
+                debug_assert_eq!(
+                    (top_i & !mask).count_ones(),
+                    1 + stack.len() as u32,
+                    "length bits should correlate to stack depth"
+                );
+                let bits = (top_i & !mask).trailing_zeros();
+                mask = (1 << (bits + 1)) - 1;
+                let pair_len = (top_i & mask) + 1;
+                y = self.add_pair(domain, &x, &y, pair_len, map)?;
             }
             Ok(y)
         }
@@ -465,6 +474,14 @@ impl<'a> Refs<'a, Blob<fs::File>> {
     /// # Note
     ///
     /// Offset is in *hashes*.
+    pub fn read(&self, offset: u128, buf: &mut [Hash]) -> Result<usize, ReadError<io::Error>> {
+        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
+        self.0.read(offset, bytemuck::cast_slice_mut(buf))
+    }
+
+    /// # Note
+    ///
+    /// Offset is in *hashes*.
     pub fn read_exact(
         &self,
         offset: u128,
@@ -526,18 +543,17 @@ impl<'a> Typed<'a, Blob<fs::File>> {
     pub fn len_bits(&self) -> io::Result<u128> {
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
-            FileRef::TY_CHUNK_PARTIAL => {
-                let len = &mut [0; 2];
-                self.blobs
-                    .chunks_partial
-                    .read_at(self.location.offset(), len)?;
-                Ok(u128::from(u16::from_le_bytes(*len)))
-            }
-            FileRef::TY_PAIR => {
-                let len = &mut [0; 16];
-                self.blobs.pairs.read_at(self.location.offset() + 64, len)?;
-                Ok(u128::from_le_bytes(*len))
-            }
+            FileRef::TY_CHUNK_PARTIAL => self
+                .blobs
+                .chunks_partial
+                .read_at_array(self.location.offset())
+                .map(u16::from_le_bytes)
+                .map(u128::from),
+            FileRef::TY_PAIR => self
+                .blobs
+                .pairs
+                .read_at_array(self.location.offset() + 64)
+                .map(u128::from_le_bytes),
             _ => unreachable!("invalid FileRef type"),
         }
     }
@@ -547,12 +563,12 @@ impl<'a> Typed<'a, Blob<fs::File>> {
             return Ok(0);
         }
 
-        let mut pair = [0; 80];
-        self.blobs
+        let ([x, y], len) = self
+            .blobs
             .pairs
-            .read_at(self.location.offset(), &mut pair)
+            .read_at_array(self.location.offset())
+            .map(bytes_to_pair)
             .map_err(ReadError::Io)?;
-        let ([x, y], len) = bytes_to_pair(pair);
 
         let len = align8(len) >> 3;
         if offset >= len {
@@ -585,12 +601,13 @@ impl<'a> Typed<'a, Blob<fs::File>> {
         offset: u128,
         buf: &mut [u8],
     ) -> Result<usize, ReadError<io::Error>> {
-        let nb = &mut [0; 2];
-        self.blobs
+        let nb = self
+            .blobs
             .chunks_partial
-            .read_at(self.location.offset(), nb)
+            .read_at_array(self.location.offset())
+            .map(u16::from_le_bytes)
             .map_err(ReadError::Io)?;
-        let n = align8(u16::from_le_bytes(*nb)) >> 3;
+        let n = align8(nb) >> 3;
         let n = buf.len().min(u128::from(n).saturating_sub(offset) as usize);
         let buf = &mut buf[..n];
         if buf.is_empty() {
@@ -601,6 +618,35 @@ impl<'a> Typed<'a, Blob<fs::File>> {
             .read_at(self.location.offset() + 2 + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(n)
+    }
+
+    #[cfg(test)]
+    fn dump_tree(&self, depth: usize) {
+        print!("{:>depth$}    ", "");
+        match self.location.ty().0 {
+            FileRef::TY_CHUNK_FULL => println!("F"),
+            FileRef::TY_CHUNK_PARTIAL => {
+                let nb = self
+                    .blobs
+                    .chunks_partial
+                    .read_at_array(self.location.offset())
+                    .map(u16::from_le_bytes)
+                    .unwrap();
+                println!("{}", nb);
+            }
+            FileRef::TY_PAIR => {
+                let ([x, y], len) = self
+                    .blobs
+                    .pairs
+                    .read_at_array(self.location.offset())
+                    .map(bytes_to_pair)
+                    .unwrap();
+                println!("{}", len);
+                self.with_key(x).unwrap().dump_tree(depth + 2);
+                self.with_key(y).unwrap().dump_tree(depth + 2);
+            }
+            _ => unreachable!("invalid FileRef type"),
+        }
     }
 }
 
@@ -700,10 +746,15 @@ mod test {
                 Object::Data(o) => o,
                 Object::Refs(_) => panic!("expected data, got refs"),
             };
-            assert_eq!(o.0.len_bits().unwrap(), (value.len() as u128) << 3);
+            o.0.dump_tree(0);
+            assert_eq!(
+                o.0.len_bits().unwrap(),
+                (value.len() as u128) << 3,
+                "lengths do not match"
+            );
             let x = &mut *vec![0; value.len()];
             let n = o.0.read(0, x).expect("read failed");
-            assert_eq!(n, value.len());
+            assert_eq!(n, value.len(), "read unexpectedly truncated");
             let f = String::from_utf8_lossy;
             assert!(x == value, "{:?} <> {:?}", f(&x), f(value));
         }
@@ -803,13 +854,26 @@ mod test {
         let b = s.add(b"Hello, planet!");
         let c = s.add(&vec![b'x'; 1 << 15]);
         let Test { toa, tempdir } = s;
-        dbg!(&toa.map);
         let _ = toa;
         let toa = Toa::open(tempdir.path()).expect("reload");
-        dbg!(&toa.map);
         let s = Test { toa, tempdir };
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Hello, planet!");
         s.assert_eq(&c, &vec![b'x'; 1 << 15]);
+    }
+
+    /// Tests for bugs found with fuzzing.
+    ///
+    /// Might be manually reduced to simplify the test case.
+    mod fuzz {
+        use super::*;
+
+        #[test]
+        fn read_partial_chunk_truncated() {
+            let bytes = vec![0; 11 * 8192 + 1];
+            let mut s = init();
+            let k = s.add(&bytes);
+            s.assert_eq(&k, &bytes);
+        }
     }
 }
