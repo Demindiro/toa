@@ -743,10 +743,15 @@ mod test {
                 Object::Data(o) => o,
                 Object::Refs(_) => panic!("expected data, got refs"),
             };
-            assert_eq!(o.0.len_bits().unwrap(), (value.len() as u128) << 3);
+            o.0.dump_tree(0);
+            assert_eq!(
+                o.0.len_bits().unwrap(),
+                (value.len() as u128) << 3,
+                "lengths do not match"
+            );
             let x = &mut *vec![0; value.len()];
             let n = o.0.read(0, x).expect("read failed");
-            assert_eq!(n, value.len());
+            assert_eq!(n, value.len(), "read unexpectedly truncated");
             let f = String::from_utf8_lossy;
             assert!(x == value, "{:?} <> {:?}", f(&x), f(value));
         }
@@ -846,13 +851,26 @@ mod test {
         let b = s.add(b"Hello, planet!");
         let c = s.add(&vec![b'x'; 1 << 15]);
         let Test { toa, tempdir } = s;
-        dbg!(&toa.map);
         let _ = toa;
         let toa = Toa::open(tempdir.path()).expect("reload");
-        dbg!(&toa.map);
         let s = Test { toa, tempdir };
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Hello, planet!");
         s.assert_eq(&c, &vec![b'x'; 1 << 15]);
+    }
+
+    /// Tests for bugs found with fuzzing.
+    ///
+    /// Might be manually reduced to simplify the test case.
+    mod fuzz {
+        use super::*;
+
+        #[test]
+        fn read_partial_chunk_truncated() {
+            let bytes = vec![0; 11 * 8192 + 1];
+            let mut s = init();
+            let k = s.add(&bytes);
+            s.assert_eq(&k, &bytes);
+        }
     }
 }
