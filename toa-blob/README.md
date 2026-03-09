@@ -61,7 +61,7 @@ master key tag is poly1305 of encrypted master key.
 |   35:32 | log block size         |
 |   63:36 | (pad)                  |
 |   95:64 | log encryption key     |
-|  239:44 | (pad)                  |
+|  239:96 | (pad)                  |
 
 ## Format
 
