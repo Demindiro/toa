@@ -8,8 +8,9 @@ enum Op<'a> {
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
     let zone_uuid = *b"AbracadabraKapow";
+    let mut rng = rand::rng();
     let mut store = toa_blob::BlobStore::init(
-        rand::rng(),
+        &mut rng,
         toa_blob::MemRoot::new(5),
         toa_blob::MemZones::new(1 << 20, 10),
         zone_uuid,
@@ -27,7 +28,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 store = root.with_zone_dev(zone_dev).unwrap()
             }
             Op::CreateBlob { name } => {
-                todo!();
+                store.create_blob(&mut rng, name).unwrap();
             }
         }
     }

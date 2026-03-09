@@ -3,7 +3,7 @@ pub use rand;
 use chacha20poly1305::{KeyInit, aead::AeadInPlace};
 use core::fmt;
 use rand::RngExt;
-use std::{io, collections::BTreeMap};
+use std::{collections::BTreeMap, io};
 
 type Tag = [u8; 16];
 type Uuid = [u8; 16];
@@ -104,8 +104,19 @@ mod root {
 mod log {
     pub mod entry {
         use crate::{Key, Tag};
-        use core::mem;
         use nora_endian::{u16le, u32le, u64le};
+
+        macro_rules! ty {
+            ($($value:literal $name:ident)*) => {
+                pub mod ty {
+                    $(pub const $name: u8 = $value;)*
+                }
+            };
+        }
+        ty! {
+            0 NOP
+            1 CREATE_BLOB
+        }
 
         // finally found a usecase that ChatGPT is actually
         // reliable for. Just needs a few substitution fixes.
@@ -113,7 +124,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct Nop {
-            pub typ: u8,
+            pub ty: u8,
             pub _pad_: [u8; 3],
             pub _pad_ding_size: u32le,
         }
@@ -121,7 +132,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct CreateBlob {
-            pub typ: u8,
+            pub ty: u8,
             pub name_len: u8,
             pub blob_id: u16le,
             pub data_zone_count: u32le,
@@ -136,7 +147,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct DeleteBlob {
-            pub typ: u8,
+            pub ty: u8,
             pub _pad_0: u8,
             pub blob_id: u16le,
             pub _pad_1: u32le,
@@ -145,7 +156,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct AddZoneToBlob {
-            pub typ: u8,
+            pub ty: u8,
             pub _pad_0: u8,
             pub blob_id: u16le,
             pub _pad_1: u32le,
@@ -154,7 +165,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct AppendBlobTail {
-            pub typ: u8,
+            pub ty: u8,
             pub _pad_0: u8,
             pub blob_id: u16le,
             pub data_len: u32le,
@@ -163,7 +174,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct AllocateZone {
-            pub typ: u8,
+            pub ty: u8,
             pub _pad_0: u8,
             pub blob_id: u16le,
             pub zone_id: u32le,
@@ -172,7 +183,7 @@ mod log {
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct CommitBlobTail {
-            pub typ: u8,
+            pub ty: u8,
             pub compression_algorithm: u8,
             pub blob_id: u16le,
             pub compressed_size: u32le,
@@ -200,7 +211,12 @@ pub trait ZoneDev {
     where
         Self: 'a;
 
+    /// # Note
+    ///
+    /// `offset` and `len` are in *bytes*.
     fn read_at<'a>(&'a self, offset: u64, len: usize) -> io::Result<Self::Read<'a>>;
+
+    fn block_shift(&self) -> BlockShift;
 
     /// Wipe all zones. This may be a noop, but zones must be writeable
     /// from the start after this call.
@@ -223,11 +239,9 @@ pub struct BlobStore<T, U> {
     root_dev: T,
     zone_dev: U,
     header: root::Header,
-    /*
     // this is slow for allocation but blob creation should be infrequent anyway.
     blobs: Vec<Option<Blob>>,
-    tail: Vec<u8>,
-    */
+    log: Vec<u8>,
 }
 
 pub struct MemRoot {
@@ -240,8 +254,8 @@ pub struct MemZones {
 }
 
 pub enum BlockShift {
-    N9,
-    N12,
+    N9 = 1 << 9,
+    N12 = 1 << 12,
 }
 
 pub enum UnlockMethod {
@@ -266,12 +280,23 @@ pub struct BlobId(u16);
 
 struct DecryptError;
 
+/// # Note about zone data alignment
+///
+/// Data is *not* aligned to block boundaries.
+/// This is to maximize compression density and simplify the interface.
+///
+/// To ensure blocks are written as a whole there is a second tail buffer,
+/// which is appended to until it is block-sized.
 struct Blob {
     key: Key,
-    data_zones: Vec<Zone>,
-    table_zones: Vec<Zone>,
-    name: Box<str>,
+    data_zones: Vec<ZoneId>,
+    table_zones: Vec<ZoneId>,
+    name: Box<[u8]>,
     nonce_high: u32,
+    /// Data appended *before* compression
+    new_tail: Vec<u8>,
+    /// Data appended *after* compression
+    compressed_tail: Vec<u8>,
 }
 
 struct Zone {
@@ -280,6 +305,8 @@ struct Zone {
     /// Bit allocation depends on zone size.
     id_head: u64,
 }
+
+struct ZoneId(u32);
 
 impl<T> BlobRoot<T>
 where
@@ -348,6 +375,8 @@ where
             root_dev: self.root_dev,
             zone_dev,
             header: self.header,
+            blobs: Vec::new(),
+            log: Vec::new(),
         })
     }
 }
@@ -420,6 +449,8 @@ where
             root_dev,
             zone_dev,
             header,
+            blobs: Vec::new(),
+            log: Vec::new(),
         })
     }
 
@@ -434,11 +465,79 @@ where
         Ok((self.root_dev, self.zone_dev))
     }
 
-    /*
-    pub fn create_blob(&mut self, name: &[u8]) -> io::Result<BlobId> {
-        self
+    pub fn create_blob<R>(&mut self, rng: &mut R, name: &[u8]) -> io::Result<BlobId>
+    where
+        R: rand::CryptoRng,
+    {
+        assert!(name.len() <= 255, "name too long");
+        let idx = self.blobs.iter().position(|x| x.is_none());
+        let id = if let Some(idx) = idx {
+            BlobId(idx as u16)
+        } else {
+            // TODO return error if too many blobs
+            let id = BlobId(self.blobs.len().try_into().unwrap());
+            self.blobs.push(None);
+            id
+        };
+        let blob = Blob {
+            key: rng.random(),
+            nonce_high: 0u32.into(),
+            data_zones: Vec::new(),
+            table_zones: Vec::new(),
+            new_tail: Vec::new(),
+            compressed_tail: Vec::new(),
+            name: name.into(),
+        };
+        self.log_create_blob(id, &blob)?;
+        self.blobs[usize::from(id.0)] = Some(blob);
+        Ok(id)
     }
-    */
+
+    fn log_create_blob(&mut self, id: BlobId, blob: &Blob) -> io::Result<()> {
+        let hdr = log::entry::CreateBlob {
+            ty: log::entry::ty::CREATE_BLOB,
+            blob_id: id.0.into(),
+            data_zone_count: u32::try_from(blob.data_zones.len()).unwrap().into(),
+            table_zone_count: u32::try_from(blob.table_zones.len()).unwrap().into(),
+            name_len: u8::try_from(blob.name.len()).unwrap().into(),
+            encryption_key: blob.key,
+            nonce_high: blob.nonce_high.into(),
+        };
+        let hdr = bytemuck::bytes_of(&hdr);
+        let len = 8
+            + hdr.len()
+            + blob.data_zones.len() * 4
+            + blob.table_zones.len() * 4
+            + blob.name.len();
+        self.log_reserve(len)?;
+        self.log.extend(hdr);
+        self.log
+            .extend(blob.data_zones.iter().flat_map(|x| x.0.to_le_bytes()));
+        self.log
+            .extend(blob.table_zones.iter().flat_map(|x| x.0.to_le_bytes()));
+        self.log.extend(&blob.name);
+        self.log_pad();
+        Ok(())
+    }
+
+    fn log_reserve(&mut self, num: usize) -> io::Result<()> {
+        let num = (num + 7) & !7;
+        let len = self.log.len() + num;
+        if len > usize::from(self.zone_dev.block_shift()) {
+            self.log_flush()?;
+        }
+        Ok(())
+    }
+
+    fn log_flush(&mut self) -> io::Result<()> {
+        todo!();
+    }
+
+    fn log_pad(&mut self) {
+        let n = self.log.len();
+        let n = (n + 7) & !7;
+        self.log.resize(n, 0);
+    }
 }
 
 impl RootDev for MemRoot {
@@ -475,6 +574,11 @@ impl ZoneDev for MemZones {
         let offset = offset as usize;
         Ok(&self.buffer[offset..offset + len])
     }
+
+    fn block_shift(&self) -> BlockShift {
+        // TODO
+        BlockShift::N9
+    }
 }
 
 impl MemRoot {
@@ -493,6 +597,15 @@ impl MemZones {
         Self {
             buffer: vec![0; len].into(),
             zone_size,
+        }
+    }
+}
+
+impl From<BlockShift> for usize {
+    fn from(x: BlockShift) -> usize {
+        match x {
+            BlockShift::N9 => 1 << 9,
+            BlockShift::N12 => 1 << 12,
         }
     }
 }
