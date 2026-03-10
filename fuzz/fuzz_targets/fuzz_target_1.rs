@@ -48,7 +48,8 @@ impl<'a> arbitrary::Arbitrary<'a> for ShortSlice<'a> {
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
     let tempdir = tempfile::tempdir().unwrap();
-    let mut toa = toa::Toa::open(tempdir.path()).unwrap();
+    let dir = || toa::Dir::new(tempdir.path().into()).unwrap();
+    let mut toa = toa::Toa::open(dir()).unwrap();
     let mut objs = Vec::new();
 
     BUFFERS.with(|buffers| {
@@ -122,7 +123,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                 }
                 Op::Remount => {
                     drop(toa);
-                    toa = toa::Toa::open(tempdir.path()).unwrap();
+                    toa = toa::Toa::open(dir()).unwrap();
                 }
             }
         }
