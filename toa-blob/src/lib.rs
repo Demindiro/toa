@@ -245,15 +245,22 @@ where
     where
         U: ZoneDev,
     {
-        let mut blob_map = BTreeMap::default();
-        let mut blobs = Vec::default();
+        let mut store = BlobStore {
+            root_dev: self.root_dev,
+            zone_dev,
+            header: self.header,
+            blobs: Default::default(),
+            blob_map: Default::default(),
+            log: Vec::new(),
+        };
 
-        let mut buf = vec![0; zone_dev.block_shift().into()];
+        let mut buf = vec![0; store.zone_dev.block_shift().into()];
         let mut i = 0;
         while i < self.header.log_head() {
-            let rd = zone_dev.read_at(i, buf.len())?;
+            let rd = store.zone_dev.read_at(i, buf.len())?;
             buf.copy_from_slice(rd.as_ref());
-            i += u64::from(zone_dev.block_shift());
+            drop(rd);
+            i += u64::from(store.zone_dev.block_shift());
 
             let mut k = 0;
             let (buf, []) = buf.as_chunks::<8>() else {
@@ -269,33 +276,19 @@ where
                         let name_len = usize::from(b);
                         let name = &buf[k..].as_flattened()[2..2 + name_len];
                         k += ((2 + name_len) + 7) >> 3;
-                        let index = blobs.len() as u32;
-                        let name = Rc::<[_]>::from(name);
-                        blobs.push(Blob::new(name.clone()));
-                        blob_map.insert(name, index);
+                        store.replay_create_blob(name).unwrap();
                     }
                     log::entry::ty::DELETE_BLOB => {
                         k += 1;
                         let idx = u32::from_le_bytes([e, f, g, h]);
-                        let old_name = blobs.swap_remove(idx as usize).name;
-                        blob_map.remove(&old_name);
-                        if let Some(new) = blobs.get(idx as usize) {
-                            *blob_map.get_mut(&new.name).unwrap() = idx;
-                        }
+                        store.replay_delete_blob(idx);
                     }
                     ty => todo!("{ty}"),
                 }
             }
         }
 
-        Ok(BlobStore {
-            root_dev: self.root_dev,
-            zone_dev,
-            header: self.header,
-            blobs,
-            blob_map,
-            log: Vec::new(),
-        })
+        Ok(store)
     }
 }
 
@@ -359,22 +352,9 @@ where
     }
 
     pub fn create_blob(&mut self, name: &[u8]) -> io::Result<Result<(), DuplicateBlob>> {
-        assert!(name.len() <= 255, "name too long");
-        match self.blob_map.entry(name.into()) {
-            Entry::Occupied(_) => Ok(Err(DuplicateBlob)),
-            Entry::Vacant(e) => {
-                let idx = self.blobs.len() as u32;
-                self.blobs.push(Blob::new(e.key().clone()));
-                e.insert(idx);
-                match self.log_create_blob(name) {
-                    Ok(()) => Ok(Ok(())),
-                    Err(e) => {
-                        self.blobs.pop();
-                        self.blob_map.remove(name);
-                        Err(e)
-                    }
-                }
-            }
+        match self.replay_create_blob(name) {
+            Ok(()) => self.log_create_blob(name).map(|()| Ok(())),
+            Err(e) => Ok(Err(e)),
         }
     }
 
@@ -382,13 +362,31 @@ where
         match self.blob_map.remove(name) {
             None => Ok(Err(NoBlobByName)),
             Some(idx) => {
-                self.blobs.swap_remove(idx as usize);
-                if let Some(new) = self.blobs.get(idx as usize) {
-                    *self.blob_map.get_mut(&new.name).unwrap() = idx;
-                }
+                self.replay_delete_blob(idx);
                 self.log_delete_blob(idx)?;
                 Ok(Ok(()))
             }
+        }
+    }
+
+    fn replay_create_blob(&mut self, name: &[u8]) -> Result<(), DuplicateBlob> {
+        assert!(name.len() <= 255, "name too long");
+        match self.blob_map.entry(name.into()) {
+            Entry::Occupied(_) => Err(DuplicateBlob),
+            Entry::Vacant(e) => {
+                let idx = self.blobs.len() as u32;
+                self.blobs.push(Blob::new(e.key().clone()));
+                e.insert(idx);
+                Ok(())
+            }
+        }
+    }
+
+    fn replay_delete_blob(&mut self, index: u32) {
+        let old_name = self.blobs.swap_remove(index as usize).name;
+        self.blob_map.remove(&old_name);
+        if let Some(new) = self.blobs.get(index as usize) {
+            *self.blob_map.get_mut(&new.name).unwrap() = index;
         }
     }
 
