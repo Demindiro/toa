@@ -191,10 +191,6 @@ pub struct BlobRef<'a, T> {
 
 #[derive(Debug)]
 pub struct DuplicateBlob;
-#[derive(Debug)]
-pub struct NoBlobByName;
-
-struct DecryptError;
 
 /// # Note about zone data alignment
 ///
@@ -358,17 +354,6 @@ where
         }
     }
 
-    pub fn delete_blob(&mut self, name: &[u8]) -> io::Result<Result<(), NoBlobByName>> {
-        match self.blob_map.remove(name) {
-            None => Ok(Err(NoBlobByName)),
-            Some(idx) => {
-                self.replay_delete_blob(idx);
-                self.log_delete_blob(idx)?;
-                Ok(Ok(()))
-            }
-        }
-    }
-
     fn replay_create_blob(&mut self, name: &[u8]) -> Result<(), DuplicateBlob> {
         assert!(name.len() <= 255, "name too long");
         match self.blob_map.entry(name.into()) {
@@ -447,6 +432,17 @@ where
         let n = self.log.len();
         let n = (n + 7) & !7;
         self.log.resize(n, 0);
+    }
+}
+
+impl<'a, T, U> BlobRef<'a, BlobStore<T, U>>
+where
+    T: RootDev,
+    U: ZoneDev,
+{
+    pub fn delete(self) -> io::Result<()> {
+        self.store.replay_delete_blob(self.index);
+        self.store.log_delete_blob(self.index)
     }
 }
 
@@ -613,9 +609,9 @@ mod test {
     fn delete_blob() {
         let mut store = init();
         store.create_blob(b"a").unwrap().unwrap();
-        store.delete_blob(b"a").unwrap().unwrap();
+        store.blob(b"a").unwrap().unwrap().delete().unwrap();
         store.create_blob(b"a").unwrap().unwrap();
-        store.delete_blob(b"a").unwrap().unwrap();
+        store.blob(b"a").unwrap().unwrap().delete().unwrap();
         remount(store);
     }
 }

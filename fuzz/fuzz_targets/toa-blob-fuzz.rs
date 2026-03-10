@@ -47,11 +47,11 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
             }
             Op::DeleteBlob { name } => {
                 let name = &name[..name.len().min(255)];
-                match (blobs.remove(name), store.delete_blob(name).unwrap()) {
-                    (Some(_), Ok(())) => {}
-                    (None, Err(toa_blob::NoBlobByName)) => {}
-                    (Some(_), Err(toa_blob::NoBlobByName)) => panic!("store is missing blob"),
-                    (None, Ok(())) => panic!("store has ghost blob"),
+                match (blobs.remove(name), store.blob(name).unwrap()) {
+                    (Some(_), Some(x)) => x.delete().unwrap(),
+                    (None, None) => {}
+                    (Some(_), None) => panic!("store is missing blob"),
+                    (None, Some(_)) => panic!("store has ghost blob"),
                 }
             }
         }
