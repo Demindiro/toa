@@ -65,27 +65,29 @@ padded with zeros if necessary.
 |:----- |:--------------------- |
 | u8    | (type)                |
 | u8    | name length           |
-| u16   | blob ID               |
 | u8[]  | name                  |
 | u8[]  | (pad)                 |
 
 ##### 2. Delete blob
 
+This operations performs a **swap remove**: if the blob to be deleted
+is not the last element, the last element is put in the place of the
+deleted blob. This ensures the blob array remains contiguous.
+
 | type  | name                   |
 |:----- |:---------------------- |
 | u8    | (type)                 |
-| u8    | (pad)                  |
-| u16   | blob ID                |
-| u32   | (pad)                  |
+| u24   | (pad)                  |
+| u32   | blob index             |
 
 ##### 3. Add zone to blob
 
 | type  | name                   |
 |:----- |:---------------------- |
 | u8    | (type)                 |
-| u8    | (pad)                  |
-| u16   | blob ID                |
-| u32   | (pad)                  |
+| u24   | (pad)                  |
+| u32   | blob index             |
+| u64   | zone ID                |
 
 ##### 5. Append blob tail
 
@@ -93,19 +95,10 @@ padded with zeros if necessary.
 |:----- |:---------------------- |
 | u8    | (type)                 |
 | u8    | (pad)                  |
-| u16   | blob ID                |
-| u32   | data length            |
+| u16   | data length            |
+| u32   | blob index             |
 | u8[]  | data                   |
 | u8[]  | (pad)                  |
-
-##### 6. Allocate zone
-
-| type  | name                   |
-|:----- |:---------------------- |
-| u8    | (type)                 |
-| u8    | (pad)                  |
-| u16   | blob ID                |
-| u32   | zone ID                |
 
 ##### 7. Commit blob tail
 
@@ -122,10 +115,11 @@ this should not result in any vulnerabilities.
 |:----- |:---------------------- |
 | u8    | (type)                 |
 | u8    | compression algorithm  |
-| u16   | blob ID                |
-| u32   | compressed size        |
+| u16   | (pad)                  |
+| u32   | blob index             |
 | u64   | offset                 |
-| u128  | tag                    |
+| u32   | compressed size        |
+| u32   | (pad)                  |
 
 
 

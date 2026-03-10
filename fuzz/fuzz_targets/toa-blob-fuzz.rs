@@ -1,5 +1,7 @@
 #![no_main]
 
+use std::collections::hash_map::{Entry, HashMap};
+
 #[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
     Remount,
@@ -16,7 +18,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
     )
     .unwrap();
 
-    let mut blobs = vec![None; 1 << 16].into_boxed_slice();
+    let mut blobs = HashMap::<&[u8], _>::with_capacity(1 << 20);
 
     for op in ops {
         match op {
@@ -24,19 +26,22 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 let (root_dev, zone_dev) = store.unmount().map_err(|e| e.1).unwrap();
                 let root = toa_blob::BlobRoot::load(root_dev).unwrap();
                 store = root.with_zone_dev(zone_dev).unwrap();
-                for (id, blob) in blobs.iter().enumerate() {
-                    let id = toa_blob::BlobId(id as u16);
-                    match (blob, store.blob(id).unwrap()) {
-                        (Some(_), Some(_)) => {}
-                        (None, None) => {}
-                        (Some(_), None) => panic!("store is missing blob {:?}", id.0),
-                        (None, Some(_)) => panic!("store has ghost blob {:?}", id.0),
-                    }
+                for (name, blob) in blobs.iter() {
+                    store
+                        .blob(name)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("store is missing blob {name:?}"));
+                    let _ = blob;
                 }
             }
             Op::CreateBlob { name } => {
-                let id = store.create_blob(name).unwrap();
-                blobs[usize::from(id.0)] = Some(());
+                match (blobs.entry(name), store.create_blob(name).unwrap()) {
+                    (Entry::Vacant(e), Ok(())) => {
+                        e.insert(());
+                    }
+                    (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
+                    _ => panic!("blob map corrupt"),
+                }
             }
         }
     }

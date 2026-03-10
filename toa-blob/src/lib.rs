@@ -1,5 +1,7 @@
-use core::fmt;
-use std::io;
+use std::{
+    collections::btree_map::{BTreeMap, Entry},
+    io,
+};
 
 type Uuid = [u8; 16];
 
@@ -69,10 +71,6 @@ mod log {
         pub struct CreateBlob {
             pub ty: u8,
             pub name_len: u8,
-            pub blob_id: u16le,
-            pub _pad_0: u32le,
-            // table_zones: u32le[]
-            // data_zones: u32le[]
             // name: u8[]
         }
 
@@ -80,18 +78,16 @@ mod log {
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct DeleteBlob {
             pub ty: u8,
-            pub _pad_0: u8,
-            pub blob_id: u16le,
-            pub _pad_1: u32le,
+            pub _pad_0: [u8; 3],
+            pub blob_index: u32le,
         }
 
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct AddZoneToBlob {
             pub ty: u8,
-            pub _pad_0: u8,
-            pub blob_id: u16le,
-            pub _pad_1: u32le,
+            pub _pad_0: [u8; 3],
+            pub blob_index: u32le,
         }
 
         #[repr(C)]
@@ -99,17 +95,8 @@ mod log {
         pub struct AppendBlobTail {
             pub ty: u8,
             pub _pad_0: u8,
-            pub blob_id: u16le,
-            pub data_len: u32le,
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-        pub struct AllocateZone {
-            pub ty: u8,
-            pub _pad_0: u8,
-            pub blob_id: u16le,
-            pub zone_id: u32le,
+            pub data_len: u16le,
+            pub blob_index: u32le,
         }
 
         #[repr(C)]
@@ -117,9 +104,11 @@ mod log {
         pub struct CommitBlobTail {
             pub ty: u8,
             pub compression_algorithm: u8,
-            pub blob_id: u16le,
-            pub compressed_size: u32le,
+            pub _pad_0: [u8; 2],
+            pub blob_index: u32le,
             pub offset: u64le,
+            pub compressed_size: u32le,
+            pub _pad_1: [u8; 4],
         }
     }
 }
@@ -174,8 +163,8 @@ pub struct BlobStore<T, U> {
     root_dev: T,
     zone_dev: U,
     header: root::Header,
-    // this is slow for allocation but blob creation should be infrequent anyway.
-    blobs: Vec<Option<Blob>>,
+    blobs: Vec<Blob>,
+    blob_map: BTreeMap<Box<[u8]>, u32>,
     log: Vec<u8>,
 }
 
@@ -193,13 +182,13 @@ pub enum BlockShift {
     N12 = 1 << 12,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlobId(pub u16);
-
 pub struct BlobRef<'a, T> {
     store: &'a mut T,
-    id: BlobId,
+    index: u32,
 }
+
+#[derive(Debug)]
+pub struct DuplicateBlob;
 
 struct DecryptError;
 
@@ -213,7 +202,6 @@ struct DecryptError;
 struct Blob {
     data_zones: Vec<ZoneId>,
     table_zones: Vec<ZoneId>,
-    name: Box<[u8]>,
     /// Data appended *before* compression
     new_tail: Vec<u8>,
     /// Data appended *after* compression
@@ -252,7 +240,8 @@ where
     where
         U: ZoneDev,
     {
-        let mut blobs = Vec::new();
+        let mut blob_map = BTreeMap::default();
+        let mut blobs = Vec::default();
 
         let mut buf = vec![0; zone_dev.block_shift().into()];
         let mut i = 0;
@@ -272,14 +261,12 @@ where
                         k += 1 + ((u32::from_le_bytes([e, f, g, h]) as usize) >> 3);
                     }
                     log::entry::ty::CREATE_BLOB => {
-                        k += 1;
                         let name_len = usize::from(b);
-                        let blob_id = usize::from(u16::from_le_bytes([c, d]));
-                        let name = &buf[k..].as_flattened()[..name_len];
-                        k += (name_len + 7) >> 3;
-                        let n = blobs.len().max(1 + blob_id);
-                        blobs.resize_with(n, || None);
-                        blobs[blob_id] = Some(Blob::new(name));
+                        let name = &buf[k..].as_flattened()[2..2 + name_len];
+                        k += ((2 + name_len) + 7) >> 3;
+                        let index = blobs.len() as u32;
+                        blobs.push(Blob::new());
+                        blob_map.insert(name.into(), index);
                     }
                     ty => todo!("{ty}"),
                 }
@@ -291,6 +278,7 @@ where
             zone_dev,
             header: self.header,
             blobs,
+            blob_map,
             log: Vec::new(),
         })
     }
@@ -326,7 +314,8 @@ where
             root_dev,
             zone_dev,
             header,
-            blobs: Vec::new(),
+            blobs: Default::default(),
+            blob_map: Default::default(),
             log: Vec::new(),
         })
     }
@@ -346,46 +335,44 @@ where
         Ok((self.root_dev, self.zone_dev))
     }
 
-    pub fn blob(&mut self, id: BlobId) -> io::Result<Option<BlobRef<'_, Self>>> {
-        match self
-            .blobs
-            .get(usize::from(id.0))
-            .is_some_and(|x| x.is_some())
-        {
-            false => Ok(None),
-            true => Ok(Some(BlobRef { store: self, id })),
+    pub fn blob(&mut self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
+        assert!(name.len() <= 255, "name too long");
+        match self.blob_map.get(name) {
+            None => Ok(None),
+            Some(&index) => Ok(Some(BlobRef { store: self, index })),
         }
     }
 
-    pub fn create_blob(&mut self, name: &[u8]) -> io::Result<BlobId> {
+    pub fn create_blob(&mut self, name: &[u8]) -> io::Result<Result<(), DuplicateBlob>> {
         assert!(name.len() <= 255, "name too long");
-        let idx = self.blobs.iter().position(|x| x.is_none());
-        let id = if let Some(idx) = idx {
-            BlobId(idx as u16)
-        } else {
-            // TODO return error if too many blobs
-            let id = BlobId(self.blobs.len().try_into().unwrap());
-            self.blobs.push(None);
-            id
-        };
-        let blob = Blob::new(name);
-        self.log_create_blob(id, &blob)?;
-        self.blobs[usize::from(id.0)] = Some(blob);
-        Ok(id)
+        match self.blob_map.entry(name.into()) {
+            Entry::Occupied(_) => Ok(Err(DuplicateBlob)),
+            Entry::Vacant(e) => {
+                let idx = self.blobs.len() as u32;
+                self.blobs.push(Blob::new());
+                e.insert(idx);
+                match self.log_create_blob(name) {
+                    Ok(()) => Ok(Ok(())),
+                    Err(e) => {
+                        self.blobs.pop();
+                        self.blob_map.remove(name);
+                        Err(e)
+                    }
+                }
+            }
+        }
     }
 
-    fn log_create_blob(&mut self, id: BlobId, blob: &Blob) -> io::Result<()> {
+    fn log_create_blob(&mut self, name: &[u8]) -> io::Result<()> {
         let hdr = log::entry::CreateBlob {
             ty: log::entry::ty::CREATE_BLOB,
-            blob_id: id.0.into(),
-            name_len: u8::try_from(blob.name.len()).unwrap().into(),
-            _pad_0: Default::default(),
+            name_len: u8::try_from(name.len()).unwrap().into(),
         };
         let hdr = bytemuck::bytes_of(&hdr);
-        let len = hdr.len() + blob.name.len();
+        let len = hdr.len() + name.len();
         self.log_reserve(len)?;
         self.log.extend(hdr);
-        self.log.extend(&blob.name);
+        self.log.extend(name);
         self.log_pad();
         Ok(())
     }
@@ -514,13 +501,12 @@ impl From<BlockShift> for usize {
 }
 
 impl Blob {
-    fn new(name: &[u8]) -> Self {
+    fn new() -> Self {
         Self {
             data_zones: Vec::new(),
             table_zones: Vec::new(),
             new_tail: Vec::new(),
             compressed_tail: Vec::new(),
-            name: name.into(),
         }
     }
 }
@@ -531,7 +517,17 @@ mod test {
 
     const ZONE_UUID: Uuid = *b"AbracadabraKapow";
 
-    fn remount(mut store: BlobStore<MemRoot, MemZones>) -> BlobStore<MemRoot, MemZones> {
+    fn init() -> BlobStore<MemRoot, MemZones> {
+        BlobStore::init(
+            MemRoot::new(5),
+            MemZones::new(1 << 20, 10),
+            ZONE_UUID,
+            1 << 20,
+        )
+        .unwrap()
+    }
+
+    fn remount(store: BlobStore<MemRoot, MemZones>) -> BlobStore<MemRoot, MemZones> {
         let (root_dev, zone_dev) = store.unmount().map_err(|e| e.1).unwrap();
         let root = BlobRoot::load(root_dev).unwrap();
         root.with_zone_dev(zone_dev).unwrap()
@@ -539,40 +535,34 @@ mod test {
 
     #[test]
     fn empty() {
-        let store = BlobStore::init(
-            MemRoot::new(5),
-            MemZones::new(1 << 20, 10),
-            ZONE_UUID,
-            1 << 20,
-        )
-        .unwrap();
-        let _ = remount(store);
+        let _ = remount(init());
     }
 
     #[test]
     fn create_blobs() {
-        let mut store = BlobStore::init(
-            MemRoot::new(5),
-            MemZones::new(1 << 20, 10),
-            ZONE_UUID,
-            1 << 20,
-        )
-        .unwrap();
-        store.create_blob(b"a").unwrap();
-        store.create_blob(b"b").unwrap();
-        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
-        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
+        let mut store = init();
+        store.create_blob(b"a").unwrap().unwrap();
+        store.create_blob(b"b").unwrap().unwrap();
+        store.blob(b"a").unwrap().expect("missing blob a");
+        store.blob(b"b").unwrap().expect("missing blob b");
         store = remount(store);
-        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
-        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
+        store.blob(b"a").unwrap().expect("missing blob a");
+        store.blob(b"b").unwrap().expect("missing blob b");
         store = remount(store);
-        store.create_blob(b"c").unwrap();
-        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
-        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
-        store.blob(BlobId(2)).unwrap().expect("missing blob 2");
+        store.create_blob(b"c").unwrap().unwrap();
+        store.blob(b"a").unwrap().expect("missing blob a");
+        store.blob(b"b").unwrap().expect("missing blob b");
+        store.blob(b"c").unwrap().expect("missing blob c");
         store = remount(store);
-        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
-        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
-        store.blob(BlobId(2)).unwrap().expect("missing blob 2");
+        store.blob(b"a").unwrap().expect("missing blob a");
+        store.blob(b"b").unwrap().expect("missing blob b");
+        store.blob(b"c").unwrap().expect("missing blob c");
+    }
+
+    #[test]
+    fn create_duplicate_blobs() {
+        let mut store = init();
+        store.create_blob(b"a").unwrap().unwrap();
+        assert!(store.create_blob(b"a").unwrap().is_err());
     }
 }
