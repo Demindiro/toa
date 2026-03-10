@@ -16,12 +16,6 @@ be appended to a zone.
 
 *All integers are in little-endian format*.
 
-## Required algorithms
-
-- argon2id
-- chacha12poly1305
-- zstd
-
 ## Header
 
 | bytes   | name                   |
@@ -29,39 +23,11 @@ be appended to a zone.
 |     3:0 | magic ("ToaB")         |
 |     7:4 | version (0x20260307)   |
 |    15:8 | generation             |
-|   95:16 | keyslot 0              |
-|  175:96 | keyslot 1              |
-| 255:176 | keyslot 2              |
-| 495:255 | encrypted area         |
-| 511:496 | encrypted area tag     |
-
-### Keyslot
-
-| bytes | name                   |
-| -----:|:---------------------- |
-|   0:0 | type (0 = none, 1 = argon2id) |
-|   1:3 | (pad)                  |
-|   7:4 | M cost                 |
-|  11:8 | T cost                 |
-| 15:12 | P cost                 |
-| 31:16 | salt                   |
-| 63:32 | master key             |
-| 79:64 | master key tag         |
-
-master key tag is poly1305 of encrypted master key.
-
-### Encrypted area
-
-| bytes   | name                   |
-| -------:|:---------------------- |
-|    15:0 | zone partition ID      |
-|   23:16 | zone size              |
-|   27:24 | log zone ID            |
-|   31:28 | log zone head          |
-|   35:32 | log block size         |
-|   63:36 | (pad)                  |
-|   95:64 | log encryption key     |
-|  239:96 | (pad)                  |
+|   31:16 | zone partition ID      |
+|   39:32 | zone size              |
+|   47:40 | zone block size        |
+|   55:48 | log zone ID + head     |
+|   64:56 | (pad)                  |
 
 ## Format
 
@@ -75,13 +41,8 @@ All metadata is loaded into memory.
 The log records all operations committed since the store was created.
 The log must be replayed to reconstruct in-memory state.
 
-Log entries are grouped in fixed-size blocks. Each block is encrypted.
-
-| bytes   | name                   |
-| -------:|:---------------------- |
-|    15:0 | tag                    |
-|  ...:16 | entries                |
-
+Log entries are grouped in fixed-size blocks.
+Log entries must not cross blocks.
 
 #### Entry types
 
@@ -105,12 +66,6 @@ padded with zeros if necessary.
 | u8    | (type)                |
 | u8    | name length           |
 | u16   | blob ID               |
-| u32   | data zone count       |
-| u32   | table zone count      |
-| u256  | encryption key        |
-| u32   | nonce[95:64]          |
-| u32[] | data zone IDs         |
-| u32[] | table zone IDs        |
 | u8[]  | name                  |
 | u8[]  | (pad)                 |
 
@@ -178,3 +133,29 @@ this should not result in any vulnerabilities.
 
 A blob has one or more zones attached.
 The list of zones of each blob is kept entirely in-memory.
+
+
+
+## Design rationale
+
+### No encryption
+
+The original design included encryption with authentication, but this has
+been removed as it adds non-trivial complexity and is unlikely to offer
+notable benefits for typical usage.
+
+This blob store is designed for use with a locally attached disk.
+Compromising a local disk requires physical access. There are a few scenarios:
+
+1. The machine is stolen.
+2. The machine is accessed while active.
+3. The machine is accessed while offline.
+
+In scenario 2 the user already lost. Scenario 3 could theoretically allow
+attacks, but is contrived compared to more typical attacks.
+A non-authenticated scheme is sufficient for scenario 1 provided the
+contents of the disk are no longer trusted if it is recovered somehow.
+
+For a remote/network disk authentication is necessary, but an object-oriented
+protocol would be more convenient than a block protocol at such a level.
+Hence, this scenario is not considered.
