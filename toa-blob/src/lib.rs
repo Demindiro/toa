@@ -1,109 +1,44 @@
-pub use rand;
-
-use chacha20poly1305::{KeyInit, aead::AeadInPlace};
 use core::fmt;
-use rand::RngExt;
-use std::{collections::BTreeMap, io};
+use std::io;
 
-type Tag = [u8; 16];
 type Uuid = [u8; 16];
-type Key = [u8; 32];
-type Nonce = [u8; 12];
 
 mod root {
-    use crate::{Key, Tag, Uuid};
+    use crate::Uuid;
     use core::mem;
     use nora_endian::{u32le, u64le};
 
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
     #[repr(C)]
     pub struct Header {
         pub magic: [u8; 4],
         pub version: u32le,
         pub generation: u64le,
-        pub keyslots: [KeySlot; 3],
-        pub encrypted_area: EncryptedArea,
-        pub encrypted_area_tag: Tag,
-    }
-
-    const _: () = assert!(mem::size_of::<Header>() == 512);
-
-    pub type KeySlot = [u8; 80];
-
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    #[repr(C)]
-    pub struct KeySlotNone {
-        pub ty: u8,
-        pub _params: [u8; 79],
-    }
-
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    #[repr(C)]
-    pub struct KeySlotArgon2id {
-        pub ty: u8,
-        pub _pad_0: [u8; 3],
-        pub m_cost: u32le,
-        pub t_cost: u32le,
-        pub p_cost: u32le,
-        pub salt: [u8; 16],
-        pub header_key: Key,
-        pub header_key_tag: Tag,
-    }
-
-    const _: () = assert!(mem::size_of::<KeySlotArgon2id>() == 80);
-
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    #[repr(C)]
-    pub struct EncryptedArea {
         pub zone_dev_uuid: Uuid,
         pub zone_size: u64le,
-        pub log_zone_id: u32le,
-        pub log_head: u32le,
-        pub log_block_size: u32le,
-        pub _pad_0: [u8; 28],
-        pub log_key: Key,
-        pub _pad_1: [u8; 144],
+        pub block_size: u64le,
+        pub log_zone_id_head: u64le,
+        pub _pad_0: u64le,
     }
 
-    const _: () = assert!(mem::size_of::<EncryptedArea>() == 240);
+    const _: () = assert!(mem::size_of::<Header>() == 64);
 
     impl Header {
         pub const MAGIC: [u8; 4] = *b"ToaB";
         pub const VERSION: u32 = 0x20260307;
-    }
 
-    impl Default for Header {
-        fn default() -> Self {
-            Self {
-                magic: [0; 4],
-                version: 0.into(),
-                generation: 0.into(),
-                keyslots: [[0; 80]; 3],
-                encrypted_area: Default::default(),
-                encrypted_area_tag: Default::default(),
-            }
+        pub fn log_head(&self) -> u64 {
+            (self.log_zone_id_head % self.zone_size).into()
         }
-    }
 
-    impl Default for EncryptedArea {
-        fn default() -> Self {
-            Self {
-                zone_dev_uuid: Uuid::default(),
-                zone_size: 0u64.into(),
-                log_zone_id: 0u32.into(),
-                log_head: 0u32.into(),
-                log_block_size: 0u32.into(),
-                _pad_0: [0u8; 28],
-                log_key: Key::default(),
-                _pad_1: [0u8; 144],
-            }
+        pub fn log_zone_id(&self) -> u64 {
+            (self.log_zone_id_head / self.zone_size).into()
         }
     }
 }
 
 mod log {
     pub mod entry {
-        use crate::{Key, Tag};
         use nora_endian::{u16le, u32le, u64le};
 
         macro_rules! ty {
@@ -135,10 +70,7 @@ mod log {
             pub ty: u8,
             pub name_len: u8,
             pub blob_id: u16le,
-            pub data_zone_count: u32le,
-            pub table_zone_count: u32le,
-            pub encryption_key: Key,
-            pub nonce_high: u32le,
+            pub _pad_0: u32le,
             // table_zones: u32le[]
             // data_zones: u32le[]
             // name: u8[]
@@ -188,14 +120,13 @@ mod log {
             pub blob_id: u16le,
             pub compressed_size: u32le,
             pub offset: u64le,
-            pub tag: Tag,
         }
     }
 }
 
 pub trait RootDev {
-    fn write_at(&mut self, sector: u8, data: &[u8; 512]) -> io::Result<()>;
-    fn read_at(&self, sector: u8) -> io::Result<[u8; 512]>;
+    fn write_at(&mut self, sector: u8, data: &[u8; 64]) -> io::Result<()>;
+    fn read_at(&self, sector: u8) -> io::Result<[u8; 64]>;
 
     /// 512 = 2**9
     /// 4096 = 2**12
@@ -216,6 +147,15 @@ pub trait ZoneDev {
     /// `offset` and `len` are in *bytes*.
     fn read_at<'a>(&'a self, offset: u64, len: usize) -> io::Result<Self::Read<'a>>;
 
+    /// # Note
+    ///
+    /// `offset` is in *bytes*.
+    ///
+    /// This method should panic if the offset is not aligned
+    /// to a block boundary, as it is a severe logic error.
+    // TODO extra copy is very bad and sad :(
+    fn write_at<'a>(&'a mut self, offset: u64, data: &[u8]) -> io::Result<()>;
+
     fn block_shift(&self) -> BlockShift;
 
     /// Wipe all zones. This may be a noop, but zones must be writeable
@@ -230,11 +170,6 @@ pub struct BlobRoot<T> {
     header: root::Header,
 }
 
-pub struct BlobRootDecrypted<T> {
-    root_dev: T,
-    header: root::Header,
-}
-
 pub struct BlobStore<T, U> {
     root_dev: T,
     zone_dev: U,
@@ -245,7 +180,7 @@ pub struct BlobStore<T, U> {
 }
 
 pub struct MemRoot {
-    sectors: Box<[[u8; 512]]>,
+    sectors: Box<[[u8; 64]]>,
 }
 
 pub struct MemZones {
@@ -258,25 +193,13 @@ pub enum BlockShift {
     N12 = 1 << 12,
 }
 
-pub enum UnlockMethod {
-    Argon2id {
-        p: u32,
-        t: u32,
-        s: u32,
-        salt: [u8; 16],
-    },
-}
-
-pub struct UnlockError<T>(pub BlobRoot<T>);
-
-pub enum KeySlot {
-    N0 = 0,
-    N1 = 1,
-    N2 = 2,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlobId(u16);
+pub struct BlobId(pub u16);
+
+pub struct BlobRef<'a, T> {
+    store: &'a mut T,
+    id: BlobId,
+}
 
 struct DecryptError;
 
@@ -288,11 +211,9 @@ struct DecryptError;
 /// To ensure blocks are written as a whole there is a second tail buffer,
 /// which is appended to until it is block-sized.
 struct Blob {
-    key: Key,
     data_zones: Vec<ZoneId>,
     table_zones: Vec<ZoneId>,
     name: Box<[u8]>,
-    nonce_high: u32,
     /// Data appended *before* compression
     new_tail: Vec<u8>,
     /// Data appended *after* compression
@@ -323,59 +244,53 @@ where
         Ok(Self { root_dev, header })
     }
 
-    pub fn unlock_methods(&self) -> [Option<UnlockMethod>; 3] {
-        [None, None, None]
-    }
-
-    pub fn unlock(
-        mut self,
-        key: &Key,
-        slot: KeySlot,
-    ) -> Result<BlobRootDecrypted<T>, UnlockError<T>> {
-        let slot = &self.header.keyslots[slot as usize];
-        match slot[0] {
-            1 => {
-                let slot = bytemuck::cast_ref::<_, root::KeySlotArgon2id>(slot);
-                let mut header_key = slot.header_key;
-                match decrypt(key, &[0; 12], &slot.header_key_tag, &mut header_key) {
-                    Ok(()) => {
-                        let enc = bytemuck::bytes_of_mut(&mut self.header.encrypted_area);
-                        let nonce = &nonce_64_32(self.header.generation.into(), 0);
-                        if decrypt(&header_key, nonce, &self.header.encrypted_area_tag, enc).is_ok()
-                        {
-                            Ok(BlobRootDecrypted {
-                                header: self.header,
-                                root_dev: self.root_dev,
-                            })
-                        } else {
-                            Err(UnlockError(self))
-                        }
-                    }
-                    Err(self::DecryptError) => Err(UnlockError(self)),
-                }
-            }
-            _ => Err(UnlockError(self)),
-        }
-    }
-}
-
-impl<T> BlobRootDecrypted<T>
-where
-    T: RootDev,
-{
     pub fn zone_dev_uuid(&self) -> Uuid {
-        self.header.encrypted_area.zone_dev_uuid
+        self.header.zone_dev_uuid
     }
 
     pub fn with_zone_dev<U>(self, zone_dev: U) -> io::Result<BlobStore<T, U>>
     where
         U: ZoneDev,
     {
+        let mut blobs = Vec::new();
+
+        let mut buf = vec![0; zone_dev.block_shift().into()];
+        let mut i = 0;
+        while i < self.header.log_head() {
+            let rd = zone_dev.read_at(i, buf.len())?;
+            buf.copy_from_slice(rd.as_ref());
+            i += u64::from(zone_dev.block_shift());
+
+            let mut k = 0;
+            let (buf, []) = buf.as_chunks::<8>() else {
+                unreachable!()
+            };
+            while let Some(x) = buf.get(k) {
+                let [ty, b, c, d, e, f, g, h] = *x;
+                match ty {
+                    log::entry::ty::NOP => {
+                        k += 1 + ((u32::from_le_bytes([e, f, g, h]) as usize) >> 3);
+                    }
+                    log::entry::ty::CREATE_BLOB => {
+                        k += 1;
+                        let name_len = usize::from(b);
+                        let blob_id = usize::from(u16::from_le_bytes([c, d]));
+                        let name = &buf[k..].as_flattened()[..name_len];
+                        k += (name_len + 7) >> 3;
+                        let n = blobs.len().max(1 + blob_id);
+                        blobs.resize_with(n, || None);
+                        blobs[blob_id] = Some(Blob::new(name));
+                    }
+                    ty => todo!("{ty}"),
+                }
+            }
+        }
+
         Ok(BlobStore {
             root_dev: self.root_dev,
             zone_dev,
             header: self.header,
-            blobs: Vec::new(),
+            blobs,
             log: Vec::new(),
         })
     }
@@ -386,64 +301,26 @@ where
     T: RootDev,
     U: ZoneDev,
 {
-    pub fn init<R>(
-        mut rng: R,
+    pub fn init(
         mut root_dev: T,
         mut zone_dev: U,
         zone_dev_uuid: Uuid,
         zone_size: u64,
-    ) -> io::Result<Self>
-    where
-        R: rand::CryptoRng,
-    {
+    ) -> io::Result<Self> {
         root_dev.zeroize()?;
         zone_dev.clear()?;
 
-        let mut header_key = rng.random();
-        let log_key = rng.random();
-        let generation = 1;
-
-        let unencrypted_area @ mut encrypted_area = root::EncryptedArea {
-            _pad_0: Default::default(),
-            _pad_1: [0; 144],
-            zone_dev_uuid,
-            zone_size: zone_size.into(),
-            log_zone_id: 0.into(),
-            log_block_size: 0.into(),
-            log_head: 0.into(),
-            log_key,
-        };
-        let encrypted_area_tag = encrypt(
-            &header_key,
-            &nonce_64_32(generation, 0),
-            bytemuck::bytes_of_mut(&mut encrypted_area),
-        );
-
-        let header_key_tag = encrypt(&[0; 32], &[0; 12], &mut header_key);
-        let salt = Default::default(); // TODO
-        let mut header = root::Header {
+        let header = root::Header {
             magic: root::Header::MAGIC,
             version: root::Header::VERSION.into(),
-            generation: generation.into(),
-            encrypted_area,
-            encrypted_area_tag,
-            keyslots: [
-                bytemuck::cast(root::KeySlotArgon2id {
-                    ty: 1,
-                    _pad_0: Default::default(),
-                    m_cost: 20_000.into(),
-                    t_cost: 2.into(),
-                    p_cost: 4.into(),
-                    header_key,
-                    header_key_tag,
-                    salt,
-                }),
-                [0; 80],
-                [0; 80],
-            ],
+            generation: 1.into(),
+            zone_dev_uuid,
+            zone_size: zone_size.into(),
+            block_size: u64::from(zone_dev.block_shift()).into(),
+            log_zone_id_head: 0.into(),
+            _pad_0: Default::default(),
         };
         root_dev.write_at(0, bytemuck::cast_ref(&header))?;
-        header.encrypted_area = unencrypted_area;
 
         Ok(Self {
             root_dev,
@@ -455,6 +332,10 @@ where
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
+        // FIXME round & round...
+        self.log_flush()?;
+        self.root_dev
+            .write_at(0, bytemuck::cast_ref(&self.header))?;
         Ok(())
     }
 
@@ -465,10 +346,18 @@ where
         Ok((self.root_dev, self.zone_dev))
     }
 
-    pub fn create_blob<R>(&mut self, rng: &mut R, name: &[u8]) -> io::Result<BlobId>
-    where
-        R: rand::CryptoRng,
-    {
+    pub fn blob(&mut self, id: BlobId) -> io::Result<Option<BlobRef<'_, Self>>> {
+        match self
+            .blobs
+            .get(usize::from(id.0))
+            .is_some_and(|x| x.is_some())
+        {
+            false => Ok(None),
+            true => Ok(Some(BlobRef { store: self, id })),
+        }
+    }
+
+    pub fn create_blob(&mut self, name: &[u8]) -> io::Result<BlobId> {
         assert!(name.len() <= 255, "name too long");
         let idx = self.blobs.iter().position(|x| x.is_none());
         let id = if let Some(idx) = idx {
@@ -479,15 +368,7 @@ where
             self.blobs.push(None);
             id
         };
-        let blob = Blob {
-            key: rng.random(),
-            nonce_high: 0u32.into(),
-            data_zones: Vec::new(),
-            table_zones: Vec::new(),
-            new_tail: Vec::new(),
-            compressed_tail: Vec::new(),
-            name: name.into(),
-        };
+        let blob = Blob::new(name);
         self.log_create_blob(id, &blob)?;
         self.blobs[usize::from(id.0)] = Some(blob);
         Ok(id)
@@ -497,24 +378,13 @@ where
         let hdr = log::entry::CreateBlob {
             ty: log::entry::ty::CREATE_BLOB,
             blob_id: id.0.into(),
-            data_zone_count: u32::try_from(blob.data_zones.len()).unwrap().into(),
-            table_zone_count: u32::try_from(blob.table_zones.len()).unwrap().into(),
             name_len: u8::try_from(blob.name.len()).unwrap().into(),
-            encryption_key: blob.key,
-            nonce_high: blob.nonce_high.into(),
+            _pad_0: Default::default(),
         };
         let hdr = bytemuck::bytes_of(&hdr);
-        let len = 8
-            + hdr.len()
-            + blob.data_zones.len() * 4
-            + blob.table_zones.len() * 4
-            + blob.name.len();
+        let len = hdr.len() + blob.name.len();
         self.log_reserve(len)?;
         self.log.extend(hdr);
-        self.log
-            .extend(blob.data_zones.iter().flat_map(|x| x.0.to_le_bytes()));
-        self.log
-            .extend(blob.table_zones.iter().flat_map(|x| x.0.to_le_bytes()));
         self.log.extend(&blob.name);
         self.log_pad();
         Ok(())
@@ -522,15 +392,30 @@ where
 
     fn log_reserve(&mut self, num: usize) -> io::Result<()> {
         let num = (num + 7) & !7;
-        let len = self.log.len() + num;
-        if len > usize::from(self.zone_dev.block_shift()) {
+        let len = (self.log.len() + num) as u64;
+        if len > self.header.block_size {
             self.log_flush()?;
         }
         Ok(())
     }
 
     fn log_flush(&mut self) -> io::Result<()> {
-        todo!();
+        if self.log.is_empty() {
+            return Ok(());
+        }
+        let max_len = u64::from(self.header.block_size) as usize;
+        assert!(
+            self.log.len() <= max_len,
+            "{} <= {}",
+            self.log.len(),
+            max_len
+        );
+        // TODO optimize with long NOPs
+        self.log.resize(max_len, 0);
+        self.zone_dev.write_at(self.header.log_head(), &self.log)?;
+        self.header.log_zone_id_head += nora_endian::u64le::from(self.log.len() as u64);
+        self.log.clear();
+        Ok(())
     }
 
     fn log_pad(&mut self) {
@@ -541,12 +426,12 @@ where
 }
 
 impl RootDev for MemRoot {
-    fn write_at(&mut self, sector: u8, data: &[u8; 512]) -> io::Result<()> {
+    fn write_at(&mut self, sector: u8, data: &[u8; 64]) -> io::Result<()> {
         self.sectors[usize::from(sector)] = *data;
         Ok(())
     }
 
-    fn read_at(&self, sector: u8) -> io::Result<[u8; 512]> {
+    fn read_at(&self, sector: u8) -> io::Result<[u8; 64]> {
         Ok(self.sectors[usize::from(sector)])
     }
 
@@ -559,7 +444,7 @@ impl RootDev for MemRoot {
     }
 
     fn zeroize(&mut self) -> io::Result<()> {
-        self.sectors.fill([0; 512]);
+        self.sectors.fill([0; 64]);
         Ok(())
     }
 }
@@ -575,6 +460,12 @@ impl ZoneDev for MemZones {
         Ok(&self.buffer[offset..offset + len])
     }
 
+    fn write_at<'a>(&'a mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+        let offset = offset as usize;
+        self.buffer[offset..offset + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+
     fn block_shift(&self) -> BlockShift {
         // TODO
         BlockShift::N9
@@ -584,7 +475,7 @@ impl ZoneDev for MemZones {
 impl MemRoot {
     pub fn new(highest_sector: u8) -> Self {
         Self {
-            sectors: vec![[0; 512]; usize::from(highest_sector) + 1].into(),
+            sectors: vec![[0; 64]; usize::from(highest_sector) + 1].into(),
         }
     }
 }
@@ -601,8 +492,8 @@ impl MemZones {
     }
 }
 
-impl From<BlockShift> for usize {
-    fn from(x: BlockShift) -> usize {
+impl From<BlockShift> for u32 {
+    fn from(x: BlockShift) -> u32 {
         match x {
             BlockShift::N9 => 1 << 9,
             BlockShift::N12 => 1 << 12,
@@ -610,32 +501,28 @@ impl From<BlockShift> for usize {
     }
 }
 
-impl<T> fmt::Debug for UnlockError<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(stringify!(UnlockError))
+impl From<BlockShift> for u64 {
+    fn from(x: BlockShift) -> u64 {
+        u32::from(x).into()
     }
 }
 
-fn decrypt(key: &Key, nonce: &Nonce, tag: &Tag, data: &mut [u8]) -> Result<(), DecryptError> {
-    let cipher = chacha20poly1305::ChaCha12Poly1305::new(key.into());
-    cipher
-        .decrypt_in_place_detached(nonce.into(), &[], data, tag.into())
-        .map_err(|_| DecryptError)
+impl From<BlockShift> for usize {
+    fn from(x: BlockShift) -> usize {
+        u32::from(x) as usize
+    }
 }
 
-fn encrypt(key: &Key, nonce: &Nonce, data: &mut [u8]) -> Tag {
-    let cipher = chacha20poly1305::ChaCha12Poly1305::new(key.into());
-    let tag = cipher
-        .encrypt_in_place_detached(nonce.into(), &[], data)
-        .expect("encryption failure");
-    tag.into()
-}
-
-fn nonce_64_32(x: u64, y: u32) -> Nonce {
-    let mut z = [0; 12];
-    z[..8].copy_from_slice(&x.to_le_bytes());
-    z[8..].copy_from_slice(&y.to_le_bytes());
-    z
+impl Blob {
+    fn new(name: &[u8]) -> Self {
+        Self {
+            data_zones: Vec::new(),
+            table_zones: Vec::new(),
+            new_tail: Vec::new(),
+            compressed_tail: Vec::new(),
+            name: name.into(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -644,21 +531,48 @@ mod test {
 
     const ZONE_UUID: Uuid = *b"AbracadabraKapow";
 
+    fn remount(mut store: BlobStore<MemRoot, MemZones>) -> BlobStore<MemRoot, MemZones> {
+        let (root_dev, zone_dev) = store.unmount().map_err(|e| e.1).unwrap();
+        let root = BlobRoot::load(root_dev).unwrap();
+        root.with_zone_dev(zone_dev).unwrap()
+    }
+
     #[test]
-    fn remount() {
+    fn empty() {
         let store = BlobStore::init(
-            rand::rng(),
             MemRoot::new(5),
             MemZones::new(1 << 20, 10),
             ZONE_UUID,
             1 << 20,
         )
         .unwrap();
-        let key = [0; 32];
+        let _ = remount(store);
+    }
 
-        let (root_dev, zone_dev) = store.unmount().map_err(|e| e.1).unwrap();
-        let root = BlobRoot::load(root_dev).unwrap();
-        let root = root.unlock(&key, KeySlot::N0).unwrap();
-        let _ = root.with_zone_dev(zone_dev).unwrap();
+    #[test]
+    fn create_blobs() {
+        let mut store = BlobStore::init(
+            MemRoot::new(5),
+            MemZones::new(1 << 20, 10),
+            ZONE_UUID,
+            1 << 20,
+        )
+        .unwrap();
+        store.create_blob(b"a").unwrap();
+        store.create_blob(b"b").unwrap();
+        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
+        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
+        store = remount(store);
+        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
+        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
+        store = remount(store);
+        store.create_blob(b"c").unwrap();
+        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
+        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
+        store.blob(BlobId(2)).unwrap().expect("missing blob 2");
+        store = remount(store);
+        store.blob(BlobId(0)).unwrap().expect("missing blob 0");
+        store.blob(BlobId(1)).unwrap().expect("missing blob 1");
+        store.blob(BlobId(2)).unwrap().expect("missing blob 2");
     }
 }
