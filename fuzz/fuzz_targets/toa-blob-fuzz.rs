@@ -6,6 +6,7 @@ use std::collections::hash_map::{Entry, HashMap};
 enum Op<'a> {
     Remount,
     CreateBlob { name: &'a [u8] },
+    DeleteBlob { name: &'a [u8] },
 }
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
@@ -41,6 +42,14 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                     }
                     (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
                     _ => panic!("blob map corrupt"),
+                }
+            }
+            Op::DeleteBlob { name } => {
+                match (blobs.remove(name), store.delete_blob(name).unwrap()) {
+                    (Some(_), Ok(())) => {}
+                    (None, Err(toa_blob::NoBlobByName)) => {}
+                    (Some(_), Err(toa_blob::NoBlobByName)) => panic!("store is missing blob"),
+                    (None, Ok(())) => panic!("store has ghost blob"),
                 }
             }
         }

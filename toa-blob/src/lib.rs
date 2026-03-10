@@ -1,6 +1,7 @@
 use std::{
     collections::btree_map::{BTreeMap, Entry},
     io,
+    rc::Rc,
 };
 
 type Uuid = [u8; 16];
@@ -53,6 +54,7 @@ mod log {
         ty! {
             0 NOP
             1 CREATE_BLOB
+            2 DELETE_BLOB
         }
 
         // finally found a usecase that ChatGPT is actually
@@ -164,7 +166,7 @@ pub struct BlobStore<T, U> {
     zone_dev: U,
     header: root::Header,
     blobs: Vec<Blob>,
-    blob_map: BTreeMap<Box<[u8]>, u32>,
+    blob_map: BTreeMap<Rc<[u8]>, u32>,
     log: Vec<u8>,
 }
 
@@ -189,6 +191,8 @@ pub struct BlobRef<'a, T> {
 
 #[derive(Debug)]
 pub struct DuplicateBlob;
+#[derive(Debug)]
+pub struct NoBlobByName;
 
 struct DecryptError;
 
@@ -200,6 +204,7 @@ struct DecryptError;
 /// To ensure blocks are written as a whole there is a second tail buffer,
 /// which is appended to until it is block-sized.
 struct Blob {
+    name: Rc<[u8]>,
     data_zones: Vec<ZoneId>,
     table_zones: Vec<ZoneId>,
     /// Data appended *before* compression
@@ -265,8 +270,18 @@ where
                         let name = &buf[k..].as_flattened()[2..2 + name_len];
                         k += ((2 + name_len) + 7) >> 3;
                         let index = blobs.len() as u32;
-                        blobs.push(Blob::new());
-                        blob_map.insert(name.into(), index);
+                        let name = Rc::<[_]>::from(name);
+                        blobs.push(Blob::new(name.clone()));
+                        blob_map.insert(name, index);
+                    }
+                    log::entry::ty::DELETE_BLOB => {
+                        k += 1;
+                        let idx = u32::from_le_bytes([e, f, g, h]);
+                        let old_name = blobs.swap_remove(idx as usize).name;
+                        blob_map.remove(&old_name);
+                        if let Some(new) = blobs.get(idx as usize) {
+                            *blob_map.get_mut(&new.name).unwrap() = idx;
+                        }
                     }
                     ty => todo!("{ty}"),
                 }
@@ -349,7 +364,7 @@ where
             Entry::Occupied(_) => Ok(Err(DuplicateBlob)),
             Entry::Vacant(e) => {
                 let idx = self.blobs.len() as u32;
-                self.blobs.push(Blob::new());
+                self.blobs.push(Blob::new(e.key().clone()));
                 e.insert(idx);
                 match self.log_create_blob(name) {
                     Ok(()) => Ok(Ok(())),
@@ -363,16 +378,41 @@ where
         }
     }
 
+    pub fn delete_blob(&mut self, name: &[u8]) -> io::Result<Result<(), NoBlobByName>> {
+        match self.blob_map.remove(name) {
+            None => Ok(Err(NoBlobByName)),
+            Some(idx) => {
+                self.blobs.swap_remove(idx as usize);
+                if let Some(new) = self.blobs.get(idx as usize) {
+                    *self.blob_map.get_mut(&new.name).unwrap() = idx;
+                }
+                self.log_delete_blob(idx)?;
+                Ok(Ok(()))
+            }
+        }
+    }
+
     fn log_create_blob(&mut self, name: &[u8]) -> io::Result<()> {
         let hdr = log::entry::CreateBlob {
             ty: log::entry::ty::CREATE_BLOB,
             name_len: u8::try_from(name.len()).unwrap().into(),
         };
-        let hdr = bytemuck::bytes_of(&hdr);
-        let len = hdr.len() + name.len();
+        self.log_push(&[bytemuck::bytes_of(&hdr), name])
+    }
+
+    fn log_delete_blob(&mut self, index: u32) -> io::Result<()> {
+        let hdr = log::entry::DeleteBlob {
+            ty: log::entry::ty::DELETE_BLOB,
+            _pad_0: Default::default(),
+            blob_index: index.into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_push(&mut self, data: &[&[u8]]) -> io::Result<()> {
+        let len = data.iter().fold(0, |s, x| s + x.len());
         self.log_reserve(len)?;
-        self.log.extend(hdr);
-        self.log.extend(name);
+        self.log.extend(data.iter().copied().flatten());
         self.log_pad();
         Ok(())
     }
@@ -501,8 +541,9 @@ impl From<BlockShift> for usize {
 }
 
 impl Blob {
-    fn new() -> Self {
+    fn new(name: Rc<[u8]>) -> Self {
         Self {
+            name,
             data_zones: Vec::new(),
             table_zones: Vec::new(),
             new_tail: Vec::new(),
@@ -532,6 +573,10 @@ mod test {
         let root = BlobRoot::load(root_dev).unwrap();
         root.with_zone_dev(zone_dev).unwrap()
     }
+
+    // these tests are all based on fuzz artifacts.
+    // when adding or changing a feature: first run tests,
+    // then update the fuzzer, run it and just wait for test cases to pop up.
 
     #[test]
     fn empty() {
@@ -564,5 +609,15 @@ mod test {
         let mut store = init();
         store.create_blob(b"a").unwrap().unwrap();
         assert!(store.create_blob(b"a").unwrap().is_err());
+    }
+
+    #[test]
+    fn delete_blob() {
+        let mut store = init();
+        store.create_blob(b"a").unwrap().unwrap();
+        store.delete_blob(b"a").unwrap().unwrap();
+        store.create_blob(b"a").unwrap().unwrap();
+        store.delete_blob(b"a").unwrap().unwrap();
+        remount(store);
     }
 }
