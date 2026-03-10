@@ -1,3 +1,4 @@
+use nora_endian::u64le;
 use std::{
     collections::btree_map::{BTreeMap, Entry},
     io,
@@ -55,6 +56,7 @@ mod log {
             0 NOP
             1 CREATE_BLOB
             2 DELETE_BLOB
+            5 APPEND_BLOB_TAIL
         }
 
         // finally found a usecase that ChatGPT is actually
@@ -279,6 +281,14 @@ where
                         let idx = u32::from_le_bytes([e, f, g, h]);
                         store.replay_delete_blob(idx);
                     }
+                    log::entry::ty::APPEND_BLOB_TAIL => {
+                        k += 1;
+                        let len = usize::from(u16::from_le_bytes([c, d]));
+                        let idx = u32::from_le_bytes([e, f, g, h]);
+                        let data = &buf[k..].as_flattened()[..usize::from(len)];
+                        store.replay_append_blob(idx, data);
+                        k += (len + 7) >> 3;
+                    }
                     ty => todo!("{ty}"),
                 }
             }
@@ -347,14 +357,19 @@ where
         }
     }
 
-    pub fn create_blob(&mut self, name: &[u8]) -> io::Result<Result<(), DuplicateBlob>> {
+    pub fn create_blob<'a>(
+        &'a mut self,
+        name: &[u8],
+    ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
         match self.replay_create_blob(name) {
-            Ok(()) => self.log_create_blob(name).map(|()| Ok(())),
+            Ok(index) => self
+                .log_create_blob(name)
+                .map(|()| Ok(BlobRef { store: self, index })),
             Err(e) => Ok(Err(e)),
         }
     }
 
-    fn replay_create_blob(&mut self, name: &[u8]) -> Result<(), DuplicateBlob> {
+    fn replay_create_blob(&mut self, name: &[u8]) -> Result<u32, DuplicateBlob> {
         assert!(name.len() <= 255, "name too long");
         match self.blob_map.entry(name.into()) {
             Entry::Occupied(_) => Err(DuplicateBlob),
@@ -362,7 +377,7 @@ where
                 let idx = self.blobs.len() as u32;
                 self.blobs.push(Blob::new(e.key().clone()));
                 e.insert(idx);
-                Ok(())
+                Ok(idx)
             }
         }
     }
@@ -373,6 +388,10 @@ where
         if let Some(new) = self.blobs.get(index as usize) {
             *self.blob_map.get_mut(&new.name).unwrap() = index;
         }
+    }
+
+    fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
+        self.blobs[index as usize].new_tail.extend(data);
     }
 
     fn log_create_blob(&mut self, name: &[u8]) -> io::Result<()> {
@@ -390,6 +409,17 @@ where
             blob_index: index.into(),
         };
         self.log_push(&[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_append_blob_tail(&mut self, index: u32, data: &[u8]) -> io::Result<()> {
+        let len = u16::try_from(data.len()).unwrap(); // FIXME pre-split data
+        let hdr = log::entry::AppendBlobTail {
+            ty: log::entry::ty::APPEND_BLOB_TAIL,
+            _pad_0: Default::default(),
+            data_len: len.into(),
+            blob_index: index.into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr), data])
     }
 
     fn log_push(&mut self, data: &[&[u8]]) -> io::Result<()> {
@@ -423,7 +453,7 @@ where
         // TODO optimize with long NOPs
         self.log.resize(max_len, 0);
         self.zone_dev.write_at(self.header.log_head(), &self.log)?;
-        self.header.log_zone_id_head += nora_endian::u64le::from(self.log.len() as u64);
+        self.header.log_zone_id_head += u64le::from(self.log.len() as u64);
         self.log.clear();
         Ok(())
     }
@@ -432,6 +462,10 @@ where
         let n = self.log.len();
         let n = (n + 7) & !7;
         self.log.resize(n, 0);
+    }
+
+    fn log_free(&mut self) -> usize {
+        u64::from(self.header.block_size) as usize - self.log.len()
     }
 }
 
@@ -443,6 +477,34 @@ where
     pub fn delete(self) -> io::Result<()> {
         self.store.replay_delete_blob(self.index);
         self.store.log_delete_blob(self.index)
+    }
+
+    pub fn append(&mut self, mut data: &[u8]) -> io::Result<()> {
+        while !data.is_empty() {
+            if self.store.log_free() == 0 {
+                self.store.log_flush()?;
+            }
+            let wr;
+            let n = (self.store.log_free() - 8).min(data.len());
+            (wr, data) = data.split_at(n);
+            self.store.replay_append_blob(self.index, wr);
+            self.store.log_append_blob_tail(self.index, wr)?;
+        }
+        Ok(())
+    }
+
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let s = usize::try_from(offset)
+            .ok()
+            .and_then(|x| self.blob().new_tail.get(x..))
+            .unwrap_or(&[]);
+        let n = s.len().min(buf.len());
+        buf[..n].copy_from_slice(&s[..n]);
+        Ok(n)
+    }
+
+    fn blob(&self) -> &Blob {
+        &self.store.blobs[self.index as usize]
     }
 }
 
@@ -613,5 +675,21 @@ mod test {
         store.create_blob(b"a").unwrap().unwrap();
         store.blob(b"a").unwrap().unwrap().delete().unwrap();
         remount(store);
+    }
+
+    #[test]
+    fn append_blob() {
+        let mut s = init();
+        let mut b = s.create_blob(b"a").unwrap().unwrap();
+        b.append(&[0; 507]).unwrap();
+        s.unmount().map_err(|e| e.1).unwrap();
+    }
+
+    #[test]
+    fn append_blob_remount() {
+        let mut s = init();
+        s.create_blob(b"a").unwrap().unwrap();
+        s = remount(s);
+        s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
     }
 }
