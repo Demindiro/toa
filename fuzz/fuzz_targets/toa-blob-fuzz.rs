@@ -36,6 +36,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 }
             }
             Op::CreateBlob { name } => {
+                let name = &name[..name.len().min(255)];
                 match (blobs.entry(name), store.create_blob(name).unwrap()) {
                     (Entry::Vacant(e), Ok(())) => {
                         e.insert(());
@@ -45,6 +46,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 }
             }
             Op::DeleteBlob { name } => {
+                let name = &name[..name.len().min(255)];
                 match (blobs.remove(name), store.delete_blob(name).unwrap()) {
                     (Some(_), Ok(())) => {}
                     (None, Err(toa_blob::NoBlobByName)) => {}
