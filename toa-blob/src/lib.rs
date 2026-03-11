@@ -552,13 +552,24 @@ impl BlobStoreData {
             }
             Entry::Occupied(mut e) => {
                 blob.name = e.key().clone();
-                self.blobs.swap_remove(*e.get() as usize);
-                // If the renamed blob is at the end, then
-                // the index of that blob is now at the old blob index.
-                // If the renamed blob is not at the end,
-                // it has not moved and the index must be updated.
+                let other_idx = *e.get();
+                self.blobs.swap_remove(other_idx as usize);
+                // If the renamed blob is at the end, then that
+                // blob just got moved to other_idx, so nothing to do
                 if self.blobs.len() != index as usize {
+                    // Otherwise, another blob got moved, so
+                    // we need to update the map to point new_name
+                    // to index and update the new blob at other_idx
+                    debug_assert_ne!(index, other_idx);
                     e.insert(index);
+                    // ... keep in mind that we may have just removed
+                    // the blob at the very end.
+                    if let Some(x) = self.blobs.get(other_idx as usize) {
+                        *self
+                            .blob_map
+                            .get_mut(&x.name)
+                            .expect("other blob is missing") = other_idx;
+                    }
                 }
             }
         }
@@ -844,5 +855,16 @@ mod test {
         s.create_blob(b"a").unwrap().unwrap();
         s = remount(s);
         s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
+    }
+
+    #[test]
+    fn rename_blob_shuffle_bloblist() {
+        let mut s = init();
+        s.create_blob(b"").unwrap().unwrap();
+        s.create_blob(b"a").unwrap().unwrap();
+        s.create_blob(b"b").unwrap().unwrap();
+        dbg!(&s.data.borrow().blob_map);
+        s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
+        s.blob(b"b").unwrap().unwrap().append(b"").unwrap();
     }
 }
