@@ -1,5 +1,6 @@
 use nora_endian::u64le;
 use std::{
+    cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
     io,
     rc::Rc,
@@ -157,7 +158,7 @@ pub trait ZoneDev {
     /// This method should panic if the offset is not aligned
     /// to a block boundary, as it is a severe logic error.
     // TODO extra copy is very bad and sad :(
-    fn write_at<'a>(&'a mut self, offset: u64, data: &[u8]) -> io::Result<()>;
+    fn write_at<'a>(&'a self, offset: u64, data: &[u8]) -> io::Result<()>;
 
     fn block_shift(&self) -> BlockShift;
 
@@ -176,6 +177,10 @@ pub struct BlobRoot<T> {
 pub struct BlobStore<T, U> {
     root_dev: T,
     zone_dev: U,
+    data: RefCell<BlobStoreData>,
+}
+
+struct BlobStoreData {
     header: root::Header,
     blobs: Vec<Blob>,
     blob_map: BTreeMap<Rc<[u8]>, u32>,
@@ -187,9 +192,11 @@ pub struct MemRoot {
 }
 
 pub struct MemZones {
-    buffer: Box<[u8]>,
+    buffer: RefCell<Box<[u8]>>,
     zone_size: usize,
 }
+
+pub struct MemZonesRef<'a>(core::cell::Ref<'a, [u8]>);
 
 pub enum BlockShift {
     N9 = 1 << 9,
@@ -197,7 +204,7 @@ pub enum BlockShift {
 }
 
 pub struct BlobRef<'a, T> {
-    store: &'a mut T,
+    store: &'a T,
     index: u32,
 }
 
@@ -256,22 +263,20 @@ where
     where
         U: ZoneDev,
     {
-        let mut store = BlobStore {
-            root_dev: self.root_dev,
-            zone_dev,
+        let mut store = BlobStoreData {
             header: self.header,
             blobs: Default::default(),
             blob_map: Default::default(),
             log: Vec::new(),
         };
 
-        let mut buf = vec![0; store.zone_dev.block_shift().into()];
+        let mut buf = vec![0; zone_dev.block_shift().into()];
         let mut i = 0;
         while i < self.header.log_head() {
-            let rd = store.zone_dev.read_at(i, buf.len())?;
+            let rd = zone_dev.read_at(i, buf.len())?;
             buf.copy_from_slice(rd.as_ref());
             drop(rd);
-            i += u64::from(store.zone_dev.block_shift());
+            i += u64::from(zone_dev.block_shift());
 
             let mut k = 0;
             let (buf, []) = buf.as_chunks::<8>() else {
@@ -315,7 +320,11 @@ where
             }
         }
 
-        Ok(store)
+        Ok(BlobStore {
+            root_dev: self.root_dev,
+            zone_dev,
+            data: store.into(),
+        })
     }
 }
 
@@ -348,10 +357,7 @@ where
         Ok(Self {
             root_dev,
             zone_dev,
-            header,
-            blobs: Default::default(),
-            blob_map: Default::default(),
-            log: Vec::new(),
+            data: BlobStoreData::new(header).into(),
         })
     }
 
@@ -359,7 +365,7 @@ where
         // FIXME round & round...
         self.log_flush()?;
         self.root_dev
-            .write_at(0, bytemuck::cast_ref(&self.header))?;
+            .write_at(0, bytemuck::cast_ref(&self.data.borrow().header))?;
         Ok(())
     }
 
@@ -370,9 +376,9 @@ where
         Ok((self.root_dev, self.zone_dev))
     }
 
-    pub fn blob(&mut self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
+    pub fn blob(&self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
         assert!(name.len() <= 255, "name too long");
-        match self.blob_map.get(name) {
+        match self.data.borrow().blob_map.get(name) {
             None => Ok(None),
             Some(&index) => Ok(Some(BlobRef { store: self, index })),
         }
@@ -382,11 +388,124 @@ where
         &'a mut self,
         name: &[u8],
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
-        match self.replay_create_blob(name) {
+        let res = self.data.borrow_mut().replay_create_blob(name);
+        match res {
             Ok(index) => self
                 .log_create_blob(name)
                 .map(|()| Ok(BlobRef { store: self, index })),
             Err(e) => Ok(Err(e)),
+        }
+    }
+
+    pub fn clear(&mut self) -> io::Result<()> {
+        self.root_dev.zeroize()?;
+        self.zone_dev.clear()?;
+        let mut data = self.data.borrow_mut();
+        data.blobs.clear();
+        data.blob_map.clear();
+        data.log.clear();
+        data.header.log_zone_id_head = 0.into();
+        Ok(())
+    }
+
+    fn log_create_blob(&self, name: &[u8]) -> io::Result<()> {
+        let hdr = log::entry::CreateBlob {
+            ty: log::entry::ty::CREATE_BLOB,
+            name_len: u8::try_from(name.len()).unwrap().into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr), name])
+    }
+
+    fn log_delete_blob(&self, index: u32) -> io::Result<()> {
+        let hdr = log::entry::DeleteBlob {
+            ty: log::entry::ty::DELETE_BLOB,
+            _pad_0: Default::default(),
+            blob_index: index.into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_rename_blob(&self, index: u32, name: &[u8]) -> io::Result<()> {
+        let hdr = log::entry::RenameBlob {
+            ty: log::entry::ty::RENAME_BLOB,
+            name_len: u8::try_from(name.len()).unwrap().into(),
+            _pad_0: Default::default(),
+            blob_index: index.into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr), name])
+    }
+
+    fn log_append_blob_tail(&self, index: u32, data: &[u8]) -> io::Result<()> {
+        let len = u16::try_from(data.len()).unwrap(); // FIXME pre-split data
+        let hdr = log::entry::AppendBlobTail {
+            ty: log::entry::ty::APPEND_BLOB_TAIL,
+            _pad_0: Default::default(),
+            data_len: len.into(),
+            blob_index: index.into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr), data])
+    }
+
+    fn log_push(&self, data: &[&[u8]]) -> io::Result<()> {
+        let len = data.iter().fold(0, |s, x| s + x.len());
+        self.log_reserve(len)?;
+        self.data
+            .borrow_mut()
+            .log
+            .extend(data.iter().copied().flatten());
+        self.log_pad();
+        Ok(())
+    }
+
+    fn log_reserve(&self, num: usize) -> io::Result<()> {
+        let num = (num + 7) & !7;
+        let len = (self.data.borrow().log.len() + num) as u64;
+        if len > self.data.borrow().header.block_size {
+            self.log_flush()?;
+        }
+        Ok(())
+    }
+
+    fn log_flush(&self) -> io::Result<()> {
+        let data = &mut *self.data.borrow_mut();
+        if data.log.is_empty() {
+            return Ok(());
+        }
+        let max_len = u64::from(data.header.block_size) as usize;
+        assert!(
+            data.log.len() <= max_len,
+            "{} <= {}",
+            data.log.len(),
+            max_len
+        );
+        // TODO optimize with long NOPs
+        data.log.resize(max_len, 0);
+        self.zone_dev.write_at(data.header.log_head(), &data.log)?;
+        data.header.log_zone_id_head += u64le::from(data.log.len() as u64);
+        data.log.clear();
+        Ok(())
+    }
+
+    fn log_pad(&self) {
+        let data = &mut *self.data.borrow_mut();
+        let n = data.log.len();
+        let n = (n + 7) & !7;
+        data.log.resize(n, 0);
+    }
+
+    fn log_free(&self) -> usize {
+        let data = self.data.borrow();
+        u64::from(data.header.block_size) as usize - data.log.len()
+    }
+}
+
+impl BlobStoreData {
+    fn new(header: root::Header) -> Self {
+        Self {
+            header,
+            blobs: Default::default(),
+            blob_map: Default::default(),
+            log: Vec::new(),
         }
     }
 
@@ -443,90 +562,15 @@ where
     fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
         self.blobs[index as usize].new_tail.extend(data);
     }
+}
 
-    fn log_create_blob(&mut self, name: &[u8]) -> io::Result<()> {
-        let hdr = log::entry::CreateBlob {
-            ty: log::entry::ty::CREATE_BLOB,
-            name_len: u8::try_from(name.len()).unwrap().into(),
-        };
-        self.log_push(&[bytemuck::bytes_of(&hdr), name])
+impl<'a, T> BlobRef<'a, T> {
+    // FIXME not sound in the presence of deletes/renames
+    /*
+    pub fn into_handle(self) -> BlobHandle {
+        BlobHandle(self.index)
     }
-
-    fn log_delete_blob(&mut self, index: u32) -> io::Result<()> {
-        let hdr = log::entry::DeleteBlob {
-            ty: log::entry::ty::DELETE_BLOB,
-            _pad_0: Default::default(),
-            blob_index: index.into(),
-        };
-        self.log_push(&[bytemuck::bytes_of(&hdr)])
-    }
-
-    fn log_rename_blob(&mut self, index: u32, name: &[u8]) -> io::Result<()> {
-        let hdr = log::entry::RenameBlob {
-            ty: log::entry::ty::RENAME_BLOB,
-            name_len: u8::try_from(name.len()).unwrap().into(),
-            _pad_0: Default::default(),
-            blob_index: index.into(),
-        };
-        self.log_push(&[bytemuck::bytes_of(&hdr), name])
-    }
-
-    fn log_append_blob_tail(&mut self, index: u32, data: &[u8]) -> io::Result<()> {
-        let len = u16::try_from(data.len()).unwrap(); // FIXME pre-split data
-        let hdr = log::entry::AppendBlobTail {
-            ty: log::entry::ty::APPEND_BLOB_TAIL,
-            _pad_0: Default::default(),
-            data_len: len.into(),
-            blob_index: index.into(),
-        };
-        self.log_push(&[bytemuck::bytes_of(&hdr), data])
-    }
-
-    fn log_push(&mut self, data: &[&[u8]]) -> io::Result<()> {
-        let len = data.iter().fold(0, |s, x| s + x.len());
-        self.log_reserve(len)?;
-        self.log.extend(data.iter().copied().flatten());
-        self.log_pad();
-        Ok(())
-    }
-
-    fn log_reserve(&mut self, num: usize) -> io::Result<()> {
-        let num = (num + 7) & !7;
-        let len = (self.log.len() + num) as u64;
-        if len > self.header.block_size {
-            self.log_flush()?;
-        }
-        Ok(())
-    }
-
-    fn log_flush(&mut self) -> io::Result<()> {
-        if self.log.is_empty() {
-            return Ok(());
-        }
-        let max_len = u64::from(self.header.block_size) as usize;
-        assert!(
-            self.log.len() <= max_len,
-            "{} <= {}",
-            self.log.len(),
-            max_len
-        );
-        // TODO optimize with long NOPs
-        self.log.resize(max_len, 0);
-        self.zone_dev.write_at(self.header.log_head(), &self.log)?;
-        self.header.log_zone_id_head += u64le::from(self.log.len() as u64);
-        self.log.clear();
-        Ok(())
-    }
-
-    fn log_pad(&mut self) {
-        let n = self.log.len();
-        let n = (n + 7) & !7;
-        self.log.resize(n, 0);
-    }
-
-    fn log_free(&mut self) -> usize {
-        u64::from(self.header.block_size) as usize - self.log.len()
-    }
+    */
 }
 
 impl<'a, T, U> BlobRef<'a, BlobStore<T, U>>
@@ -535,7 +579,7 @@ where
     U: ZoneDev,
 {
     pub fn delete(self) -> io::Result<()> {
-        self.store.replay_delete_blob(self.index);
+        self.store.data.borrow_mut().replay_delete_blob(self.index);
         self.store.log_delete_blob(self.index)
     }
 
@@ -551,7 +595,10 @@ where
             let wr;
             let n = (self.store.log_free() - 8).min(data.len());
             (wr, data) = data.split_at(n);
-            self.store.replay_append_blob(self.index, wr);
+            self.store
+                .data
+                .borrow_mut()
+                .replay_append_blob(self.index, wr);
             self.store.log_append_blob_tail(self.index, wr)?;
         }
         Ok(offt)
@@ -569,16 +616,23 @@ where
     }
 
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
-        if self.store.replay_rename_blob(self.index, new_name) {
+        // FIXME update index
+        if self
+            .store
+            .data
+            .borrow_mut()
+            .replay_rename_blob(self.index, new_name)
+        {
             self.store.log_rename_blob(self.index, new_name)?;
         }
         Ok(())
     }
 
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let data = self.store.data.borrow();
         let s = usize::try_from(offset)
             .ok()
-            .and_then(|x| self.blob().new_tail.get(x..))
+            .and_then(|x| data.blobs[self.index as usize].new_tail.get(x..))
             .unwrap_or(&[]);
         let n = s.len().min(buf.len());
         buf[..n].copy_from_slice(&s[..n]);
@@ -586,11 +640,9 @@ where
     }
 
     pub fn len(&self) -> io::Result<u64> {
-        Ok(self.blob().new_tail.len() as u64)
-    }
-
-    fn blob(&self) -> &Blob {
-        &self.store.blobs[self.index as usize]
+        Ok(self.store.data.borrow().blobs[self.index as usize]
+            .new_tail
+            .len() as u64)
     }
 }
 
@@ -620,24 +672,33 @@ impl RootDev for MemRoot {
 
 impl ZoneDev for MemZones {
     type Read<'a>
-        = &'a [u8]
+        = MemZonesRef<'a>
     where
         Self: 'a;
 
     fn read_at<'a>(&'a self, offset: u64, len: usize) -> io::Result<Self::Read<'a>> {
         let offset = offset as usize;
-        Ok(&self.buffer[offset..offset + len])
+        let x = self.buffer.borrow();
+        let x = core::cell::Ref::map(x, |x| &x[offset..offset + len]);
+        Ok(MemZonesRef(x))
     }
 
-    fn write_at<'a>(&'a mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+    fn write_at<'a>(&'a self, offset: u64, data: &[u8]) -> io::Result<()> {
         let offset = offset as usize;
-        self.buffer[offset..offset + data.len()].copy_from_slice(data);
+        let mut buf = self.buffer.borrow_mut();
+        buf[offset..offset + data.len()].copy_from_slice(data);
         Ok(())
     }
 
     fn block_shift(&self) -> BlockShift {
         // TODO
         BlockShift::N9
+    }
+}
+
+impl<'a> AsRef<[u8]> for MemZonesRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        &*self.0
     }
 }
 
@@ -655,7 +716,7 @@ impl MemZones {
             .checked_mul(zone_count)
             .expect("zone size*count overflow");
         Self {
-            buffer: vec![0; len].into(),
+            buffer: RefCell::new(vec![0; len].into()),
             zone_size,
         }
     }
