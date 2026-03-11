@@ -1,6 +1,6 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
-pub use toa_core::{self as core, Hash};
+pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
 use std::{
@@ -9,7 +9,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use toa_core::Domain;
+use toa_hash::Domain;
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
@@ -319,7 +319,7 @@ where
         chunk: &[u8],
         map: &mut Map,
     ) -> io::Result<Hash> {
-        let key = toa_core::hash_chunk(domain, chunk);
+        let key = toa_hash::hash_chunk(domain, chunk);
         if let Entry::Vacant(e) = map.entry(key) {
             e.insert(self.store_chunk(store, domain, chunk)?);
         }
@@ -335,7 +335,7 @@ where
         len: u128,
         map: &mut Map,
     ) -> io::Result<Hash> {
-        let key = toa_core::hash_pair(*x, *y, len);
+        let key = toa_hash::hash_pair(*x, *y, len);
         if let Entry::Vacant(e) = map.entry(key) {
             e.insert(self.store_pair(store, domain, x, y, len)?);
         }
@@ -403,7 +403,7 @@ where
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
         while store.read_at_exact_or_none(&self.chunks_full, offt, &mut buf)? {
-            let key = toa_core::hash_chunk(domain, &buf);
+            let key = toa_hash::hash_chunk(domain, &buf);
             map.insert(key, FileRef::new_chunk_full(domain, offt));
             offt += buf.len() as u64;
         }
@@ -418,7 +418,7 @@ where
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
             store.read_at_exact(&self.chunks_partial, offt + 2, buf)?;
-            let key = toa_core::hash_chunk(domain, buf);
+            let key = toa_hash::hash_chunk(domain, buf);
             map.insert(key, FileRef::new_chunk_partial(domain, offt));
             offt += align8(2 + u64::from(len));
         }
@@ -430,7 +430,7 @@ where
         let mut offt = 0;
         while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
             let ([x, y], len) = bytes_to_pair(buf);
-            let key = toa_core::hash_pair(x, y, len);
+            let key = toa_hash::hash_pair(x, y, len);
             map.insert(key, FileRef::new_pair(domain, offt));
             offt += buf.len() as u64;
         }
@@ -948,7 +948,7 @@ mod test {
     impl Test {
         fn add(&mut self, data: &[u8]) -> Hash {
             let key = self.toa.add_data(data).expect("add_data failed");
-            assert_eq!(key, toa_core::hash(Domain::Data, data));
+            assert_eq!(key, toa_hash::hash(Domain::Data, data));
             key
         }
 
