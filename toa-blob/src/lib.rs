@@ -557,6 +557,17 @@ where
         Ok(offt)
     }
 
+    /// # Returns
+    ///
+    /// Start offset of written data.
+    pub fn append_many(&mut self, data: &[&[u8]]) -> io::Result<u64> {
+        let offt = self.len()?;
+        for x in data {
+            self.append(x)?;
+        }
+        Ok(offt)
+    }
+
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
         if self.store.replay_rename_blob(self.index, new_name) {
             self.store.log_rename_blob(self.index, new_name)?;
