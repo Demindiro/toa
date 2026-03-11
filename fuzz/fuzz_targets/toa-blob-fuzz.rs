@@ -9,6 +9,7 @@ enum Op<'a> {
     DeleteBlob { name: &'a [u8] },
     AppendBlob { slot: u16, data: &'a [u8] },
     ReadBlob { slot: u16, offset: u32, len: u16 },
+    RenameBlob { slot: u16, new_name: &'a [u8] },
 }
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
@@ -87,6 +88,30 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                         assert_eq!(x, &buf[..n]);
                     }
                     None => panic!("store is missing blob"),
+                }
+            }
+            Op::RenameBlob { slot, new_name } => {
+                let new_name = &new_name[..new_name.len().min(255)];
+                let Some((old_name, _)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref())
+                else {
+                    continue;
+                };
+                store
+                    .blob(old_name)
+                    .unwrap()
+                    .expect("store is missing blob")
+                    .rename(new_name)
+                    .unwrap();
+                if *old_name != new_name {
+                    blob_map.remove(old_name);
+                    blob_map
+                        .entry(new_name)
+                        .and_modify(|x| {
+                            blobs[usize::from(*x)] = None;
+                            *x = slot;
+                        })
+                        .or_insert(slot);
+                    blobs[usize::from(slot)].as_mut().unwrap().0 = new_name;
                 }
             }
         }

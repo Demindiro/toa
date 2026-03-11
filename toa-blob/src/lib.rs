@@ -56,6 +56,7 @@ mod log {
             0 NOP
             1 CREATE_BLOB
             2 DELETE_BLOB
+            4 RENAME_BLOB
             5 APPEND_BLOB_TAIL
         }
 
@@ -91,6 +92,15 @@ mod log {
         pub struct AddZoneToBlob {
             pub ty: u8,
             pub _pad_0: [u8; 3],
+            pub blob_index: u32le,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        pub struct RenameBlob {
+            pub ty: u8,
+            pub name_len: u8,
+            pub _pad_0: u16le,
             pub blob_index: u32le,
         }
 
@@ -191,6 +201,9 @@ pub struct BlobRef<'a, T> {
     index: u32,
 }
 
+#[derive(Clone, Copy)]
+pub struct BlobHandle(u32);
+
 #[derive(Debug)]
 pub struct DuplicateBlob;
 
@@ -280,6 +293,14 @@ where
                         k += 1;
                         let idx = u32::from_le_bytes([e, f, g, h]);
                         store.replay_delete_blob(idx);
+                    }
+                    log::entry::ty::RENAME_BLOB => {
+                        k += 1;
+                        let name_len = usize::from(b);
+                        let idx = u32::from_le_bytes([e, f, g, h]);
+                        let name = &buf[k..].as_flattened()[..usize::from(name_len)];
+                        store.replay_rename_blob(idx, name);
+                        k += (name_len + 7) >> 3;
                     }
                     log::entry::ty::APPEND_BLOB_TAIL => {
                         k += 1;
@@ -390,6 +411,35 @@ where
         }
     }
 
+    /// # Returns
+    ///
+    /// `true` if the blob actually got renamed, `false` if the operation is a no-op.
+    fn replay_rename_blob(&mut self, index: u32, new_name: &[u8]) -> bool {
+        let blob = &mut self.blobs[index as usize];
+        if &*blob.name == new_name {
+            return false;
+        }
+        self.blob_map.remove(&*blob.name);
+        match self.blob_map.entry(new_name.into()) {
+            Entry::Vacant(e) => {
+                blob.name = e.key().clone();
+                e.insert(index);
+            }
+            Entry::Occupied(mut e) => {
+                blob.name = e.key().clone();
+                self.blobs.swap_remove(*e.get() as usize);
+                // If the renamed blob is at the end, then
+                // the index of that blob is now at the old blob index.
+                // If the renamed blob is not at the end,
+                // it has not moved and the index must be updated.
+                if self.blobs.len() != index as usize {
+                    e.insert(index);
+                }
+            }
+        }
+        true
+    }
+
     fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
         self.blobs[index as usize].new_tail.extend(data);
     }
@@ -409,6 +459,16 @@ where
             blob_index: index.into(),
         };
         self.log_push(&[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_rename_blob(&mut self, index: u32, name: &[u8]) -> io::Result<()> {
+        let hdr = log::entry::RenameBlob {
+            ty: log::entry::ty::RENAME_BLOB,
+            name_len: u8::try_from(name.len()).unwrap().into(),
+            _pad_0: Default::default(),
+            blob_index: index.into(),
+        };
+        self.log_push(&[bytemuck::bytes_of(&hdr), name])
     }
 
     fn log_append_blob_tail(&mut self, index: u32, data: &[u8]) -> io::Result<()> {
@@ -489,6 +549,13 @@ where
             (wr, data) = data.split_at(n);
             self.store.replay_append_blob(self.index, wr);
             self.store.log_append_blob_tail(self.index, wr)?;
+        }
+        Ok(())
+    }
+
+    pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
+        if self.store.replay_rename_blob(self.index, new_name) {
+            self.store.log_rename_blob(self.index, new_name)?;
         }
         Ok(())
     }

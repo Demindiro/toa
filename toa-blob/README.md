@@ -89,6 +89,17 @@ deleted blob. This ensures the blob array remains contiguous.
 | u32   | blob index             |
 | u64   | zone ID                |
 
+##### 4. Rename blob
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u8    | name length            |
+| u16   | (pad)                  |
+| u32   | blob index             |
+| u8[]  | name                   |
+| u8[]  | (pad)                  |
+
 ##### 5. Append blob tail
 
 | type  | name                   |
