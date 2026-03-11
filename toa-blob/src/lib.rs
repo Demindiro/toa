@@ -539,7 +539,11 @@ where
         self.store.log_delete_blob(self.index)
     }
 
-    pub fn append(&mut self, mut data: &[u8]) -> io::Result<()> {
+    /// # Returns
+    ///
+    /// Start offset of written data.
+    pub fn append(&mut self, mut data: &[u8]) -> io::Result<u64> {
+        let offt = self.len()?;
         while !data.is_empty() {
             if self.store.log_free() == 0 {
                 self.store.log_flush()?;
@@ -550,7 +554,7 @@ where
             self.store.replay_append_blob(self.index, wr);
             self.store.log_append_blob_tail(self.index, wr)?;
         }
-        Ok(())
+        Ok(offt)
     }
 
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
@@ -568,6 +572,10 @@ where
         let n = s.len().min(buf.len());
         buf[..n].copy_from_slice(&s[..n]);
         Ok(n)
+    }
+
+    pub fn len(&self) -> io::Result<u64> {
+        Ok(self.blob().new_tail.len() as u64)
     }
 
     fn blob(&self) -> &Blob {

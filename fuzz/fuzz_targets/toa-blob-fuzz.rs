@@ -69,8 +69,9 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 let name: &[u8] = name;
                 match store.blob(name).unwrap() {
                     Some(mut y) => {
+                        let offt = y.append(data).unwrap();
+                        assert_eq!(offt, x.len() as u64, "offset mismatch");
                         x.extend(data);
-                        y.append(data).unwrap();
                     }
                     None => panic!("store is missing blob"),
                 }
