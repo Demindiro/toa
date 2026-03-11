@@ -125,13 +125,9 @@ this should not result in any vulnerabilities.
 | type  | name                   |
 |:----- |:---------------------- |
 | u8    | (type)                 |
-| u8    | compression algorithm  |
-| u16   | (pad)                  |
+| u24   | (pad)                  |
 | u32   | blob index             |
-| u64   | offset                 |
-| u32   | compressed size        |
-| u32   | (pad)                  |
-
+| u64   | length                 |
 
 
 ### Blob
@@ -164,3 +160,14 @@ contents of the disk are no longer trusted if it is recovered somehow.
 For a remote/network disk authentication is necessary, but an object-oriented
 protocol would be more convenient than a block protocol at such a level.
 Hence, this scenario is not considered.
+
+### No compression
+
+The original design was intended to include support for compression,
+but compression is ineffective if higher layers use encryption or their
+own compression. It would also require a table to map offsets to record,
+adding at least one disk seek of latency.
+
+The main reason to handle tables was to avoid allocating a potentially
+huge zone for storing a small table, but it should be possible to mitigate
+this overhead using a tiered log.

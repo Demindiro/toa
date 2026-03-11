@@ -118,12 +118,9 @@ mod log {
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct CommitBlobTail {
             pub ty: u8,
-            pub compression_algorithm: u8,
-            pub _pad_0: [u8; 2],
+            pub _pad_0: [u8; 3],
             pub blob_index: u32le,
-            pub offset: u64le,
-            pub compressed_size: u32le,
-            pub _pad_1: [u8; 4],
+            pub len: u64le,
         }
     }
 }
@@ -223,12 +220,8 @@ pub struct DuplicateBlob;
 /// which is appended to until it is block-sized.
 struct Blob {
     name: Rc<[u8]>,
-    data_zones: Vec<ZoneId>,
-    table_zones: Vec<ZoneId>,
-    /// Data appended *before* compression
-    new_tail: Vec<u8>,
-    /// Data appended *after* compression
-    compressed_tail: Vec<u8>,
+    zones: Vec<ZoneId>,
+    tail: Vec<u8>,
 }
 
 struct Zone {
@@ -577,7 +570,7 @@ impl BlobStoreData {
     }
 
     fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
-        self.blobs[index as usize].new_tail.extend(data);
+        self.blobs[index as usize].tail.extend(data);
     }
 }
 
@@ -649,7 +642,7 @@ where
         let data = self.store.data.borrow();
         let s = usize::try_from(offset)
             .ok()
-            .and_then(|x| data.blobs[self.index as usize].new_tail.get(x..))
+            .and_then(|x| data.blobs[self.index as usize].tail.get(x..))
             .unwrap_or(&[]);
         let n = s.len().min(buf.len());
         buf[..n].copy_from_slice(&s[..n]);
@@ -658,7 +651,7 @@ where
 
     pub fn len(&self) -> io::Result<u64> {
         Ok(self.store.data.borrow().blobs[self.index as usize]
-            .new_tail
+            .tail
             .len() as u64)
     }
 }
@@ -764,10 +757,8 @@ impl Blob {
     fn new(name: Rc<[u8]>) -> Self {
         Self {
             name,
-            data_zones: Vec::new(),
-            table_zones: Vec::new(),
-            new_tail: Vec::new(),
-            compressed_tail: Vec::new(),
+            zones: Vec::new(),
+            tail: Vec::new(),
         }
     }
 }
