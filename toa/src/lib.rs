@@ -214,6 +214,10 @@ where
         self.root = new_root;
         Ok(())
     }
+
+    pub fn unmount(self) -> (T, io::Result<()>) {
+        (self.store, Ok(()))
+    }
 }
 
 impl Blob<fs::File> {
@@ -845,6 +849,77 @@ impl BlobStore for Dir {
     }
 }
 
+impl<T, U> BlobStore for toa_blob::BlobStore<T, U>
+where
+    T: toa_blob::RootDev,
+    U: toa_blob::ZoneDev,
+{
+    type BlobHandle = std::rc::Rc<[u8]>;
+
+    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = std::rc::Rc::from(name.as_bytes());
+        match self.create_blob(&name)? {
+            Ok(x) => x,
+            Err(_) => self.blob(&name)?.unwrap(),
+        };
+        Ok(name)
+    }
+    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = std::rc::Rc::from(name.as_bytes());
+        if let Some(x) = self.blob(&name)? {
+            x.delete()?;
+        }
+        self.create_blob(&name)?.unwrap();
+        Ok(name)
+    }
+    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+        self.blob(old_name.as_bytes())?
+            .unwrap()
+            .rename(new_name.as_bytes())
+    }
+    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        self.blob(blob)?.unwrap().append(data)
+    }
+    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        self.blob(blob)?.unwrap().append_many(data)
+    }
+    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.blob(blob)?.unwrap().read_at(offset, buf)
+    }
+    fn size_on_disk(&self) -> io::Result<u64> {
+        self.size_on_disk()
+    }
+}
+
+impl<T> BlobStore for &mut T
+where
+    T: BlobStore,
+{
+    type BlobHandle = T::BlobHandle;
+
+    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        (**self).open(name)
+    }
+    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        (**self).open_clear(name)
+    }
+    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+        (**self).rename(old_name, new_name)
+    }
+    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        (**self).append(blob, data)
+    }
+    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        (**self).append_many(blob, data)
+    }
+    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        (**self).read_at(blob, offset, buf)
+    }
+    fn size_on_disk(&self) -> io::Result<u64> {
+        (**self).size_on_disk()
+    }
+}
+
 fn align8<T>(x: T) -> T
 where
     T: ops::Add<Output = T> + ops::Not<Output = T> + ops::BitAnd<Output = T> + From<u8>,
@@ -862,12 +937,12 @@ fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
 #[cfg(test)]
 mod test {
     use super::*;
+    use toa_blob::{BlobStore, MemRoot, MemZones};
 
-    type Toa = super::Toa<Dir>;
+    type Toa = super::Toa<BlobStore<MemRoot, MemZones>>;
 
     struct Test {
         toa: Toa,
-        tempdir: tempfile::TempDir,
     }
 
     impl Test {
@@ -902,10 +977,15 @@ mod test {
     }
 
     fn init() -> Test {
-        let tempdir = tempfile::tempdir().expect("failed to create tempdir");
-        let dir = Dir::new(tempdir.path().into()).unwrap();
-        let toa = Toa::open(dir).expect("toa init failed");
-        Test { toa, tempdir }
+        let store = BlobStore::init(
+            MemRoot::new(4),
+            MemZones::new(1 << 20, 20),
+            [0; 16],
+            1 << 20,
+        )
+        .unwrap();
+        let toa = Toa::open(store).expect("toa init failed");
+        Test { toa }
     }
 
     #[test]
@@ -995,11 +1075,11 @@ mod test {
         let a = s.add(b"Hello, world!");
         let b = s.add(b"Hello, planet!");
         let c = s.add(&vec![b'x'; 1 << 15]);
-        let Test { toa, tempdir } = s;
-        let _ = toa;
-        let dir = Dir::new(tempdir.path().into()).unwrap();
-        let toa = Toa::open(dir).expect("reload");
-        let s = Test { toa, tempdir };
+        let Test { toa } = s;
+        let (store, res) = toa.unmount();
+        res.unwrap();
+        let toa = Toa::open(store).expect("reload");
+        let s = Test { toa };
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Hello, planet!");
         s.assert_eq(&c, &vec![b'x'; 1 << 15]);

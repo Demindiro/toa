@@ -397,6 +397,12 @@ where
         }
     }
 
+    pub fn size_on_disk(&self) -> io::Result<u64> {
+        // TODO proper accounting
+        let data = self.data.borrow();
+        Ok(data.log.len() as u64 + data.header.log_head())
+    }
+
     pub fn clear(&mut self) -> io::Result<()> {
         self.root_dev.zeroize()?;
         self.zone_dev.clear()?;

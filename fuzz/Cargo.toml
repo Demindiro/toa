@@ -10,7 +10,6 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.12"
 arbitrary = { version = "1.4.2", features = ["derive"] }
-tempfile = "3.26.0"
 toa = { path = "../toa" }
 toa-blob = { path = "../toa-blob" }
 
