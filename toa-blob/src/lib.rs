@@ -616,6 +616,9 @@ impl<const B: usize> ZoneDev for MemZones<B> {
         let x = &mut *self.zones.borrow_mut();
         let x = &mut x[zone as usize];
         let o = x.len() as u64;
+        if x.len() + data.len() > self.zone_size as usize {
+            panic!("zone overflow");
+        }
         x.extend(data);
         Ok(o)
     }
@@ -693,7 +696,7 @@ mod test {
     use super::*;
 
     fn init() -> BlobStore<MemZones<512>> {
-        BlobStore::init(MemZones::new(1 << 20, 10)).unwrap()
+        BlobStore::init(MemZones::new(42, 10)).unwrap()
     }
 
     fn remount(store: BlobStore<MemZones<512>>) -> BlobStore<MemZones<512>> {
@@ -773,5 +776,13 @@ mod test {
         dbg!(&s.data.borrow().blob_map);
         s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
         s.blob(b"b").unwrap().unwrap().append(b"").unwrap();
+    }
+
+    #[test]
+    fn log_overflow() {
+        let mut s = init();
+        let mut b = s.create_blob(b"").unwrap().unwrap();
+        b.append(&vec![b'a'; 10000]).unwrap();
+        b.append(&vec![b'b'; 20000]).unwrap();
     }
 }
