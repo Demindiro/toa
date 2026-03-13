@@ -5,15 +5,37 @@ use std::collections::hash_map::{Entry, HashMap};
 #[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
     Remount,
-    CreateBlob { name: &'a [u8] },
-    DeleteBlob { name: &'a [u8] },
-    AppendBlob { slot: u16, data: &'a [u8] },
-    ReadBlob { slot: u16, offset: u32, len: u16 },
-    RenameBlob { slot: u16, new_name: &'a [u8] },
+    CreateBlob {
+        name: &'a [u8],
+    },
+    DeleteBlob {
+        name: &'a [u8],
+    },
+    // to make more effective use of limited corpus size:
+    // - select a start, step and count value
+    // - fill with (start + step*i) mod 256 for i in 0..count
+    // realistically this should be able to catch all forms of accidental data corruption
+    // count of u16 is well beyond the size of a single block, so it should be
+    // sufficient to stress-test flushing.
+    AppendBlob {
+        slot: u16,
+        start: u8,
+        step: u8,
+        count: u16,
+    },
+    ReadBlob {
+        slot: u16,
+        offset: u32,
+        len: u16,
+    },
+    RenameBlob {
+        slot: u16,
+        new_name: &'a [u8],
+    },
 }
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
-    let mut store = toa_blob::BlobStore::init(toa_blob::MemZones::<512>::new(1 << 16, 10)).unwrap();
+    let mut store = toa_blob::BlobStore::init(toa_blob::MemZones::<512>::new(200, 10)).unwrap();
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&[u8], Vec<u8>)>>::with_capacity(1 << 16);
@@ -53,7 +75,12 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                     (None, Some(_)) => panic!("store has ghost blob"),
                 }
             }
-            Op::AppendBlob { slot, data } => {
+            Op::AppendBlob {
+                slot,
+                start,
+                step,
+                count,
+            } => {
                 let Some((name, x)) = blobs.get_mut(usize::from(slot)).and_then(|x| x.as_mut())
                 else {
                     continue;
@@ -61,7 +88,10 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 let name: &[u8] = name;
                 match store.blob(name).unwrap() {
                     Some(mut y) => {
-                        let offt = y.append(data).unwrap();
+                        let data = (0..count)
+                            .map(|i| start.wrapping_add(step.wrapping_mul(i as u8)))
+                            .collect::<Vec<u8>>();
+                        let offt = y.append(&data).unwrap();
                         assert_eq!(offt, x.len() as u64, "offset mismatch");
                         x.extend(data);
                     }
