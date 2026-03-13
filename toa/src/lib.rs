@@ -849,9 +849,8 @@ impl BlobStore for Dir {
     }
 }
 
-impl<T, U> BlobStore for toa_blob::BlobStore<T, U>
+impl<U> BlobStore for toa_blob::BlobStore<U>
 where
-    T: toa_blob::RootDev,
     U: toa_blob::ZoneDev,
 {
     type BlobHandle = std::rc::Rc<[u8]>;
@@ -937,9 +936,9 @@ fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use toa_blob::{BlobStore, MemRoot, MemZones};
+    use toa_blob::{BlobStore, MemZones};
 
-    type Toa = super::Toa<BlobStore<MemRoot, MemZones>>;
+    type Toa = super::Toa<BlobStore<MemZones<512>>>;
 
     struct Test {
         toa: Toa,
@@ -977,13 +976,7 @@ mod test {
     }
 
     fn init() -> Test {
-        let store = BlobStore::init(
-            MemRoot::new(4),
-            MemZones::new(1 << 20, 20),
-            [0; 16],
-            1 << 20,
-        )
-        .unwrap();
+        let store = BlobStore::init(MemZones::new(1 << 20, 20)).unwrap();
         let toa = Toa::open(store).expect("toa init failed");
         Test { toa }
     }

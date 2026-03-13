@@ -2,7 +2,7 @@
 
 use core::cell::RefCell;
 use toa::{Hash, Object};
-use toa_blob::{BlobStore, MemRoot, MemZones};
+use toa_blob::{BlobStore, MemZones};
 
 /// Like a slice but shorter and designed for repeating.
 #[derive(Debug)]
@@ -31,7 +31,6 @@ enum Op<'a> {
 struct Buffers {
     data: Vec<u8>,
     refs: Vec<Hash>,
-    store: BlobStore<MemRoot, MemZones>,
     objs: Vec<(Vec<u8>, Hash)>,
 }
 
@@ -39,7 +38,6 @@ thread_local! {
     static BUFFERS: RefCell<Buffers> = RefCell::new(Buffers {
         data: vec![0; 1 << 24],
         refs: vec![Hash::default(); 1 << 24],
-        store: BlobStore::init(MemRoot::new(5), MemZones::new(1 << 20, 20), [0; 16], 1 << 20).unwrap(),
         objs: vec![],
     });
 }
@@ -57,11 +55,11 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
         let Buffers {
             data: buf_data,
             refs: buf_refs,
-            store,
             objs,
         } = buffers;
 
-        store.clear().unwrap();
+        let store = BlobStore::init(MemZones::<512>::new(1 << 20, 20)).unwrap();
+
         objs.clear();
 
         let mut toa = toa::Toa::open(store).unwrap();

@@ -1,46 +1,9 @@
-use nora_endian::u64le;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
     io,
     rc::Rc,
 };
-
-type Uuid = [u8; 16];
-
-mod root {
-    use crate::Uuid;
-    use core::mem;
-    use nora_endian::{u32le, u64le};
-
-    #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
-    #[repr(C)]
-    pub struct Header {
-        pub magic: [u8; 4],
-        pub version: u32le,
-        pub generation: u64le,
-        pub zone_dev_uuid: Uuid,
-        pub zone_size: u64le,
-        pub block_size: u64le,
-        pub log_zone_id_head: u64le,
-        pub _pad_0: u64le,
-    }
-
-    const _: () = assert!(mem::size_of::<Header>() == 64);
-
-    impl Header {
-        pub const MAGIC: [u8; 4] = *b"ToaB";
-        pub const VERSION: u32 = 0x20260307;
-
-        pub fn log_head(&self) -> u64 {
-            (self.log_zone_id_head % self.zone_size).into()
-        }
-
-        pub fn log_zone_id(&self) -> u64 {
-            (self.log_zone_id_head / self.zone_size).into()
-        }
-    }
-}
 
 mod log {
     pub mod entry {
@@ -59,6 +22,7 @@ mod log {
             2 DELETE_BLOB
             4 RENAME_BLOB
             5 APPEND_BLOB_TAIL
+            84 HEADER
         }
 
         // finally found a usecase that ChatGPT is actually
@@ -122,20 +86,24 @@ mod log {
             pub blob_index: u32le,
             pub len: u64le,
         }
+
+        #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+        #[repr(C)]
+        pub struct Header {
+            pub magic: [u8; 4],
+            pub version: u32le,
+            pub generation: u64le,
+            pub block_size: u32le,
+            pub zone_blocks: u32le,
+            pub zone_count: u32le,
+            pub _pad_0: [u8; 4],
+        }
+
+        impl Header {
+            pub const MAGIC: [u8; 4] = *b"ToaB";
+            pub const VERSION: u32 = 0x20260307;
+        }
     }
-}
-
-pub trait RootDev {
-    fn write_at(&mut self, sector: u8, data: &[u8; 64]) -> io::Result<()>;
-    fn read_at(&self, sector: u8) -> io::Result<[u8; 64]>;
-
-    /// 512 = 2**9
-    /// 4096 = 2**12
-    fn block_shift(&self) -> BlockShift;
-    fn highest_sector(&self) -> u8;
-
-    /// Completely fill the device with zeros.
-    fn zeroize(&mut self) -> io::Result<()>;
 }
 
 pub trait ZoneDev {
@@ -146,7 +114,7 @@ pub trait ZoneDev {
     /// # Note
     ///
     /// `offset` and `len` are in *bytes*.
-    fn read_at<'a>(&'a self, offset: u64, len: usize) -> io::Result<Self::Read<'a>>;
+    fn read_at<'a>(&'a self, zone: u32, lba: u32, blocks: u32) -> io::Result<Self::Read<'a>>;
 
     /// # Note
     ///
@@ -155,42 +123,32 @@ pub trait ZoneDev {
     /// This method should panic if the offset is not aligned
     /// to a block boundary, as it is a severe logic error.
     // TODO extra copy is very bad and sad :(
-    fn write_at<'a>(&'a self, offset: u64, data: &[u8]) -> io::Result<()>;
+    fn append<'a>(&'a self, zone: u32, data: &[u8]) -> io::Result<u64>;
 
-    fn block_shift(&self) -> BlockShift;
+    fn block_size(&self) -> BlockShift;
+    fn zone_blocks(&self) -> u32;
+    fn zone_count(&self) -> u32;
 
     /// Wipe all zones. This may be a noop, but zones must be writeable
     /// from the start after this call.
-    fn clear(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    fn clear(&mut self) -> io::Result<()>;
 }
 
-pub struct BlobRoot<T> {
-    root_dev: T,
-    header: root::Header,
-}
-
-pub struct BlobStore<T, U> {
-    root_dev: T,
+pub struct BlobStore<U> {
     zone_dev: U,
     data: RefCell<BlobStoreData>,
 }
 
 struct BlobStoreData {
-    header: root::Header,
+    generation: u64,
     blobs: Vec<Blob>,
     blob_map: BTreeMap<Rc<[u8]>, u32>,
     log: Vec<u8>,
 }
 
-pub struct MemRoot {
-    sectors: Box<[[u8; 64]]>,
-}
-
-pub struct MemZones {
-    buffer: RefCell<Box<[u8]>>,
-    zone_size: usize,
+pub struct MemZones<const B: usize> {
+    zones: RefCell<Box<[Vec<[u8; B]>]>>,
+    zone_size: u32,
 }
 
 pub struct MemZonesRef<'a>(core::cell::Ref<'a, [u8]>);
@@ -224,52 +182,75 @@ struct Blob {
     tail: Vec<u8>,
 }
 
-struct Zone {
-    /// High bits are ID, low bits are head.
-    ///
-    /// Bit allocation depends on zone size.
-    id_head: u64,
-}
-
 struct ZoneId(u32);
 
-impl<T> BlobRoot<T>
+impl<U> BlobStore<U>
 where
-    T: RootDev,
+    U: ZoneDev,
 {
-    pub fn load(root_dev: T) -> io::Result<Self> {
-        let mut header = root::Header::default();
-        for i in 0..=root_dev.highest_sector() {
-            let hdr = bytemuck::cast::<_, root::Header>(root_dev.read_at(i)?);
-            if hdr.generation > header.generation {
-                header = hdr;
-            }
+    pub fn init(mut zone_dev: U) -> io::Result<Self> {
+        let generation = 1;
+        zone_dev.clear()?;
+        let nr_zones = zone_dev.zone_count();
+
+        let hdr = log::entry::Header {
+            magic: log::entry::Header::MAGIC,
+            version: log::entry::Header::VERSION.into(),
+            generation: generation.into(),
+            block_size: u32::from(zone_dev.block_size()).into(),
+            zone_blocks: zone_dev.zone_blocks().into(),
+            zone_count: zone_dev.zone_count().into(),
+            _pad_0: Default::default(),
+        };
+        let hdr = bytemuck::bytes_of(&hdr);
+        let buf = &mut vec![0; usize::from(zone_dev.block_size())];
+        buf[..hdr.len()].copy_from_slice(hdr);
+        zone_dev.append(0, buf)?;
+        zone_dev.append(nr_zones - 1, buf)?;
+
+        Ok(Self {
+            zone_dev,
+            data: BlobStoreData::new(generation).into(),
+        })
+    }
+
+    pub fn load(zone_dev: U) -> io::Result<Self> {
+        // FIXME scan last zone
+
+        let mut block = zone_dev.read_at(0, 0, 1)?;
+
+        let hdr = &block.as_ref()[..core::mem::size_of::<log::entry::Header>()];
+        let hdr = bytemuck::from_bytes::<log::entry::Header>(hdr);
+
+        if hdr.magic != log::entry::Header::MAGIC {
+            todo!("bad magic");
         }
-        Ok(Self { root_dev, header })
-    }
+        if hdr.version != log::entry::Header::VERSION {
+            todo!("bad version");
+        }
 
-    pub fn zone_dev_uuid(&self) -> Uuid {
-        self.header.zone_dev_uuid
-    }
+        if hdr.block_size != u32::from(zone_dev.block_size()) {
+            todo!("block size mismatch");
+        }
+        if hdr.zone_blocks != zone_dev.zone_blocks() {
+            todo!("zone blocks mismatch");
+        }
+        if hdr.zone_count != zone_dev.zone_count() {
+            todo!("zone count mismatch");
+        }
 
-    pub fn with_zone_dev<U>(self, zone_dev: U) -> io::Result<BlobStore<T, U>>
-    where
-        U: ZoneDev,
-    {
         let mut store = BlobStoreData {
-            header: self.header,
+            generation: hdr.generation.into(),
             blobs: Default::default(),
             blob_map: Default::default(),
             log: Vec::new(),
         };
 
-        let mut buf = vec![0; zone_dev.block_shift().into()];
-        let mut i = 0;
-        while i < self.header.log_head() {
-            let rd = zone_dev.read_at(i, buf.len())?;
-            buf.copy_from_slice(rd.as_ref());
-            drop(rd);
-            i += u64::from(zone_dev.block_shift());
+        for i in 0.. {
+            let buf = block.as_ref();
+            if buf.is_empty() {
+                break;
+            }
 
             let mut k = 0;
             let (buf, []) = buf.as_chunks::<8>() else {
@@ -308,65 +289,31 @@ where
                         store.replay_append_blob(idx, data);
                         k += (len + 7) >> 3;
                     }
+                    log::entry::ty::HEADER => k += 2,
                     ty => todo!("{ty}"),
                 }
             }
+
+            block = zone_dev.read_at(0, i, 1)?;
         }
 
+        drop(block);
         Ok(BlobStore {
-            root_dev: self.root_dev,
             zone_dev,
             data: store.into(),
         })
     }
-}
-
-impl<T, U> BlobStore<T, U>
-where
-    T: RootDev,
-    U: ZoneDev,
-{
-    pub fn init(
-        mut root_dev: T,
-        mut zone_dev: U,
-        zone_dev_uuid: Uuid,
-        zone_size: u64,
-    ) -> io::Result<Self> {
-        root_dev.zeroize()?;
-        zone_dev.clear()?;
-
-        let header = root::Header {
-            magic: root::Header::MAGIC,
-            version: root::Header::VERSION.into(),
-            generation: 1.into(),
-            zone_dev_uuid,
-            zone_size: zone_size.into(),
-            block_size: u64::from(zone_dev.block_shift()).into(),
-            log_zone_id_head: 0.into(),
-            _pad_0: Default::default(),
-        };
-        root_dev.write_at(0, bytemuck::cast_ref(&header))?;
-
-        Ok(Self {
-            root_dev,
-            zone_dev,
-            data: BlobStoreData::new(header).into(),
-        })
-    }
 
     pub fn flush(&mut self) -> io::Result<()> {
-        // FIXME round & round...
         self.log_flush()?;
-        self.root_dev
-            .write_at(0, bytemuck::cast_ref(&self.data.borrow().header))?;
         Ok(())
     }
 
-    pub fn unmount(mut self) -> Result<(T, U), (Self, io::Error)> {
+    pub fn unmount(mut self) -> Result<U, (Self, io::Error)> {
         if let Err(e) = self.flush() {
             return Err((self, e));
         }
-        Ok((self.root_dev, self.zone_dev))
+        Ok(self.zone_dev)
     }
 
     pub fn blob(&self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
@@ -393,18 +340,7 @@ where
     pub fn size_on_disk(&self) -> io::Result<u64> {
         // TODO proper accounting
         let data = self.data.borrow();
-        Ok(data.log.len() as u64 + data.header.log_head())
-    }
-
-    pub fn clear(&mut self) -> io::Result<()> {
-        self.root_dev.zeroize()?;
-        self.zone_dev.clear()?;
-        let mut data = self.data.borrow_mut();
-        data.blobs.clear();
-        data.blob_map.clear();
-        data.log.clear();
-        data.header.log_zone_id_head = 0.into();
-        Ok(())
+        Ok(data.log.len() as u64)
     }
 
     fn log_create_blob(&self, name: &[u8]) -> io::Result<()> {
@@ -459,7 +395,7 @@ where
     fn log_reserve(&self, num: usize) -> io::Result<()> {
         let num = (num + 7) & !7;
         let len = (self.data.borrow().log.len() + num) as u64;
-        if len > self.data.borrow().header.block_size {
+        if len > u64::from(self.zone_dev.block_size()) {
             self.log_flush()?;
         }
         Ok(())
@@ -470,7 +406,7 @@ where
         if data.log.is_empty() {
             return Ok(());
         }
-        let max_len = u64::from(data.header.block_size) as usize;
+        let max_len = usize::from(self.zone_dev.block_size());
         assert!(
             data.log.len() <= max_len,
             "{} <= {}",
@@ -479,8 +415,9 @@ where
         );
         // TODO optimize with long NOPs
         data.log.resize(max_len, 0);
-        self.zone_dev.write_at(data.header.log_head(), &data.log)?;
-        data.header.log_zone_id_head += u64le::from(data.log.len() as u64);
+        let last_zone = self.zone_dev.zone_count() - 1;
+        self.zone_dev.append(0, &data.log)?;
+        self.zone_dev.append(last_zone, &data.log)?;
         data.log.clear();
         Ok(())
     }
@@ -494,14 +431,14 @@ where
 
     fn log_free(&self) -> usize {
         let data = self.data.borrow();
-        u64::from(data.header.block_size) as usize - data.log.len()
+        usize::from(self.zone_dev.block_size()) - data.log.len()
     }
 }
 
 impl BlobStoreData {
-    fn new(header: root::Header) -> Self {
+    fn new(generation: u64) -> Self {
         Self {
-            header,
+            generation,
             blobs: Default::default(),
             blob_map: Default::default(),
             log: Vec::new(),
@@ -583,9 +520,8 @@ impl<'a, T> BlobRef<'a, T> {
     */
 }
 
-impl<'a, T, U> BlobRef<'a, BlobStore<T, U>>
+impl<'a, U> BlobRef<'a, BlobStore<U>>
 where
-    T: RootDev,
     U: ZoneDev,
 {
     pub fn delete(self) -> io::Result<()> {
@@ -656,53 +592,51 @@ where
     }
 }
 
-impl RootDev for MemRoot {
-    fn write_at(&mut self, sector: u8, data: &[u8; 64]) -> io::Result<()> {
-        self.sectors[usize::from(sector)] = *data;
-        Ok(())
-    }
-
-    fn read_at(&self, sector: u8) -> io::Result<[u8; 64]> {
-        Ok(self.sectors[usize::from(sector)])
-    }
-
-    fn block_shift(&self) -> BlockShift {
-        BlockShift::N9
-    }
-
-    fn highest_sector(&self) -> u8 {
-        (self.sectors.len() - 1) as u8
-    }
-
-    fn zeroize(&mut self) -> io::Result<()> {
-        self.sectors.fill([0; 64]);
-        Ok(())
-    }
-}
-
-impl ZoneDev for MemZones {
+impl<const B: usize> ZoneDev for MemZones<B> {
     type Read<'a>
         = MemZonesRef<'a>
     where
         Self: 'a;
 
-    fn read_at<'a>(&'a self, offset: u64, len: usize) -> io::Result<Self::Read<'a>> {
-        let offset = offset as usize;
-        let x = self.buffer.borrow();
-        let x = core::cell::Ref::map(x, |x| &x[offset..offset + len]);
+    fn read_at<'a>(&'a self, zone: u32, lba: u32, blocks: u32) -> io::Result<Self::Read<'a>> {
+        let start = lba as usize;
+        let end = start + blocks as usize;
+        let x = core::cell::Ref::map(self.zones.borrow(), |x| {
+            let x = &x[zone as usize];
+            let end = end.min(x.len());
+            x[start..end].as_flattened()
+        });
         Ok(MemZonesRef(x))
     }
 
-    fn write_at<'a>(&'a self, offset: u64, data: &[u8]) -> io::Result<()> {
-        let offset = offset as usize;
-        let mut buf = self.buffer.borrow_mut();
-        buf[offset..offset + data.len()].copy_from_slice(data);
-        Ok(())
+    fn append<'a>(&'a self, zone: u32, data: &[u8]) -> io::Result<u64> {
+        let (data, []) = data.as_chunks() else {
+            panic!("data len is not a multiple of the block size")
+        };
+        let x = &mut *self.zones.borrow_mut();
+        let x = &mut x[zone as usize];
+        let o = x.len() as u64;
+        x.extend(data);
+        Ok(o)
     }
 
-    fn block_shift(&self) -> BlockShift {
-        // TODO
-        BlockShift::N9
+    fn block_size(&self) -> BlockShift {
+        match B {
+            512 => BlockShift::N9,
+            4096 => BlockShift::N12,
+            _ => todo!(),
+        }
+    }
+    fn zone_blocks(&self) -> u32 {
+        self.zone_size
+    }
+    fn zone_count(&self) -> u32 {
+        self.zones.borrow().len() as u32
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.zones.borrow_mut().iter_mut().for_each(|x| x.clear());
+        Ok(())
     }
 }
 
@@ -712,21 +646,12 @@ impl<'a> AsRef<[u8]> for MemZonesRef<'a> {
     }
 }
 
-impl MemRoot {
-    pub fn new(highest_sector: u8) -> Self {
-        Self {
-            sectors: vec![[0; 64]; usize::from(highest_sector) + 1].into(),
-        }
-    }
-}
+impl<const B: usize> MemZones<B> {
+    const _B_IS_POWER_OF_2: () = assert!(B.count_ones() == 1);
 
-impl MemZones {
-    pub fn new(zone_size: usize, zone_count: usize) -> Self {
-        let len = zone_size
-            .checked_mul(zone_count)
-            .expect("zone size*count overflow");
+    pub fn new(zone_size: u32, zone_count: u32) -> Self {
         Self {
-            buffer: RefCell::new(vec![0; len].into()),
+            zones: RefCell::new(vec![vec![]; zone_count as usize].into()),
             zone_size,
         }
     }
@@ -767,22 +692,13 @@ impl Blob {
 mod test {
     use super::*;
 
-    const ZONE_UUID: Uuid = *b"AbracadabraKapow";
-
-    fn init() -> BlobStore<MemRoot, MemZones> {
-        BlobStore::init(
-            MemRoot::new(5),
-            MemZones::new(1 << 20, 10),
-            ZONE_UUID,
-            1 << 20,
-        )
-        .unwrap()
+    fn init() -> BlobStore<MemZones<512>> {
+        BlobStore::init(MemZones::new(1 << 20, 10)).unwrap()
     }
 
-    fn remount(store: BlobStore<MemRoot, MemZones>) -> BlobStore<MemRoot, MemZones> {
-        let (root_dev, zone_dev) = store.unmount().map_err(|e| e.1).unwrap();
-        let root = BlobRoot::load(root_dev).unwrap();
-        root.with_zone_dev(zone_dev).unwrap()
+    fn remount(store: BlobStore<MemZones<512>>) -> BlobStore<MemZones<512>> {
+        let zone_dev = store.unmount().map_err(|e| e.1).unwrap();
+        BlobStore::load(zone_dev).unwrap()
     }
 
     // these tests are all based on fuzz artifacts.

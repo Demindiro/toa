@@ -13,14 +13,7 @@ enum Op<'a> {
 }
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
-    let zone_uuid = *b"AbracadabraKapow";
-    let mut store = toa_blob::BlobStore::init(
-        toa_blob::MemRoot::new(5),
-        toa_blob::MemZones::new(1 << 20, 10),
-        zone_uuid,
-        1 << 20,
-    )
-    .unwrap();
+    let mut store = toa_blob::BlobStore::init(toa_blob::MemZones::<512>::new(1 << 16, 10)).unwrap();
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&[u8], Vec<u8>)>>::with_capacity(1 << 16);
@@ -28,9 +21,8 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
     for op in ops {
         match op {
             Op::Remount => {
-                let (root_dev, zone_dev) = store.unmount().map_err(|e| e.1).unwrap();
-                let root = toa_blob::BlobRoot::load(root_dev).unwrap();
-                store = root.with_zone_dev(zone_dev).unwrap();
+                let dev = store.unmount().map_err(|e| e.1).unwrap();
+                store = toa_blob::BlobStore::load(dev).unwrap();
                 for name in blob_map.keys() {
                     store
                         .blob(name)

@@ -1,9 +1,11 @@
 This crate contains a storage system for large append-only blobs.
 
 It is designed with SMR disks in mind (although the author has
-great difficulty finding host-managed SMR disks). For this reason
-it requires two partitions: one for storing the header and another
-with append-only zones.
+great difficulty finding host-managed SMR disks). It does not
+require any conventional zones.
+
+Device settings are duplicated in the header. If there is a mismatch,
+the store will refuse to mount.
 
 The header is only partially encrypted. It points to zones which
 are used as logs. The logs must be parsed entirely to reconstruct
@@ -43,6 +45,10 @@ The log must be replayed to reconstruct in-memory state.
 
 Log entries are grouped in fixed-size blocks.
 Log entries must not cross blocks.
+
+The log is written to the first and last zone.
+On store load, both logs are scanned.
+If there is a mismatch, fsck is required.
 
 #### Entry types
 
@@ -128,6 +134,23 @@ this should not result in any vulnerabilities.
 | u24   | (pad)                  |
 | u32   | blob index             |
 | u64   | length                 |
+
+##### 84. Header
+
+Every log zone must start with this header.
+
+Generation starts at 1 and increases monotonically every time
+the log is rewritten.
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u32   | magic "ToaB"           |
+| u32   | version 0x20260307     |
+| u64   | generation             |
+| u32   | block size             |
+| u32   | zone blocks            |
+| u32   | zone count             |
+| u32   | (pad)                  |
 
 
 ### Blob
