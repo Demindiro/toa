@@ -117,14 +117,13 @@ mod log {
 }
 
 pub trait ZoneDev {
-    type Read<'a>: AsRef<[u8]>
-    where
-        Self: 'a;
-
     /// # Note
     ///
-    /// `offset` and `len` are in *bytes*.
-    fn read_at<'a>(&'a self, zone: u32, lba: u32, blocks: u32) -> io::Result<Self::Read<'a>>;
+    /// `offset` is in *bytes*.
+    ///
+    /// The device is expected to handle unaligned reads transparently.
+    /// A slower path to handle this case is allowed.
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
 
     /// # Note
     ///
@@ -166,8 +165,6 @@ pub struct MemZones<const B: usize> {
     zones: RefCell<Box<[Vec<[u8; B]>]>>,
     zone_size: u32,
 }
-
-pub struct MemZonesRef<'a>(core::cell::Ref<'a, [u8]>);
 
 pub enum BlockShift {
     N9 = 1 << 9,
@@ -236,16 +233,22 @@ where
     }
 
     pub fn load(zone_dev: U) -> io::Result<Self> {
+        let block_size = usize::from(zone_dev.block_size());
+        let block_a = &mut *vec![0; block_size];
+        let block_b = &mut *vec![0; block_size];
         let mut log_zone_a = 0;
         let mut log_zone_b = u32::from(zone_dev.zone_count()) - 1;
-        let mut log_block = 0;
-        let mut block_a = zone_dev.read_at(log_zone_a, log_block, 1)?;
-        let mut block_b = zone_dev.read_at(log_zone_b, log_block, 1)?;
-        log_block += 1;
+        let mut log_offset = 0;
+        let mut len_a = zone_dev.read_at(log_zone_a, log_offset, block_a)?;
+        let mut len_b = zone_dev.read_at(log_zone_b, log_offset, block_b)?;
+
+        // TODO don't panic
+        assert_eq!(len_a, block_size, "no header block in main log");
+        assert_eq!(len_b, block_size, "no header block in mirror log");
 
         let mut gen_a @ mut gen_b = 0;
         for (genn, blk) in [(&mut gen_a, &block_a), (&mut gen_b, &block_b)] {
-            let hdr = &blk.as_ref()[..core::mem::size_of::<log::entry::Header>()];
+            let hdr = &blk[..core::mem::size_of::<log::entry::Header>()];
             let hdr = bytemuck::from_bytes::<log::entry::Header>(hdr);
 
             if hdr.magic != log::entry::Header::MAGIC {
@@ -272,18 +275,19 @@ where
         let mut store = BlobStoreData::new(gen_a, zone_dev.zone_count());
 
         loop {
-            let buf_a = block_a.as_ref();
-            let buf_b = block_b.as_ref();
-            assert_eq!(buf_a.len(), buf_b.len()); // TODO don't panic, return error
-            if buf_a.is_empty() {
+            log_offset += block_size as u64;
+
+            assert_eq!(len_a, len_b); // TODO don't panic, return error
+            if len_a == 0 {
                 break;
             }
+            debug_assert_eq!(len_a, block_size, "partial block");
 
             let mut k = 0;
-            let (buf_a, []) = buf_a.as_chunks::<8>() else {
+            let (buf_a, []) = block_a.as_chunks_mut::<8>() else {
                 unreachable!()
             };
-            let (buf_b, []) = buf_b.as_chunks::<8>() else {
+            let (buf_b, []) = block_b.as_chunks_mut::<8>() else {
                 unreachable!()
             };
             while let Some(x) = buf_a.get(k) {
@@ -326,7 +330,7 @@ where
                         let [_, _, _, _, x, y, z, w] = buf_b[k];
                         log_zone_a = u32::from_le_bytes([e, f, g, h]);
                         log_zone_b = u32::from_le_bytes([x, y, z, w]);
-                        log_block = 0;
+                        log_offset = 0;
                         store.log_zone_a = ZoneId(log_zone_a);
                         store.log_zone_b = ZoneId(log_zone_b);
                         store.mark_zone_allocated(store.log_zone_a);
@@ -338,13 +342,10 @@ where
                 }
             }
 
-            block_a = zone_dev.read_at(log_zone_a, log_block, 1)?;
-            block_b = zone_dev.read_at(log_zone_b, log_block, 1)?;
-            log_block += 1;
+            len_a = zone_dev.read_at(log_zone_a, log_offset, block_a)?;
+            len_b = zone_dev.read_at(log_zone_b, log_offset, block_b)?;
         }
 
-        drop(block_a);
-        drop(block_b);
         Ok(BlobStore {
             zone_dev,
             data: store.into(),
@@ -697,20 +698,16 @@ where
 }
 
 impl<const B: usize> ZoneDev for MemZones<B> {
-    type Read<'a>
-        = MemZonesRef<'a>
-    where
-        Self: 'a;
-
-    fn read_at<'a>(&'a self, zone: u32, lba: u32, blocks: u32) -> io::Result<Self::Read<'a>> {
-        let start = lba as usize;
-        let end = start + blocks as usize;
-        let x = core::cell::Ref::map(self.zones.borrow(), |x| {
-            let x = &x[zone as usize];
-            let end = end.min(x.len());
-            x[start..end].as_flattened()
-        });
-        Ok(MemZonesRef(x))
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let x = self.zones.borrow();
+        let x = x[zone as usize].as_flattened();
+        let x = usize::try_from(offset)
+            .ok()
+            .and_then(|i| x.get(i..))
+            .unwrap_or(&[]);
+        let n = buf.len().min(x.len());
+        buf[..n].copy_from_slice(&x[..n]);
+        Ok(n)
     }
 
     #[track_caller]
@@ -749,12 +746,6 @@ impl<const B: usize> ZoneDev for MemZones<B> {
     fn clear(&mut self) -> io::Result<()> {
         self.zones.borrow_mut().iter_mut().for_each(|x| x.clear());
         Ok(())
-    }
-}
-
-impl<'a> AsRef<[u8]> for MemZonesRef<'a> {
-    fn as_ref(&self) -> &[u8] {
-        &*self.0
     }
 }
 
