@@ -199,6 +199,7 @@ struct Blob {
     name: Rc<[u8]>,
     zones: Vec<ZoneId>,
     tail: Vec<u8>,
+    len: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -614,6 +615,7 @@ impl BlobStoreData {
 
     fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
         self.blobs[index as usize].tail.extend(data);
+        self.blobs[index as usize].len += data.len() as u64;
     }
 }
 
@@ -647,11 +649,9 @@ where
             let wr;
             let n = (self.store.log_free() - 8).min(data.len());
             (wr, data) = data.split_at(n);
-            self.store
-                .data
-                .borrow_mut()
-                .replay_append_blob(self.index, wr);
             self.store.log_append_blob_tail(self.index, wr)?;
+            let mut s_data = self.store.data.borrow_mut();
+            s_data.replay_append_blob(self.index, wr);
         }
         Ok(offt)
     }
@@ -692,9 +692,7 @@ where
     }
 
     pub fn len(&self) -> io::Result<u64> {
-        Ok(self.store.data.borrow().blobs[self.index as usize]
-            .tail
-            .len() as u64)
+        Ok(self.store.data.borrow().blobs[self.index as usize].len)
     }
 }
 
@@ -798,6 +796,7 @@ impl Blob {
             name,
             zones: Vec::new(),
             tail: Vec::new(),
+            len: 0,
         }
     }
 }
