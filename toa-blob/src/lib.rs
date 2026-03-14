@@ -806,13 +806,48 @@ impl Blob {
 mod test {
     use super::*;
 
-    fn init() -> BlobStore<MemZones<512>> {
-        BlobStore::init(MemZones::new(42, 10)).unwrap()
+    struct Test {
+        store: BlobStore<MemZones<512>>,
     }
 
-    fn remount(store: BlobStore<MemZones<512>>) -> BlobStore<MemZones<512>> {
-        let zone_dev = store.unmount().map_err(|e| e.1).unwrap();
-        BlobStore::load(zone_dev).unwrap()
+    impl Test {
+        fn new() -> Self {
+            Self {
+                store: BlobStore::init(MemZones::new(42, 10)).unwrap(),
+            }
+        }
+
+        fn remount(self) -> Self {
+            let zone_dev = self.store.unmount().map_err(|e| e.1).unwrap();
+            Self {
+                store: BlobStore::load(zone_dev).unwrap(),
+            }
+        }
+
+        fn append(&self, blob: &[u8], expect_offset: u64, data: &[u8]) {
+            let o = self
+                .store
+                .blob(blob)
+                .unwrap()
+                .unwrap()
+                .append(data)
+                .unwrap();
+            assert_eq!(o, expect_offset)
+        }
+    }
+
+    impl core::ops::Deref for Test {
+        type Target = BlobStore<MemZones<512>>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.store
+        }
+    }
+
+    impl core::ops::DerefMut for Test {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.store
+        }
     }
 
     // these tests are all based on fuzz artifacts.
@@ -821,25 +856,25 @@ mod test {
 
     #[test]
     fn empty() {
-        let _ = remount(init());
+        Test::new().remount();
     }
 
     #[test]
     fn create_blobs() {
-        let mut store = init();
+        let mut store = Test::new();
         store.create_blob(b"a").unwrap().unwrap();
         store.create_blob(b"b").unwrap().unwrap();
         store.blob(b"a").unwrap().expect("missing blob a");
         store.blob(b"b").unwrap().expect("missing blob b");
-        store = remount(store);
+        store = store.remount();
         store.blob(b"a").unwrap().expect("missing blob a");
         store.blob(b"b").unwrap().expect("missing blob b");
-        store = remount(store);
+        store = store.remount();
         store.create_blob(b"c").unwrap().unwrap();
         store.blob(b"a").unwrap().expect("missing blob a");
         store.blob(b"b").unwrap().expect("missing blob b");
         store.blob(b"c").unwrap().expect("missing blob c");
-        store = remount(store);
+        store = store.remount();
         store.blob(b"a").unwrap().expect("missing blob a");
         store.blob(b"b").unwrap().expect("missing blob b");
         store.blob(b"c").unwrap().expect("missing blob c");
@@ -847,54 +882,56 @@ mod test {
 
     #[test]
     fn create_duplicate_blobs() {
-        let mut store = init();
+        let mut store = Test::new();
         store.create_blob(b"a").unwrap().unwrap();
         assert!(store.create_blob(b"a").unwrap().is_err());
     }
 
     #[test]
     fn delete_blob() {
-        let mut store = init();
+        let mut store = Test::new();
         store.create_blob(b"a").unwrap().unwrap();
         store.blob(b"a").unwrap().unwrap().delete().unwrap();
         store.create_blob(b"a").unwrap().unwrap();
         store.blob(b"a").unwrap().unwrap().delete().unwrap();
-        remount(store);
+        store.remount();
     }
 
     #[test]
     fn append_blob() {
-        let mut s = init();
+        let mut s = Test::new();
         let mut b = s.create_blob(b"a").unwrap().unwrap();
-        b.append(&[0; 507]).unwrap();
-        s.unmount().map_err(|e| e.1).unwrap();
+        let o = b.append(&[0; 507]).unwrap();
+        assert_eq!(o, 0);
+        s.store.unmount().map_err(|e| e.1).unwrap();
     }
 
     #[test]
     fn append_blob_remount() {
-        let mut s = init();
+        let mut s = Test::new();
         s.create_blob(b"a").unwrap().unwrap();
-        s = remount(s);
-        s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
+        s = s.remount();
+        let o = s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
+        assert_eq!(o, 0);
     }
 
     #[test]
     fn rename_blob_shuffle_bloblist() {
-        let mut s = init();
+        let mut s = Test::new();
         s.create_blob(b"").unwrap().unwrap();
         s.create_blob(b"a").unwrap().unwrap();
         s.create_blob(b"b").unwrap().unwrap();
         s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
-        s.blob(b"b").unwrap().unwrap().append(b"").unwrap();
+        s.append(b"b", 0, b"");
     }
 
     #[test]
     fn log_overflow() {
-        let mut s = init();
-        let mut b = s.create_blob(b"").unwrap().unwrap();
-        b.append(&[b'a'; 10000]).unwrap();
-        b.append(&[b'b'; 20000]).unwrap();
-        s = remount(s);
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[b'a'; 10000]);
+        s.append(b"", 10000, &[b'b'; 20000]);
+        s = s.remount();
         let buf = &mut [0; 40000];
         let n = s.blob(b"").unwrap().unwrap().read_at(0, buf).unwrap();
         assert_eq!(n, 30000);
@@ -908,25 +945,24 @@ mod test {
     // triggered a particular case where the mirror log used the wrong zone ID
     #[test]
     fn log_overflow_delete() {
-        let mut s = init();
-        let mut b = s.create_blob(b"").unwrap().unwrap();
-        b.append(&[b'a'; 10000]).unwrap();
-        b.append(&[b'b'; 20000]).unwrap();
-        s = remount(s);
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[b'a'; 10000]);
+        s.append(b"", 10000, &[b'b'; 20000]);
+        s = s.remount();
         s.blob(b"").unwrap().unwrap().delete().unwrap();
-        remount(s);
+        s.remount();
     }
 
     #[test]
     fn log_overflow_load_zone_allocation_map() {
-        let mut s = init();
-        let mut b = s.create_blob(b"").unwrap().unwrap();
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
         // 42 * 512 = 21504
         // hence, assuming no "commit blob", this forcibly allocates a second log zone
-        b.append(&[0; 30000]).unwrap();
-        s = remount(s);
-        b = s.blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[0; 30000]);
+        s = s.remount();
         // this breaks after a remount if *zone allocation* tracking isn't done properly
-        b.append(&[0; 20000]).unwrap();
+        s.append(b"", 30000, &[0; 20000]);
     }
 }
