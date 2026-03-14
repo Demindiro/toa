@@ -117,6 +117,20 @@ deleted blob. This ensures the blob array remains contiguous.
 | u8[]  | data                   |
 | u8[]  | (pad)                  |
 
+##### 6. Next log zone
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u24   | (pad)                  |
+| u32   | zone ID                |
+
+The switch to the next zone should be immediate.
+No entries in the same zone should follow after this entry,
+i.e. keep it all zeros.
+
+The mirror zone **must** use a different zone ID.
+
 ##### 7. Commit blob tail
 
 Takes a full blob tail and appends it to the main blob.

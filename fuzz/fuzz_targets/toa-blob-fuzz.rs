@@ -35,7 +35,9 @@ enum Op<'a> {
 }
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
-    let mut store = toa_blob::BlobStore::init(toa_blob::MemZones::<512>::new(200, 10)).unwrap();
+    // allocate plenty of zones as we don't care to test out-of-storage conditions here
+    // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
+    let mut store = toa_blob::BlobStore::init(toa_blob::MemZones::<512>::new(200, 100)).unwrap();
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&[u8], Vec<u8>)>>::with_capacity(1 << 16);

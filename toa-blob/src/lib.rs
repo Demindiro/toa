@@ -1,3 +1,4 @@
+use bitvec::boxed::BitBox;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
@@ -22,6 +23,7 @@ mod log {
             2 DELETE_BLOB
             4 RENAME_BLOB
             5 APPEND_BLOB_TAIL
+            6 NEXT_LOG_ZONE
             84 HEADER
         }
 
@@ -87,6 +89,14 @@ mod log {
             pub len: u64le,
         }
 
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        pub struct NextLogZone {
+            pub ty: u8,
+            pub _pad_0: [u8; 3],
+            pub zone_id: u32le,
+        }
+
         #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
         #[repr(C)]
         pub struct Header {
@@ -125,6 +135,9 @@ pub trait ZoneDev {
     // TODO extra copy is very bad and sad :(
     fn append<'a>(&'a self, zone: u32, data: &[u8]) -> io::Result<u64>;
 
+    /// How many blocks can still be appended.
+    fn blocks_free(&self, zone: u32) -> io::Result<u32>;
+
     fn block_size(&self) -> BlockShift;
     fn zone_blocks(&self) -> u32;
     fn zone_count(&self) -> u32;
@@ -144,6 +157,9 @@ struct BlobStoreData {
     blobs: Vec<Blob>,
     blob_map: BTreeMap<Rc<[u8]>, u32>,
     log: Vec<u8>,
+    log_zone_a: ZoneId,
+    log_zone_b: ZoneId,
+    allocated_zones: BitBox,
 }
 
 pub struct MemZones<const B: usize> {
@@ -169,6 +185,9 @@ pub struct BlobHandle(u32);
 #[derive(Debug)]
 pub struct DuplicateBlob;
 
+#[derive(Debug)]
+pub struct OutOfZones;
+
 /// # Note about zone data alignment
 ///
 /// Data is *not* aligned to block boundaries.
@@ -182,6 +201,7 @@ struct Blob {
     tail: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
 struct ZoneId(u32);
 
 impl<U> BlobStore<U>
@@ -210,61 +230,73 @@ where
 
         Ok(Self {
             zone_dev,
-            data: BlobStoreData::new(generation).into(),
+            data: BlobStoreData::new(generation, nr_zones).into(),
         })
     }
 
     pub fn load(zone_dev: U) -> io::Result<Self> {
-        // FIXME scan last zone
+        let mut log_zone_a = 0;
+        let mut log_zone_b = u32::from(zone_dev.zone_count()) - 1;
+        let mut log_block = 0;
+        let mut block_a = zone_dev.read_at(log_zone_a, log_block, 1)?;
+        let mut block_b = zone_dev.read_at(log_zone_b, log_block, 1)?;
+        log_block += 1;
 
-        let mut block = zone_dev.read_at(0, 0, 1)?;
+        let mut gen_a @ mut gen_b = 0;
+        for (genn, blk) in [(&mut gen_a, &block_a), (&mut gen_b, &block_b)] {
+            let hdr = &blk.as_ref()[..core::mem::size_of::<log::entry::Header>()];
+            let hdr = bytemuck::from_bytes::<log::entry::Header>(hdr);
 
-        let hdr = &block.as_ref()[..core::mem::size_of::<log::entry::Header>()];
-        let hdr = bytemuck::from_bytes::<log::entry::Header>(hdr);
+            if hdr.magic != log::entry::Header::MAGIC {
+                todo!("bad magic");
+            }
+            if hdr.version != log::entry::Header::VERSION {
+                todo!("bad version");
+            }
 
-        if hdr.magic != log::entry::Header::MAGIC {
-            todo!("bad magic");
+            if hdr.block_size != u32::from(zone_dev.block_size()) {
+                todo!("block size mismatch");
+            }
+            if hdr.zone_blocks != zone_dev.zone_blocks() {
+                todo!("zone blocks mismatch");
+            }
+            if hdr.zone_count != zone_dev.zone_count() {
+                todo!("zone count mismatch");
+            }
+
+            *genn = hdr.generation.into();
         }
-        if hdr.version != log::entry::Header::VERSION {
-            todo!("bad version");
-        }
+        assert_eq!(gen_a, gen_b); // TODO don't panic, return error
 
-        if hdr.block_size != u32::from(zone_dev.block_size()) {
-            todo!("block size mismatch");
-        }
-        if hdr.zone_blocks != zone_dev.zone_blocks() {
-            todo!("zone blocks mismatch");
-        }
-        if hdr.zone_count != zone_dev.zone_count() {
-            todo!("zone count mismatch");
-        }
+        let mut store = BlobStoreData::new(gen_a, zone_dev.zone_count());
 
-        let mut store = BlobStoreData {
-            generation: hdr.generation.into(),
-            blobs: Default::default(),
-            blob_map: Default::default(),
-            log: Vec::new(),
-        };
-
-        for i in 0.. {
-            let buf = block.as_ref();
-            if buf.is_empty() {
+        loop {
+            let buf_a = block_a.as_ref();
+            let buf_b = block_b.as_ref();
+            assert_eq!(buf_a.len(), buf_b.len()); // TODO don't panic, return error
+            if buf_a.is_empty() {
                 break;
             }
 
             let mut k = 0;
-            let (buf, []) = buf.as_chunks::<8>() else {
+            let (buf_a, []) = buf_a.as_chunks::<8>() else {
                 unreachable!()
             };
-            while let Some(x) = buf.get(k) {
+            let (buf_b, []) = buf_b.as_chunks::<8>() else {
+                unreachable!()
+            };
+            while let Some(x) = buf_a.get(k) {
                 let [ty, b, c, d, e, f, g, h] = *x;
+                // FIXME ensure log entries are equal *except* NEXT_LOG_ZONE
+                // we should have a helper function which just returns an entry,
+                // that way we can do a simple (==) check
                 match ty {
                     log::entry::ty::NOP => {
                         k += 1 + ((u32::from_le_bytes([e, f, g, h]) as usize) >> 3);
                     }
                     log::entry::ty::CREATE_BLOB => {
                         let name_len = usize::from(b);
-                        let name = &buf[k..].as_flattened()[2..2 + name_len];
+                        let name = &buf_a[k..].as_flattened()[2..2 + name_len];
                         k += ((2 + name_len) + 7) >> 3;
                         store.replay_create_blob(name).unwrap();
                     }
@@ -277,7 +309,7 @@ where
                         k += 1;
                         let name_len = usize::from(b);
                         let idx = u32::from_le_bytes([e, f, g, h]);
-                        let name = &buf[k..].as_flattened()[..usize::from(name_len)];
+                        let name = &buf_a[k..].as_flattened()[..usize::from(name_len)];
                         store.replay_rename_blob(idx, name);
                         k += (name_len + 7) >> 3;
                     }
@@ -285,19 +317,33 @@ where
                         k += 1;
                         let len = usize::from(u16::from_le_bytes([c, d]));
                         let idx = u32::from_le_bytes([e, f, g, h]);
-                        let data = &buf[k..].as_flattened()[..usize::from(len)];
+                        let data = &buf_a[k..].as_flattened()[..usize::from(len)];
                         store.replay_append_blob(idx, data);
                         k += (len + 7) >> 3;
+                    }
+                    log::entry::ty::NEXT_LOG_ZONE => {
+                        let [_, _, _, _, x, y, z, w] = buf_b[k];
+                        log_zone_a = u32::from_le_bytes([e, f, g, h]);
+                        log_zone_b = u32::from_le_bytes([x, y, z, w]);
+                        log_block = 0;
+                        store.log_zone_a = ZoneId(log_zone_a);
+                        store.log_zone_b = ZoneId(log_zone_b);
+                        store.mark_zone_allocated(store.log_zone_a);
+                        store.mark_zone_allocated(store.log_zone_b);
+                        break;
                     }
                     log::entry::ty::HEADER => k += 2,
                     ty => todo!("{ty}"),
                 }
             }
 
-            block = zone_dev.read_at(0, i, 1)?;
+            block_a = zone_dev.read_at(log_zone_a, log_block, 1)?;
+            block_b = zone_dev.read_at(log_zone_b, log_block, 1)?;
+            log_block += 1;
         }
 
-        drop(block);
+        drop(block_a);
+        drop(block_b);
         Ok(BlobStore {
             zone_dev,
             data: store.into(),
@@ -415,10 +461,34 @@ where
         );
         // TODO optimize with long NOPs
         data.log.resize(max_len, 0);
-        let last_zone = self.zone_dev.zone_count() - 1;
-        self.zone_dev.append(0, &data.log)?;
-        self.zone_dev.append(last_zone, &data.log)?;
+        self.zone_dev.append(data.log_zone_a.0, &data.log)?;
+        self.zone_dev.append(data.log_zone_b.0, &data.log)?;
         data.log.clear();
+
+        // allocate a new zone if we nearly exhausted the current one
+        let rem_a = self.zone_dev.blocks_free(data.log_zone_a.0)?;
+        let rem_b = self.zone_dev.blocks_free(data.log_zone_b.0)?;
+        assert_eq!(rem_a, rem_b, "log length mismatch");
+
+        if rem_a <= 1 {
+            // TODO don't panic
+            // TODO spread zones to improve resilience
+            let [new_a, new_b] = data.alloc_zones_array().unwrap();
+            for (log_zone, new) in [(data.log_zone_a, new_a), (data.log_zone_b, new_b)] {
+                let e = log::entry::NextLogZone {
+                    ty: log::entry::ty::NEXT_LOG_ZONE,
+                    _pad_0: [0; 3],
+                    zone_id: new.0.into(),
+                };
+                data.log.extend(bytemuck::bytes_of(&e));
+                data.log.resize(max_len, 0);
+                self.zone_dev.append(log_zone.0, &data.log)?;
+                data.log.clear();
+            }
+            data.log_zone_a = new_a;
+            data.log_zone_b = new_b;
+        }
+
         Ok(())
     }
 
@@ -436,13 +506,49 @@ where
 }
 
 impl BlobStoreData {
-    fn new(generation: u64) -> Self {
-        Self {
+    fn new(generation: u64, nr_zones: u32) -> Self {
+        let mut s = Self {
             generation,
             blobs: Default::default(),
             blob_map: Default::default(),
             log: Vec::new(),
+            log_zone_a: ZoneId(0),
+            log_zone_b: ZoneId(nr_zones - 1),
+            allocated_zones: bitvec::bitbox![0; nr_zones as usize],
+        };
+        s.allocated_zones.set(s.log_zone_a.0 as usize, true);
+        s.allocated_zones.set(s.log_zone_b.0 as usize, true);
+        s
+    }
+
+    fn alloc_zones(&mut self, buf: &mut [ZoneId]) -> Result<(), OutOfZones> {
+        let mut bits = 0..self.allocated_zones.len();
+        'slots: for (k, slot) in buf.iter_mut().enumerate() {
+            while let Some(i) = bits.next() {
+                if !self.allocated_zones[i] {
+                    // false = free
+                    *slot = ZoneId(i as u32);
+                    self.allocated_zones.set(i, true);
+                    continue 'slots;
+                }
+            }
+            // undo previous allocations
+            for slot in buf[..k].iter() {
+                self.allocated_zones.set(slot.0 as usize, false);
+            }
+            return Err(OutOfZones);
         }
+        Ok(())
+    }
+
+    fn alloc_zones_array<const N: usize>(&mut self) -> Result<[ZoneId; N], OutOfZones> {
+        let mut x = [const { ZoneId(0) }; N];
+        self.alloc_zones(&mut x)?;
+        Ok(x)
+    }
+
+    fn mark_zone_allocated(&mut self, id: ZoneId) {
+        self.allocated_zones.set(id.0 as usize, true);
     }
 
     fn replay_create_blob(&mut self, name: &[u8]) -> Result<u32, DuplicateBlob> {
@@ -609,6 +715,7 @@ impl<const B: usize> ZoneDev for MemZones<B> {
         Ok(MemZonesRef(x))
     }
 
+    #[track_caller]
     fn append<'a>(&'a self, zone: u32, data: &[u8]) -> io::Result<u64> {
         let (data, []) = data.as_chunks() else {
             panic!("data len is not a multiple of the block size")
@@ -621,6 +728,10 @@ impl<const B: usize> ZoneDev for MemZones<B> {
         }
         x.extend(data);
         Ok(o)
+    }
+
+    fn blocks_free(&self, zone: u32) -> io::Result<u32> {
+        Ok(self.zone_size - self.zones.borrow()[zone as usize].len() as u32)
     }
 
     fn block_size(&self) -> BlockShift {
@@ -773,7 +884,6 @@ mod test {
         s.create_blob(b"").unwrap().unwrap();
         s.create_blob(b"a").unwrap().unwrap();
         s.create_blob(b"b").unwrap().unwrap();
-        dbg!(&s.data.borrow().blob_map);
         s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
         s.blob(b"b").unwrap().unwrap().append(b"").unwrap();
     }
@@ -782,7 +892,41 @@ mod test {
     fn log_overflow() {
         let mut s = init();
         let mut b = s.create_blob(b"").unwrap().unwrap();
-        b.append(&vec![b'a'; 10000]).unwrap();
-        b.append(&vec![b'b'; 20000]).unwrap();
+        b.append(&[b'a'; 10000]).unwrap();
+        b.append(&[b'b'; 20000]).unwrap();
+        s = remount(s);
+        let buf = &mut [0; 40000];
+        let n = s.blob(b"").unwrap().unwrap().read_at(0, buf).unwrap();
+        assert_eq!(n, 30000);
+        assert_eq!(buf[..10000], [b'a'; 10000]);
+        assert_eq!(buf[10000..30000], [b'b'; 20000]);
+        // ensure we commit to the right zone
+        s.create_blob(b"a").unwrap().unwrap();
+        s.flush().unwrap();
+    }
+
+    // triggered a particular case where the mirror log used the wrong zone ID
+    #[test]
+    fn log_overflow_delete() {
+        let mut s = init();
+        let mut b = s.create_blob(b"").unwrap().unwrap();
+        b.append(&[b'a'; 10000]).unwrap();
+        b.append(&[b'b'; 20000]).unwrap();
+        s = remount(s);
+        s.blob(b"").unwrap().unwrap().delete().unwrap();
+        remount(s);
+    }
+
+    #[test]
+    fn log_overflow_load_zone_allocation_map() {
+        let mut s = init();
+        let mut b = s.create_blob(b"").unwrap().unwrap();
+        // 42 * 512 = 21504
+        // hence, assuming no "commit blob", this forcibly allocates a second log zone
+        b.append(&[0; 30000]).unwrap();
+        s = remount(s);
+        b = s.blob(b"").unwrap().unwrap();
+        // this breaks after a remount if *zone allocation* tracking isn't done properly
+        b.append(&[0; 20000]).unwrap();
     }
 }
