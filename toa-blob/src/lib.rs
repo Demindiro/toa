@@ -133,13 +133,23 @@ pub trait ZoneDev {
     ///
     /// `offset` is in *bytes*.
     ///
-    /// This method should panic if the offset is not aligned
-    /// to a block boundary, as it is a severe logic error.
-    // TODO extra copy is very bad and sad :(
-    fn append<'a>(&'a self, zone: u32, data: &[u8]) -> io::Result<u64>;
+    /// # Panics
+    ///
+    /// This method should panic if the data length is not a multiple
+    /// of the block size, as it is a severe logic error.
+    ///
+    /// Similarly, this method should panic if the offset does not match
+    /// the current zone head.
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<u64>;
 
     /// How many blocks can still be appended.
     fn blocks_free(&self, zone: u32) -> io::Result<u32>;
+
+    /// The current write pointer of a zone.
+    ///
+    /// This may be `None` if the underlying device is not zoned (e.g. CMR HDD).
+    /// In such a case it is assumed any block is arbitrarily writeable.
+    fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>>;
 
     fn block_size(&self) -> BlockShift;
     fn zone_blocks(&self) -> u32;
@@ -162,6 +172,8 @@ struct BlobStoreData {
     log: Vec<u8>,
     log_zone_a: ZoneId,
     log_zone_b: ZoneId,
+    /// Write pointer of the current log zone.
+    log_zone_head: u64,
     allocated_zones: BitBox,
 }
 
@@ -228,12 +240,15 @@ where
         let hdr = bytemuck::bytes_of(&hdr);
         let buf = &mut vec![0; usize::from(zone_dev.block_size())];
         buf[..hdr.len()].copy_from_slice(hdr);
-        zone_dev.append(0, buf)?;
-        zone_dev.append(nr_zones - 1, buf)?;
+        zone_dev.append(0, 0, buf)?;
+        zone_dev.append(nr_zones - 1, 0, buf)?;
+
+        let mut data = BlobStoreData::new(generation, nr_zones);
+        data.log_zone_head = zone_dev.block_size().into();
 
         Ok(Self {
             zone_dev,
-            data: BlobStoreData::new(generation, nr_zones).into(),
+            data: data.into(),
         })
     }
 
@@ -243,9 +258,8 @@ where
         let block_b = &mut *vec![0; block_size];
         let mut log_zone_a = 0;
         let mut log_zone_b = u32::from(zone_dev.zone_count()) - 1;
-        let mut log_offset = 0;
-        let mut len_a = zone_dev.read_at(log_zone_a, log_offset, block_a)?;
-        let mut len_b = zone_dev.read_at(log_zone_b, log_offset, block_b)?;
+        let mut len_a = zone_dev.read_at(log_zone_a, 0, block_a)?;
+        let mut len_b = zone_dev.read_at(log_zone_b, 0, block_b)?;
 
         // TODO don't panic
         assert_eq!(len_a, block_size, "no header block in main log");
@@ -280,13 +294,13 @@ where
         let mut store = BlobStoreData::new(gen_a, zone_dev.zone_count());
 
         loop {
-            log_offset += block_size as u64;
-
             assert_eq!(len_a, len_b); // TODO don't panic, return error
             if len_a == 0 {
                 break;
             }
             debug_assert_eq!(len_a, block_size, "partial block");
+
+            store.log_zone_head += block_size as u64;
 
             let mut k = 0;
             let (buf_a, []) = block_a.as_chunks_mut::<8>() else {
@@ -350,7 +364,7 @@ where
                         let [_, _, _, _, x, y, z, w] = buf_b[k];
                         log_zone_a = u32::from_le_bytes([e, f, g, h]);
                         log_zone_b = u32::from_le_bytes([x, y, z, w]);
-                        log_offset = 0;
+                        store.log_zone_head = 0;
                         store.log_zone_a = ZoneId(log_zone_a);
                         store.log_zone_b = ZoneId(log_zone_b);
                         store.mark_zone_allocated(store.log_zone_a);
@@ -362,8 +376,8 @@ where
                 }
             }
 
-            len_a = zone_dev.read_at(log_zone_a, log_offset, block_a)?;
-            len_b = zone_dev.read_at(log_zone_b, log_offset, block_b)?;
+            len_a = zone_dev.read_at(log_zone_a, store.log_zone_head, block_a)?;
+            len_b = zone_dev.read_at(log_zone_b, store.log_zone_head, block_b)?;
         }
 
         Ok(BlobStore {
@@ -524,17 +538,20 @@ where
         if data.log.is_empty() {
             return Ok(());
         }
-        let max_len = usize::from(self.zone_dev.block_size());
+        let block_size = usize::from(self.zone_dev.block_size());
         assert!(
-            data.log.len() <= max_len,
+            data.log.len() <= block_size,
             "{} <= {}",
             data.log.len(),
-            max_len
+            block_size
         );
         // TODO optimize with long NOPs
-        data.log.resize(max_len, 0);
-        self.zone_dev.append(data.log_zone_a.0, &data.log)?;
-        self.zone_dev.append(data.log_zone_b.0, &data.log)?;
+        data.log.resize(block_size, 0);
+        self.zone_dev
+            .append(data.log_zone_a.0, data.log_zone_head, &data.log)?;
+        self.zone_dev
+            .append(data.log_zone_b.0, data.log_zone_head, &data.log)?;
+        data.log_zone_head += block_size as u64;
         data.log.clear();
 
         // allocate a new zone if we nearly exhausted the current one
@@ -553,12 +570,14 @@ where
                     zone_id: new.0.into(),
                 };
                 data.log.extend(bytemuck::bytes_of(&e));
-                data.log.resize(max_len, 0);
-                self.zone_dev.append(log_zone.0, &data.log)?;
+                data.log.resize(block_size, 0);
+                self.zone_dev
+                    .append(log_zone.0, data.log_zone_head, &data.log)?;
                 data.log.clear();
             }
             data.log_zone_a = new_a;
             data.log_zone_b = new_b;
+            data.log_zone_head = 0;
         }
 
         Ok(())
@@ -574,6 +593,7 @@ impl BlobStoreData {
             log: Vec::new(),
             log_zone_a: ZoneId(0),
             log_zone_b: ZoneId(nr_zones - 1),
+            log_zone_head: 0,
             allocated_zones: bitvec::bitbox![0; nr_zones as usize],
         };
         s.allocated_zones.set(s.log_zone_a.0 as usize, true);
@@ -838,6 +858,8 @@ where
             return Ok(());
         }
         let block_size = usize::from(self.store.zone_dev.block_size());
+        let zone_blocks = u64::from(self.store.zone_dev.zone_blocks());
+        let zone_size = zone_blocks * block_size as u64;
 
         debug_assert_eq!(
             blocks.len() % block_size,
@@ -845,7 +867,10 @@ where
             "blocks len is not a multiple of block size"
         );
 
-        let end_len = s.blobs[self.index as usize].len + blocks.len() as u64;
+        let start = s.blobs[self.index as usize].len;
+        let end = start + blocks.len() as u64;
+
+        let mut offset = start % zone_size;
 
         while !blocks.is_empty() {
             let mut zone;
@@ -866,11 +891,12 @@ where
             }
             let n = n as usize * block_size;
             let n = n.min(blocks.len());
-            self.store.zone_dev.append(zone.0, &blocks[..n])?;
+            self.store.zone_dev.append(zone.0, offset, &blocks[..n])?;
             blocks = &blocks[n..];
+            offset = 0;
         }
-        s.replay_commit_blob(self.index, end_len);
-        self.store.log_commit_blob_tail(s, self.index, end_len)?;
+        s.replay_commit_blob(self.index, end);
+        self.store.log_commit_blob_tail(s, self.index, end)?;
         Ok(())
     }
 }
@@ -889,18 +915,26 @@ impl<const B: usize> ZoneDev for MemZones<B> {
     }
 
     #[track_caller]
-    fn append<'a>(&'a self, zone: u32, data: &[u8]) -> io::Result<u64> {
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<u64> {
         let (data, []) = data.as_chunks() else {
             panic!("data len is not a multiple of the block size")
         };
         let x = &mut *self.zones.borrow_mut();
         let x = &mut x[zone as usize];
-        let o = x.len() as u64;
+        let o = (x.len() * B) as u64;
+        assert!(
+            o == offset,
+            "offset does not match write pointer (expect: {o}, got: {offset})"
+        );
         if x.len() + data.len() > self.zone_size as usize {
             panic!("zone overflow");
         }
         x.extend(data);
         Ok(o)
+    }
+
+    fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>> {
+        Ok(Some(self.zones.borrow()[zone as usize].len() as u64))
     }
 
     fn blocks_free(&self, zone: u32) -> io::Result<u32> {
