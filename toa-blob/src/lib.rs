@@ -146,7 +146,7 @@ pub trait ZoneDev {
     ///
     /// Similarly, this method should panic if the offset does not match
     /// the current zone head.
-    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<u64>;
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()>;
 
     /// How many blocks can still be appended.
     fn blocks_free(&self, zone: u32) -> io::Result<u32>;
@@ -917,7 +917,7 @@ impl<const B: usize> ZoneDev for MemZones<B> {
     }
 
     #[track_caller]
-    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<u64> {
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
         let (data, []) = data.as_chunks() else {
             panic!("data len is not a multiple of the block size")
         };
@@ -932,7 +932,7 @@ impl<const B: usize> ZoneDev for MemZones<B> {
             panic!("zone overflow");
         }
         x.extend(data);
-        Ok(o)
+        Ok(())
     }
 
     fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>> {
