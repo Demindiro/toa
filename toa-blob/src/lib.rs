@@ -148,9 +148,6 @@ pub trait ZoneDev {
     /// the current zone head.
     fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()>;
 
-    /// How many blocks can still be appended.
-    fn blocks_free(&self, zone: u32) -> io::Result<u32>;
-
     /// The current write pointer of a zone.
     ///
     /// This may be `None` if the underlying device is not zoned (e.g. CMR HDD).
@@ -542,6 +539,9 @@ where
             return Ok(());
         }
         let block_size = usize::from(self.zone_dev.block_size());
+        let zone_blocks = u64::from(self.zone_dev.zone_blocks());
+        let zone_size = zone_blocks * block_size as u64;
+
         assert!(
             data.log.len() <= block_size,
             "{} <= {}",
@@ -558,11 +558,9 @@ where
         data.log.clear();
 
         // allocate a new zone if we nearly exhausted the current one
-        let rem_a = self.zone_dev.blocks_free(data.log_zone_a.0)?;
-        let rem_b = self.zone_dev.blocks_free(data.log_zone_b.0)?;
-        assert_eq!(rem_a, rem_b, "log length mismatch");
+        let rem = zone_size - data.log_zone_head;
 
-        if rem_a <= 1 {
+        if rem <= block_size as u64 {
             // TODO don't panic
             // TODO spread zones to improve resilience
             let [new_a, new_b] = data.alloc_zones_array().unwrap();
@@ -864,6 +862,7 @@ where
         let block_size = usize::from(self.store.zone_dev.block_size());
         let zone_blocks = u64::from(self.store.zone_dev.zone_blocks());
         let zone_size = zone_blocks * block_size as u64;
+        let idx = self.index as usize;
 
         debug_assert_eq!(
             blocks.len() % block_size,
@@ -871,14 +870,14 @@ where
             "blocks len is not a multiple of block size"
         );
 
-        let start = s.blobs[self.index as usize].len;
+        let start = s.blobs[idx].len;
         let end = start + blocks.len() as u64;
 
         let mut offset = start % zone_size;
 
         while !blocks.is_empty() {
             let mut zone;
-            match s.blobs[self.index as usize].zones.last() {
+            match s.blobs[idx].zones.last() {
                 None => {
                     [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                     self.store.log_add_zone_to_blob(s, self.index, zone)?;
@@ -886,19 +885,20 @@ where
                 }
                 Some(z) => zone = *z,
             };
-            let mut n = self.store.zone_dev.blocks_free(zone.0)?;
-            if n == 0 {
+            let n = s.blobs[idx].zones_capacity(zone_size);
+            if n == s.blobs[idx].len {
                 [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                 self.store.log_add_zone_to_blob(s, self.index, zone)?;
                 s.replay_add_zone_to_blob(self.index, zone);
-                n = self.store.zone_dev.blocks_free(zone.0)?;
             }
-            let n = n as usize * block_size;
-            let n = n.min(blocks.len());
+            let n = zone_size - offset;
+            let n = n.min(blocks.len() as u64) as usize;
             self.store.zone_dev.append(zone.0, offset, &blocks[..n])?;
             blocks = &blocks[n..];
             offset = 0;
+            s.blobs[idx].len += n as u64;
         }
+        // TODO delay commit until explicit flush
         s.replay_commit_blob(self.index, end);
         self.store.log_commit_blob_tail(s, self.index, end)?;
         Ok(())
@@ -937,10 +937,6 @@ impl<const B: usize> ZoneDev for MemZones<B> {
 
     fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>> {
         Ok(Some((self.zones.borrow()[zone as usize].len() * B) as u64))
-    }
-
-    fn blocks_free(&self, zone: u32) -> io::Result<u32> {
-        Ok(self.zone_size - self.zones.borrow()[zone as usize].len() as u32)
     }
 
     fn block_size(&self) -> BlockShift {
@@ -1008,6 +1004,10 @@ impl Blob {
 
     fn total_len(&self) -> u64 {
         self.len + self.tail.len() as u64
+    }
+
+    fn zones_capacity(&self, zone_size: u64) -> u64 {
+        self.zones.len() as u64 * zone_size
     }
 }
 
