@@ -127,7 +127,13 @@ pub trait ZoneDev {
     ///
     /// The device is expected to handle unaligned reads transparently.
     /// A slower path to handle this case is allowed.
-    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
+    ///
+    /// # Panics
+    ///
+    /// This method should panic if the offset + buffer length exceeds
+    /// the write pointer for this zone. This is not a requirement: if
+    /// the device does not track write pointers it is not necessary.
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()>;
 
     /// # Note
     ///
@@ -258,12 +264,9 @@ where
         let block_b = &mut *vec![0; block_size];
         let mut log_zone_a = 0;
         let mut log_zone_b = u32::from(zone_dev.zone_count()) - 1;
-        let mut len_a = zone_dev.read_at(log_zone_a, 0, block_a)?;
-        let mut len_b = zone_dev.read_at(log_zone_b, 0, block_b)?;
-
-        // TODO don't panic
-        assert_eq!(len_a, block_size, "no header block in main log");
-        assert_eq!(len_b, block_size, "no header block in mirror log");
+        // TODO check write pointer first
+        zone_dev.read_at(log_zone_a, 0, block_a)?;
+        zone_dev.read_at(log_zone_b, 0, block_b)?;
 
         let mut gen_a @ mut gen_b = 0;
         for (genn, blk) in [(&mut gen_a, &block_a), (&mut gen_b, &block_b)] {
@@ -293,13 +296,10 @@ where
 
         let mut store = BlobStoreData::new(gen_a, zone_dev.zone_count());
 
-        loop {
-            assert_eq!(len_a, len_b); // TODO don't panic, return error
-            if len_a == 0 {
-                break;
-            }
-            debug_assert_eq!(len_a, block_size, "partial block");
+        // FIXME what to do about devices without write heads?
+        let mut log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap();
 
+        while store.log_zone_head < log_end {
             store.log_zone_head += block_size as u64;
 
             let mut k = 0;
@@ -369,6 +369,7 @@ where
                         store.log_zone_b = ZoneId(log_zone_b);
                         store.mark_zone_allocated(store.log_zone_a);
                         store.mark_zone_allocated(store.log_zone_b);
+                        log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap();
                         break;
                     }
                     log::entry::ty::HEADER => k += 2,
@@ -376,8 +377,10 @@ where
                 }
             }
 
-            len_a = zone_dev.read_at(log_zone_a, store.log_zone_head, block_a)?;
-            len_b = zone_dev.read_at(log_zone_b, store.log_zone_head, block_b)?;
+            if store.log_zone_head < log_end {
+                zone_dev.read_at(log_zone_a, store.log_zone_head, block_a)?;
+                zone_dev.read_at(log_zone_b, store.log_zone_head, block_b)?;
+            }
         }
 
         Ok(BlobStore {
@@ -836,10 +839,11 @@ where
             let (mut zone, mut offt) = (offset / zone_size, offset % zone_size);
 
             while !zone_buf.is_empty() {
-                let n = self.store.zone_dev.read_at(
+                let n = zone_buf.len().min((zone_size - offt) as usize);
+                self.store.zone_dev.read_at(
                     s.blobs[idx].zones[zone as usize].0,
                     offt,
-                    zone_buf,
+                    &mut zone_buf[..n],
                 )?;
                 zone_buf = &mut zone_buf[n..];
                 zone += 1;
@@ -902,16 +906,14 @@ where
 }
 
 impl<const B: usize> ZoneDev for MemZones<B> {
-    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+    #[track_caller]
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let x = self.zones.borrow();
         let x = x[zone as usize].as_flattened();
-        let x = usize::try_from(offset)
-            .ok()
-            .and_then(|i| x.get(i..))
-            .unwrap_or(&[]);
-        let n = buf.len().min(x.len());
-        buf[..n].copy_from_slice(&x[..n]);
-        Ok(n)
+        let start = usize::try_from(offset).expect("offset out of bounds");
+        let end = start.checked_add(buf.len()).expect("offset out of bounds");
+        buf.copy_from_slice(&x[start..end]);
+        Ok(())
     }
 
     #[track_caller]
@@ -934,7 +936,7 @@ impl<const B: usize> ZoneDev for MemZones<B> {
     }
 
     fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>> {
-        Ok(Some(self.zones.borrow()[zone as usize].len() as u64))
+        Ok(Some((self.zones.borrow()[zone as usize].len() * B) as u64))
     }
 
     fn blocks_free(&self, zone: u32) -> io::Result<u32> {
