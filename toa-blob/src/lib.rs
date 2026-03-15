@@ -21,9 +21,11 @@ mod log {
             0 NOP
             1 CREATE_BLOB
             2 DELETE_BLOB
+            3 ADD_ZONE_TO_BLOB
             4 RENAME_BLOB
             5 APPEND_BLOB_TAIL
             6 NEXT_LOG_ZONE
+            7 COMMIT_BLOB_TAIL
             84 HEADER
         }
 
@@ -35,7 +37,7 @@ mod log {
         pub struct Nop {
             pub ty: u8,
             pub _pad_: [u8; 3],
-            pub _pad_ding_size: u32le,
+            pub padding_size: u32le,
         }
 
         #[repr(C)]
@@ -54,12 +56,14 @@ mod log {
             pub blob_index: u32le,
         }
 
-        #[repr(C)]
+        #[repr(C, align(8))]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         pub struct AddZoneToBlob {
             pub ty: u8,
             pub _pad_0: [u8; 3],
             pub blob_index: u32le,
+            pub zone_id: u32le,
+            pub _pad_1: [u8; 4],
         }
 
         #[repr(C)]
@@ -197,6 +201,7 @@ struct Blob {
     zones: Vec<ZoneId>,
     tail: Vec<u8>,
     len: u64,
+    flushed: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -326,6 +331,21 @@ where
                         store.replay_append_blob(idx, data);
                         k += (len + 7) >> 3;
                     }
+                    log::entry::ty::ADD_ZONE_TO_BLOB => {
+                        k += 1;
+                        let idx = u32::from_le_bytes([e, f, g, h]);
+                        let [x, y, z, w, _, _, _, _] = buf_a[k];
+                        let zone = u32::from_le_bytes([x, y, z, w]);
+                        k += 1;
+                        store.replay_add_zone_to_blob(idx, ZoneId(zone));
+                    }
+                    log::entry::ty::COMMIT_BLOB_TAIL => {
+                        k += 1;
+                        let idx = u32::from_le_bytes([e, f, g, h]);
+                        let len = u64::from_le_bytes(buf_a[k]);
+                        k += 1;
+                        store.replay_commit_blob(idx, len);
+                    }
                     log::entry::ty::NEXT_LOG_ZONE => {
                         let [_, _, _, _, x, y, z, w] = buf_b[k];
                         log_zone_a = u32::from_le_bytes([e, f, g, h]);
@@ -353,7 +373,12 @@ where
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
-        self.log_flush()?;
+        let s = &mut *self.data.borrow_mut();
+        let blob_num = s.blobs.len();
+        for idx in 0..blob_num {
+            self.flush_blob(s, idx)?;
+        }
+        self.log_flush(s)?;
         Ok(())
     }
 
@@ -376,10 +401,11 @@ where
         &'a mut self,
         name: &[u8],
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
-        let res = self.data.borrow_mut().replay_create_blob(name);
+        let s = &mut *self.data.borrow_mut();
+        let res = s.replay_create_blob(name);
         match res {
             Ok(index) => self
-                .log_create_blob(name)
+                .log_create_blob(s, name)
                 .map(|()| Ok(BlobRef { store: self, index })),
             Err(e) => Ok(Err(e)),
         }
@@ -391,34 +417,56 @@ where
         Ok(data.log.len() as u64)
     }
 
-    fn log_create_blob(&self, name: &[u8]) -> io::Result<()> {
+    fn flush_blob<'a>(&'a self, s: &mut BlobStoreData, idx: usize) -> io::Result<()> {
+        while s.blobs[idx].flushed < s.blobs[idx].tail.len() {
+            if s.log_free(self.zone_dev.block_size()) == 0 {
+                self.log_flush(s)?;
+            }
+            let start = s.blobs[idx].flushed;
+            let end = start + s.log_free(self.zone_dev.block_size()) - 8;
+            let tail = core::mem::take(&mut s.blobs[idx].tail);
+            let end = end.min(tail.len());
+            let res = self.log_append_blob_tail(s, idx as u32, &tail[start..end]);
+            s.blobs[idx].tail = tail;
+            res?;
+            s.blobs[idx].flushed = end;
+        }
+        Ok(())
+    }
+
+    fn log_create_blob(&self, s: &mut BlobStoreData, name: &[u8]) -> io::Result<()> {
         let hdr = log::entry::CreateBlob {
             ty: log::entry::ty::CREATE_BLOB,
             name_len: u8::try_from(name.len()).unwrap().into(),
         };
-        self.log_push(&[bytemuck::bytes_of(&hdr), name])
+        self.log_push(s, &[bytemuck::bytes_of(&hdr), name])
     }
 
-    fn log_delete_blob(&self, index: u32) -> io::Result<()> {
+    fn log_delete_blob(&self, s: &mut BlobStoreData, index: u32) -> io::Result<()> {
         let hdr = log::entry::DeleteBlob {
             ty: log::entry::ty::DELETE_BLOB,
             _pad_0: Default::default(),
             blob_index: index.into(),
         };
-        self.log_push(&[bytemuck::bytes_of(&hdr)])
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
     }
 
-    fn log_rename_blob(&self, index: u32, name: &[u8]) -> io::Result<()> {
+    fn log_rename_blob(&self, s: &mut BlobStoreData, index: u32, name: &[u8]) -> io::Result<()> {
         let hdr = log::entry::RenameBlob {
             ty: log::entry::ty::RENAME_BLOB,
             name_len: u8::try_from(name.len()).unwrap().into(),
             _pad_0: Default::default(),
             blob_index: index.into(),
         };
-        self.log_push(&[bytemuck::bytes_of(&hdr), name])
+        self.log_push(s, &[bytemuck::bytes_of(&hdr), name])
     }
 
-    fn log_append_blob_tail(&self, index: u32, data: &[u8]) -> io::Result<()> {
+    fn log_append_blob_tail(
+        &self,
+        s: &mut BlobStoreData,
+        index: u32,
+        data: &[u8],
+    ) -> io::Result<()> {
         let len = u16::try_from(data.len()).unwrap(); // FIXME pre-split data
         let hdr = log::entry::AppendBlobTail {
             ty: log::entry::ty::APPEND_BLOB_TAIL,
@@ -426,31 +474,53 @@ where
             data_len: len.into(),
             blob_index: index.into(),
         };
-        self.log_push(&[bytemuck::bytes_of(&hdr), data])
+        self.log_push(s, &[bytemuck::bytes_of(&hdr), data])
     }
 
-    fn log_push(&self, data: &[&[u8]]) -> io::Result<()> {
+    fn log_add_zone_to_blob(
+        &self,
+        s: &mut BlobStoreData,
+        index: u32,
+        zone_id: ZoneId,
+    ) -> io::Result<()> {
+        let hdr = log::entry::AddZoneToBlob {
+            ty: log::entry::ty::ADD_ZONE_TO_BLOB,
+            _pad_0: Default::default(),
+            _pad_1: Default::default(),
+            blob_index: index.into(),
+            zone_id: zone_id.0.into(),
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_commit_blob_tail(&self, s: &mut BlobStoreData, index: u32, len: u64) -> io::Result<()> {
+        let hdr = log::entry::CommitBlobTail {
+            ty: log::entry::ty::COMMIT_BLOB_TAIL,
+            _pad_0: Default::default(),
+            blob_index: index.into(),
+            len: len.into(),
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_push(&self, s: &mut BlobStoreData, data: &[&[u8]]) -> io::Result<()> {
         let len = data.iter().fold(0, |s, x| s + x.len());
-        self.log_reserve(len)?;
-        self.data
-            .borrow_mut()
-            .log
-            .extend(data.iter().copied().flatten());
-        self.log_pad();
+        self.log_reserve(s, len)?;
+        s.log.extend(data.iter().copied().flatten());
+        s.log_pad();
         Ok(())
     }
 
-    fn log_reserve(&self, num: usize) -> io::Result<()> {
+    fn log_reserve(&self, s: &mut BlobStoreData, num: usize) -> io::Result<()> {
         let num = (num + 7) & !7;
-        let len = (self.data.borrow().log.len() + num) as u64;
+        let len = (s.log.len() + num) as u64;
         if len > u64::from(self.zone_dev.block_size()) {
-            self.log_flush()?;
+            self.log_flush(s)?;
         }
         Ok(())
     }
 
-    fn log_flush(&self) -> io::Result<()> {
-        let data = &mut *self.data.borrow_mut();
+    fn log_flush<'a>(&'a self, data: &mut BlobStoreData) -> io::Result<()> {
         if data.log.is_empty() {
             return Ok(());
         }
@@ -492,18 +562,6 @@ where
         }
 
         Ok(())
-    }
-
-    fn log_pad(&self) {
-        let data = &mut *self.data.borrow_mut();
-        let n = data.log.len();
-        let n = (n + 7) & !7;
-        data.log.resize(n, 0);
-    }
-
-    fn log_free(&self) -> usize {
-        let data = self.data.borrow();
-        usize::from(self.zone_dev.block_size()) - data.log.len()
     }
 }
 
@@ -616,7 +674,28 @@ impl BlobStoreData {
 
     fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
         self.blobs[index as usize].tail.extend(data);
-        self.blobs[index as usize].len += data.len() as u64;
+        self.blobs[index as usize].flushed += data.len();
+    }
+
+    fn replay_add_zone_to_blob(&mut self, index: u32, zone: ZoneId) {
+        self.blobs[index as usize].zones.push(zone);
+        self.mark_zone_allocated(zone);
+    }
+
+    fn replay_commit_blob(&mut self, index: u32, len: u64) {
+        self.blobs[index as usize].tail.clear();
+        self.blobs[index as usize].len = len;
+        self.blobs[index as usize].flushed = 0;
+    }
+
+    fn log_free(&self, block_size: BlockShift) -> usize {
+        usize::from(block_size) - self.log.len()
+    }
+
+    fn log_pad(&mut self) {
+        let n = self.log.len();
+        let n = (n + 7) & !7;
+        self.log.resize(n, 0);
     }
 }
 
@@ -634,26 +713,43 @@ where
     U: ZoneDev,
 {
     pub fn delete(self) -> io::Result<()> {
-        self.store.data.borrow_mut().replay_delete_blob(self.index);
-        self.store.log_delete_blob(self.index)
+        let s = &mut *self.store.data.borrow_mut();
+        s.replay_delete_blob(self.index);
+        self.store.log_delete_blob(s, self.index)
     }
 
     /// # Returns
     ///
     /// Start offset of written data.
-    pub fn append(&mut self, mut data: &[u8]) -> io::Result<u64> {
-        let offt = self.len()?;
-        while !data.is_empty() {
-            if self.store.log_free() == 0 {
-                self.store.log_flush()?;
-            }
-            let wr;
-            let n = (self.store.log_free() - 8).min(data.len());
-            (wr, data) = data.split_at(n);
-            self.store.log_append_blob_tail(self.index, wr)?;
-            let mut s_data = self.store.data.borrow_mut();
-            s_data.replay_append_blob(self.index, wr);
+    pub fn append(&mut self, data: &[u8]) -> io::Result<u64> {
+        let s = &mut *self.store.data.borrow_mut();
+        let block_size = usize::from(self.store.zone_dev.block_size());
+        let idx = self.index as usize;
+        let offt = s.blobs[idx].total_len();
+
+        debug_assert!(
+            s.blobs[idx].flushed <= s.blobs[idx].tail.len(),
+            "flushed not reset properly"
+        );
+
+        let n = s.blobs[idx].tail.len().wrapping_neg() % block_size;
+        let n = n.min(data.len());
+        let (head, data) = data.split_at(n);
+        s.blobs[idx].tail.extend(head);
+
+        if s.blobs[idx].tail.len() >= block_size {
+            let tail = core::mem::take(&mut s.blobs[idx].tail);
+            self.append_blocks(s, &tail)?;
+            s.blobs[idx].tail = tail;
+            s.blobs[idx].tail.clear();
+            s.blobs[idx].flushed = 0;
         }
+
+        let n = data.len() & !(block_size - 1);
+        let (blocks, tail) = data.split_at(n);
+        self.append_blocks(s, blocks)?;
+        s.blobs[idx].tail.extend(tail);
+
         Ok(offt)
     }
 
@@ -668,32 +764,114 @@ where
         Ok(offt)
     }
 
+    pub fn flush(&mut self) -> io::Result<()> {
+        let s = &mut *self.store.data.borrow_mut();
+        self.store.flush_blob(s, self.index as usize)?;
+        Ok(())
+    }
+
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
         // FIXME update index
-        if self
-            .store
-            .data
-            .borrow_mut()
-            .replay_rename_blob(self.index, new_name)
-        {
-            self.store.log_rename_blob(self.index, new_name)?;
+        let s = &mut *self.store.data.borrow_mut();
+        if s.replay_rename_blob(self.index, new_name) {
+            self.store.log_rename_blob(s, self.index, new_name)?;
         }
         Ok(())
     }
 
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        let data = self.store.data.borrow();
-        let s = usize::try_from(offset)
-            .ok()
-            .and_then(|x| data.blobs[self.index as usize].tail.get(x..))
-            .unwrap_or(&[]);
-        let n = s.len().min(buf.len());
-        buf[..n].copy_from_slice(&s[..n]);
-        Ok(n)
+        let s = self.store.data.borrow();
+        let block_size = usize::from(self.store.zone_dev.block_size());
+        let idx = self.index as usize;
+
+        if let Some(x) = offset.checked_sub(s.blobs[idx].len) {
+            // all tail
+            let x = usize::try_from(x)
+                .ok()
+                .and_then(|x| s.blobs[idx].tail.get(x..))
+                .unwrap_or(&[]);
+            let n = x.len().min(buf.len());
+            buf[..n].copy_from_slice(&x[..n]);
+            Ok(n)
+        } else {
+            let n = self.len()?.saturating_sub(offset);
+            let n = usize::try_from(n).unwrap_or(usize::MAX).min(buf.len());
+            let buf = &mut buf[..n];
+
+            let n = s.blobs[idx].len.saturating_sub(offset);
+            let n = usize::try_from(n).unwrap_or(usize::MAX).min(buf.len());
+            let (mut zone_buf, tail_buf) = buf.split_at_mut(n);
+
+            // do tail first
+            let n = tail_buf.len().min(s.blobs[idx].tail.len());
+            tail_buf[..n].copy_from_slice(&s.blobs[idx].tail[..n]);
+
+            // the buffer may span multiple zones, so translate zone -> block -> byte
+            // account for offset/block misalignment
+            let zone_blocks = u64::from(self.store.zone_dev.zone_blocks());
+            // TODO this does require a proper division, which is slow.
+            // zone_blocks is constant however, so we could precalculate the reciprocal,
+            // then just multiply which is fast.
+            let zone_size = u64::from(zone_blocks) * block_size as u64;
+            let (mut zone, mut offt) = (offset / zone_size, offset % zone_size);
+
+            while !zone_buf.is_empty() {
+                let n = self.store.zone_dev.read_at(
+                    s.blobs[idx].zones[zone as usize].0,
+                    offt,
+                    zone_buf,
+                )?;
+                zone_buf = &mut zone_buf[n..];
+                zone += 1;
+                offt = 0;
+            }
+            Ok(buf.len())
+        }
     }
 
     pub fn len(&self) -> io::Result<u64> {
-        Ok(self.store.data.borrow().blobs[self.index as usize].len)
+        Ok(self.store.data.borrow().blobs[self.index as usize].total_len())
+    }
+
+    fn append_blocks(&self, s: &mut BlobStoreData, mut blocks: &[u8]) -> io::Result<()> {
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        let block_size = usize::from(self.store.zone_dev.block_size());
+
+        debug_assert_eq!(
+            blocks.len() % block_size,
+            0,
+            "blocks len is not a multiple of block size"
+        );
+
+        let end_len = s.blobs[self.index as usize].len + blocks.len() as u64;
+
+        while !blocks.is_empty() {
+            let mut zone;
+            match s.blobs[self.index as usize].zones.last() {
+                None => {
+                    [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
+                    self.store.log_add_zone_to_blob(s, self.index, zone)?;
+                    s.replay_add_zone_to_blob(self.index, zone);
+                }
+                Some(z) => zone = *z,
+            };
+            let mut n = self.store.zone_dev.blocks_free(zone.0)?;
+            if n == 0 {
+                [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
+                self.store.log_add_zone_to_blob(s, self.index, zone)?;
+                s.replay_add_zone_to_blob(self.index, zone);
+                n = self.store.zone_dev.blocks_free(zone.0)?;
+            }
+            let n = n as usize * block_size;
+            let n = n.min(blocks.len());
+            self.store.zone_dev.append(zone.0, &blocks[..n])?;
+            blocks = &blocks[n..];
+        }
+        s.replay_commit_blob(self.index, end_len);
+        self.store.log_commit_blob_tail(s, self.index, end_len)?;
+        Ok(())
     }
 }
 
@@ -788,13 +966,22 @@ impl Blob {
             zones: Vec::new(),
             tail: Vec::new(),
             len: 0,
+            flushed: 0,
         }
+    }
+
+    fn total_len(&self) -> u64 {
+        self.len + self.tail.len() as u64
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    const BLOCK_SIZE: u32 = 512;
+    const ZONE_BLOCKS: u32 = 42;
+    const ZONE_SIZE: u32 = ZONE_BLOCKS * BLOCK_SIZE;
 
     struct Test {
         store: BlobStore<MemZones<512>>,
@@ -814,6 +1001,7 @@ mod test {
             }
         }
 
+        #[track_caller]
         fn append(&self, blob: &[u8], expect_offset: u64, data: &[u8]) {
             let o = self
                 .store
@@ -822,7 +1010,13 @@ mod test {
                 .unwrap()
                 .append(data)
                 .unwrap();
-            assert_eq!(o, expect_offset)
+            assert_eq!(o, expect_offset, "got <> expected")
+        }
+
+        #[track_caller]
+        fn assert_len(&self, blob: &[u8], expect_len: u64) {
+            let x = self.store.blob(blob).unwrap().unwrap().len().unwrap();
+            assert_eq!(x, expect_len);
         }
     }
 
@@ -906,6 +1100,23 @@ mod test {
     }
 
     #[test]
+    fn append_blob_large() {
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
+        s.store.unmount().map_err(|e| e.1).unwrap();
+    }
+
+    #[test]
+    fn append_blob_small_large() {
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[0; 400]);
+        s.append(b"", 400, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
+        s.store.unmount().map_err(|e| e.1).unwrap();
+    }
+
+    #[test]
     fn rename_blob_shuffle_bloblist() {
         let mut s = Test::new();
         s.create_blob(b"").unwrap().unwrap();
@@ -954,5 +1165,45 @@ mod test {
         s = s.remount();
         // this breaks after a remount if *zone allocation* tracking isn't done properly
         s.append(b"", 30000, &[0; 20000]);
+    }
+
+    #[test]
+    fn append_blob_truncated_tail() {
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[0]);
+        s.append(b"", 1, &[0]);
+        s.append(b"", 2, &[]);
+    }
+
+    #[test]
+    fn load_replay_add_zone_to_blob() {
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[1; 30000]);
+        s = s.remount();
+        s.append(b"", 30000, &[2; 20000]);
+        let buf = &mut [0];
+        let n = s.blob(b"").unwrap().unwrap().read_at(48000, buf).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(buf, &[2]);
+    }
+
+    /// We did correctly update flushed for AppendBlob during replay
+    /// but forgot to reset it when encountering a CommitBlob entry.
+    #[test]
+    fn load_commit_blob_reset_flushed() {
+        const A: usize = 1;
+        const B: usize = 511;
+        const C: usize = 1;
+        let mut s = Test::new();
+        s.create_blob(b"").unwrap().unwrap();
+        s.append(b"", 0, &[0; A]);
+        s = s.remount();
+        s.append(b"", A as _, &[0; B]);
+        s = s.remount();
+        s.append(b"", (A + B) as _, &[0; C]);
+        s = s.remount();
+        s.assert_len(b"", (A + B + C) as u64);
     }
 }

@@ -136,8 +136,12 @@ The mirror zone **must** use a different zone ID.
 Takes a full blob tail and appends it to the main blob.
 This automatically clears the tail buffer.
 
-The offset doubles as nonce. As blobs are append-only
-this should not result in any vulnerabilities.
+The length is the *total* length of the blob.
+It must be strictly larger than the previous committed length.
+
+The extra length may be larger than what is contained in the
+current tail buffer, implying additional data. It cannot
+be smaller however.
 
 > **TODO** what if there is a power outage between
 > writing the record and the log entry?
