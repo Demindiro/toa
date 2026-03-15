@@ -3,6 +3,12 @@
 use std::collections::hash_map::{Entry, HashMap};
 
 #[derive(Debug, arbitrary::Arbitrary)]
+enum DevType {
+    MemZones512,
+    MemBlocks512,
+}
+
+#[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
     Remount,
     CreateBlob {
@@ -34,10 +40,16 @@ enum Op<'a> {
     },
 }
 
-libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
+libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
+    let (dev, ops) = dev_ops;
+
     // allocate plenty of zones as we don't care to test out-of-storage conditions here
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
-    let mut store = toa_blob::BlobStore::init(toa_blob::MemZones::<512>::new(200, 100)).unwrap();
+    let dev: Box<dyn toa_blob::ZoneDev> = match dev {
+        DevType::MemZones512 => Box::new(toa_blob::MemZones::<512>::new(200, 100)),
+        DevType::MemBlocks512 => Box::new(toa_blob::MemBlocks::<512>::new(200, 100)),
+    };
+    let mut store = toa_blob::BlobStore::init(dev).unwrap();
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&[u8], Vec<u8>)>>::with_capacity(1 << 16);

@@ -1047,6 +1047,48 @@ impl<const B: usize> ZoneDev for MemBlocks<B> {
     }
 }
 
+macro_rules! proxy_zonedev {
+    ($ty:ty) => {
+        impl ZoneDev for $ty {
+            #[track_caller]
+            fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+                (&**self).read_at(zone, offset, buf)
+            }
+
+            #[track_caller]
+            fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
+                (&**self).append(zone, offset, data)
+            }
+
+            #[track_caller]
+            fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>> {
+                (&**self).zone_write_head(zone)
+            }
+
+            #[track_caller]
+            fn block_size(&self) -> BlockShift {
+                (&**self).block_size()
+            }
+            #[track_caller]
+            fn zone_blocks(&self) -> u32 {
+                (&**self).zone_blocks()
+            }
+            #[track_caller]
+            fn zone_count(&self) -> u32 {
+                (&**self).zone_count()
+            }
+
+            #[track_caller]
+            fn clear(&mut self) -> io::Result<()> {
+                (&mut **self).clear()
+            }
+        }
+    };
+}
+
+proxy_zonedev!(Box<dyn ZoneDev>);
+proxy_zonedev!(&mut dyn ZoneDev);
+
 impl From<BlockShift> for u32 {
     fn from(x: BlockShift) -> u32 {
         match x {
