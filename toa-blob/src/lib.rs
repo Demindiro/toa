@@ -184,6 +184,11 @@ pub struct MemZones<const B: usize> {
     zone_size: u32,
 }
 
+pub struct MemBlocks<const B: usize> {
+    blocks: RefCell<Box<[[u8; B]]>>,
+    zone_size: u32,
+}
+
 pub enum BlockShift {
     N9 = 1 << 9,
     N12 = 1 << 12,
@@ -256,6 +261,8 @@ where
 
     pub fn load(zone_dev: U) -> io::Result<Self> {
         let block_size = usize::from(zone_dev.block_size());
+        let zone_blocks = u64::from(zone_dev.zone_blocks());
+        let zone_size = zone_blocks * block_size as u64;
         let block_a = &mut *vec![0; block_size];
         let block_b = &mut *vec![0; block_size];
         let mut log_zone_a = 0;
@@ -292,11 +299,12 @@ where
 
         let mut store = BlobStoreData::new(gen_a, zone_dev.zone_count());
 
-        // FIXME what to do about devices without write heads?
-        let mut log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap();
+        let mut log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
 
         while store.log_zone_head < log_end {
             store.log_zone_head += block_size as u64;
+
+            let mut end_of_log = true;
 
             let mut k = 0;
             let (buf_a, []) = block_a.as_chunks_mut::<8>() else {
@@ -307,6 +315,7 @@ where
             };
             while let Some(x) = buf_a.get(k) {
                 let [ty, b, c, d, e, f, g, h] = *x;
+                end_of_log &= ty == log::entry::ty::LOG_BLOCK_END;
                 // FIXME ensure log entries are equal *except* NEXT_LOG_ZONE
                 // we should have a helper function which just returns an entry,
                 // that way we can do a simple (==) check
@@ -363,12 +372,21 @@ where
                         store.log_zone_b = ZoneId(log_zone_b);
                         store.mark_zone_allocated(store.log_zone_a);
                         store.mark_zone_allocated(store.log_zone_b);
-                        log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap();
+                        log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
                         break;
                     }
                     log::entry::ty::HEADER => k += 2,
                     ty => todo!("{ty}"),
                 }
+            }
+
+            if end_of_log {
+                assert!(
+                    zone_dev.zone_write_head(log_zone_a)?.is_none(),
+                    "zoned device should not contain end_of_log"
+                );
+                store.log_zone_head -= block_size as u64;
+                break;
             }
 
             if store.log_zone_head < log_end {
@@ -967,6 +985,68 @@ impl<const B: usize> MemZones<B> {
     }
 }
 
+impl<const B: usize> MemBlocks<B> {
+    const _B_IS_POWER_OF_2: () = assert!(B.count_ones() == 1);
+
+    pub fn new(zone_size: u32, zone_count: u32) -> Self {
+        Self {
+            blocks: RefCell::new(vec![[0; B]; zone_count as usize * zone_size as usize].into()),
+            zone_size: zone_size * B as u32,
+        }
+    }
+
+    #[track_caller]
+    fn translate(&self, zone: u32, offset: u64) -> usize {
+        let offset = u128::from(zone) * u128::from(self.zone_size) + u128::from(offset);
+        usize::try_from(offset).expect("offset out of bounds")
+    }
+}
+
+impl<const B: usize> ZoneDev for MemBlocks<B> {
+    #[track_caller]
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let start = self.translate(zone, offset);
+        let end = start.checked_add(buf.len()).expect("offset out of bounds");
+        let x = self.blocks.borrow();
+        buf.copy_from_slice(&x.as_flattened()[start..end]);
+        Ok(())
+    }
+
+    #[track_caller]
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
+        let (data, []) = data.as_chunks() else {
+            panic!("data len is not a multiple of the block size")
+        };
+        assert!(offset % B as u64 == 0, "offset is not aligned");
+        let start = self.translate(zone, offset) / B;
+        let end = start + data.len();
+        self.blocks.borrow_mut()[start..end].copy_from_slice(data);
+        Ok(())
+    }
+
+    fn zone_write_head(&self, _zone: u32) -> io::Result<Option<u64>> {
+        Ok(None)
+    }
+
+    fn block_size(&self) -> BlockShift {
+        match B {
+            512 => BlockShift::N9,
+            4096 => BlockShift::N12,
+            _ => todo!(),
+        }
+    }
+    fn zone_blocks(&self) -> u32 {
+        self.zone_size / B as u32
+    }
+    fn zone_count(&self) -> u32 {
+        (self.blocks.borrow().len() * B / self.zone_size as usize) as u32
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 impl From<BlockShift> for u32 {
     fn from(x: BlockShift) -> u32 {
         match x {
@@ -1016,227 +1096,240 @@ mod test {
     const ZONE_BLOCKS: u32 = 42;
     const ZONE_SIZE: u32 = ZONE_BLOCKS * BLOCK_SIZE;
 
-    struct Test {
-        store: BlobStore<MemZones<512>>,
-    }
+    macro_rules! with_dev {
+        ($mod:ident $dev:ty) => {
+            mod $mod {
+                use super::*;
 
-    impl Test {
-        fn new() -> Self {
-            Self {
-                store: BlobStore::init(MemZones::new(42, 10)).unwrap(),
+                type Dev = $dev;
+
+                struct Test {
+                    store: BlobStore<Dev>,
+                }
+
+                impl Test {
+                    fn new() -> Self {
+                        Self {
+                            store: BlobStore::init(Dev::new(42, 10)).unwrap(),
+                        }
+                    }
+
+                    fn remount(self) -> Self {
+                        let zone_dev = self.store.unmount().map_err(|e| e.1).unwrap();
+                        Self {
+                            store: BlobStore::load(zone_dev).unwrap(),
+                        }
+                    }
+
+                    #[track_caller]
+                    fn append(&self, blob: &[u8], expect_offset: u64, data: &[u8]) {
+                        let o = self
+                            .store
+                            .blob(blob)
+                            .unwrap()
+                            .unwrap()
+                            .append(data)
+                            .unwrap();
+                        assert_eq!(o, expect_offset, "got <> expected")
+                    }
+
+                    #[track_caller]
+                    fn assert_len(&self, blob: &[u8], expect_len: u64) {
+                        let x = self.store.blob(blob).unwrap().unwrap().len().unwrap();
+                        assert_eq!(x, expect_len);
+                    }
+                }
+
+                impl core::ops::Deref for Test {
+                    type Target = BlobStore<Dev>;
+
+                    fn deref(&self) -> &Self::Target {
+                        &self.store
+                    }
+                }
+
+                impl core::ops::DerefMut for Test {
+                    fn deref_mut(&mut self) -> &mut Self::Target {
+                        &mut self.store
+                    }
+                }
+
+                // these tests are all based on fuzz artifacts.
+                // when adding or changing a feature: first run tests,
+                // then update the fuzzer, run it and just wait for test cases to pop up.
+
+                #[test]
+                fn empty() {
+                    Test::new().remount();
+                }
+
+                #[test]
+                fn create_blobs() {
+                    let mut store = Test::new();
+                    store.create_blob(b"a").unwrap().unwrap();
+                    store.create_blob(b"b").unwrap().unwrap();
+                    store.blob(b"a").unwrap().expect("missing blob a");
+                    store.blob(b"b").unwrap().expect("missing blob b");
+                    store = store.remount();
+                    store.blob(b"a").unwrap().expect("missing blob a");
+                    store.blob(b"b").unwrap().expect("missing blob b");
+                    store = store.remount();
+                    store.create_blob(b"c").unwrap().unwrap();
+                    store.blob(b"a").unwrap().expect("missing blob a");
+                    store.blob(b"b").unwrap().expect("missing blob b");
+                    store.blob(b"c").unwrap().expect("missing blob c");
+                    store = store.remount();
+                    store.blob(b"a").unwrap().expect("missing blob a");
+                    store.blob(b"b").unwrap().expect("missing blob b");
+                    store.blob(b"c").unwrap().expect("missing blob c");
+                }
+
+                #[test]
+                fn create_duplicate_blobs() {
+                    let mut store = Test::new();
+                    store.create_blob(b"a").unwrap().unwrap();
+                    assert!(store.create_blob(b"a").unwrap().is_err());
+                }
+
+                #[test]
+                fn delete_blob() {
+                    let mut store = Test::new();
+                    store.create_blob(b"a").unwrap().unwrap();
+                    store.blob(b"a").unwrap().unwrap().delete().unwrap();
+                    store.create_blob(b"a").unwrap().unwrap();
+                    store.blob(b"a").unwrap().unwrap().delete().unwrap();
+                    store.remount();
+                }
+
+                #[test]
+                fn append_blob() {
+                    let mut s = Test::new();
+                    let mut b = s.create_blob(b"a").unwrap().unwrap();
+                    let o = b.append(&[0; 507]).unwrap();
+                    assert_eq!(o, 0);
+                    s.store.unmount().map_err(|e| e.1).unwrap();
+                }
+
+                #[test]
+                fn append_blob_remount() {
+                    let mut s = Test::new();
+                    s.create_blob(b"a").unwrap().unwrap();
+                    s = s.remount();
+                    let o = s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
+                    assert_eq!(o, 0);
+                }
+
+                #[test]
+                fn append_blob_large() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
+                    s.store.unmount().map_err(|e| e.1).unwrap();
+                }
+
+                #[test]
+                fn append_blob_small_large() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[0; 400]);
+                    s.append(b"", 400, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
+                    s.store.unmount().map_err(|e| e.1).unwrap();
+                }
+
+                #[test]
+                fn rename_blob_shuffle_bloblist() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.create_blob(b"a").unwrap().unwrap();
+                    s.create_blob(b"b").unwrap().unwrap();
+                    s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
+                    s.append(b"b", 0, b"");
+                }
+
+                #[test]
+                fn log_overflow() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[b'a'; 10000]);
+                    s.append(b"", 10000, &[b'b'; 20000]);
+                    s = s.remount();
+                    let buf = &mut [0; 40000];
+                    let n = s.blob(b"").unwrap().unwrap().read_at(0, buf).unwrap();
+                    assert_eq!(n, 30000);
+                    assert_eq!(buf[..10000], [b'a'; 10000]);
+                    assert_eq!(buf[10000..30000], [b'b'; 20000]);
+                    // ensure we commit to the right zone
+                    s.create_blob(b"a").unwrap().unwrap();
+                    s.flush().unwrap();
+                }
+
+                // triggered a particular case where the mirror log used the wrong zone ID
+                #[test]
+                fn log_overflow_delete() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[b'a'; 10000]);
+                    s.append(b"", 10000, &[b'b'; 20000]);
+                    s = s.remount();
+                    s.blob(b"").unwrap().unwrap().delete().unwrap();
+                    s.remount();
+                }
+
+                #[test]
+                fn log_overflow_load_zone_allocation_map() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    // 42 * 512 = 21504
+                    // hence, assuming no "commit blob", this forcibly allocates a second log zone
+                    s.append(b"", 0, &[0; 30000]);
+                    s = s.remount();
+                    // this breaks after a remount if *zone allocation* tracking isn't done properly
+                    s.append(b"", 30000, &[0; 20000]);
+                }
+
+                #[test]
+                fn append_blob_truncated_tail() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[0]);
+                    s.append(b"", 1, &[0]);
+                    s.append(b"", 2, &[]);
+                }
+
+                #[test]
+                fn load_replay_add_zone_to_blob() {
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[1; 30000]);
+                    s = s.remount();
+                    s.append(b"", 30000, &[2; 20000]);
+                    let buf = &mut [0];
+                    let n = s.blob(b"").unwrap().unwrap().read_at(48000, buf).unwrap();
+                    assert_eq!(n, 1);
+                    assert_eq!(buf, &[2]);
+                }
+
+                /// We did correctly update flushed for AppendBlob during replay
+                /// but forgot to reset it when encountering a CommitBlob entry.
+                #[test]
+                fn load_commit_blob_reset_flushed() {
+                    const A: usize = 1;
+                    const B: usize = 511;
+                    const C: usize = 1;
+                    let mut s = Test::new();
+                    s.create_blob(b"").unwrap().unwrap();
+                    s.append(b"", 0, &[0; A]);
+                    s = s.remount();
+                    s.append(b"", A as _, &[0; B]);
+                    s = s.remount();
+                    s.append(b"", (A + B) as _, &[0; C]);
+                    s = s.remount();
+                    s.assert_len(b"", (A + B + C) as u64);
+                }
             }
-        }
-
-        fn remount(self) -> Self {
-            let zone_dev = self.store.unmount().map_err(|e| e.1).unwrap();
-            Self {
-                store: BlobStore::load(zone_dev).unwrap(),
-            }
-        }
-
-        #[track_caller]
-        fn append(&self, blob: &[u8], expect_offset: u64, data: &[u8]) {
-            let o = self
-                .store
-                .blob(blob)
-                .unwrap()
-                .unwrap()
-                .append(data)
-                .unwrap();
-            assert_eq!(o, expect_offset, "got <> expected")
-        }
-
-        #[track_caller]
-        fn assert_len(&self, blob: &[u8], expect_len: u64) {
-            let x = self.store.blob(blob).unwrap().unwrap().len().unwrap();
-            assert_eq!(x, expect_len);
-        }
+        };
     }
 
-    impl core::ops::Deref for Test {
-        type Target = BlobStore<MemZones<512>>;
-
-        fn deref(&self) -> &Self::Target {
-            &self.store
-        }
-    }
-
-    impl core::ops::DerefMut for Test {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.store
-        }
-    }
-
-    // these tests are all based on fuzz artifacts.
-    // when adding or changing a feature: first run tests,
-    // then update the fuzzer, run it and just wait for test cases to pop up.
-
-    #[test]
-    fn empty() {
-        Test::new().remount();
-    }
-
-    #[test]
-    fn create_blobs() {
-        let mut store = Test::new();
-        store.create_blob(b"a").unwrap().unwrap();
-        store.create_blob(b"b").unwrap().unwrap();
-        store.blob(b"a").unwrap().expect("missing blob a");
-        store.blob(b"b").unwrap().expect("missing blob b");
-        store = store.remount();
-        store.blob(b"a").unwrap().expect("missing blob a");
-        store.blob(b"b").unwrap().expect("missing blob b");
-        store = store.remount();
-        store.create_blob(b"c").unwrap().unwrap();
-        store.blob(b"a").unwrap().expect("missing blob a");
-        store.blob(b"b").unwrap().expect("missing blob b");
-        store.blob(b"c").unwrap().expect("missing blob c");
-        store = store.remount();
-        store.blob(b"a").unwrap().expect("missing blob a");
-        store.blob(b"b").unwrap().expect("missing blob b");
-        store.blob(b"c").unwrap().expect("missing blob c");
-    }
-
-    #[test]
-    fn create_duplicate_blobs() {
-        let mut store = Test::new();
-        store.create_blob(b"a").unwrap().unwrap();
-        assert!(store.create_blob(b"a").unwrap().is_err());
-    }
-
-    #[test]
-    fn delete_blob() {
-        let mut store = Test::new();
-        store.create_blob(b"a").unwrap().unwrap();
-        store.blob(b"a").unwrap().unwrap().delete().unwrap();
-        store.create_blob(b"a").unwrap().unwrap();
-        store.blob(b"a").unwrap().unwrap().delete().unwrap();
-        store.remount();
-    }
-
-    #[test]
-    fn append_blob() {
-        let mut s = Test::new();
-        let mut b = s.create_blob(b"a").unwrap().unwrap();
-        let o = b.append(&[0; 507]).unwrap();
-        assert_eq!(o, 0);
-        s.store.unmount().map_err(|e| e.1).unwrap();
-    }
-
-    #[test]
-    fn append_blob_remount() {
-        let mut s = Test::new();
-        s.create_blob(b"a").unwrap().unwrap();
-        s = s.remount();
-        let o = s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
-        assert_eq!(o, 0);
-    }
-
-    #[test]
-    fn append_blob_large() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
-        s.store.unmount().map_err(|e| e.1).unwrap();
-    }
-
-    #[test]
-    fn append_blob_small_large() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[0; 400]);
-        s.append(b"", 400, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
-        s.store.unmount().map_err(|e| e.1).unwrap();
-    }
-
-    #[test]
-    fn rename_blob_shuffle_bloblist() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.create_blob(b"a").unwrap().unwrap();
-        s.create_blob(b"b").unwrap().unwrap();
-        s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
-        s.append(b"b", 0, b"");
-    }
-
-    #[test]
-    fn log_overflow() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[b'a'; 10000]);
-        s.append(b"", 10000, &[b'b'; 20000]);
-        s = s.remount();
-        let buf = &mut [0; 40000];
-        let n = s.blob(b"").unwrap().unwrap().read_at(0, buf).unwrap();
-        assert_eq!(n, 30000);
-        assert_eq!(buf[..10000], [b'a'; 10000]);
-        assert_eq!(buf[10000..30000], [b'b'; 20000]);
-        // ensure we commit to the right zone
-        s.create_blob(b"a").unwrap().unwrap();
-        s.flush().unwrap();
-    }
-
-    // triggered a particular case where the mirror log used the wrong zone ID
-    #[test]
-    fn log_overflow_delete() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[b'a'; 10000]);
-        s.append(b"", 10000, &[b'b'; 20000]);
-        s = s.remount();
-        s.blob(b"").unwrap().unwrap().delete().unwrap();
-        s.remount();
-    }
-
-    #[test]
-    fn log_overflow_load_zone_allocation_map() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        // 42 * 512 = 21504
-        // hence, assuming no "commit blob", this forcibly allocates a second log zone
-        s.append(b"", 0, &[0; 30000]);
-        s = s.remount();
-        // this breaks after a remount if *zone allocation* tracking isn't done properly
-        s.append(b"", 30000, &[0; 20000]);
-    }
-
-    #[test]
-    fn append_blob_truncated_tail() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[0]);
-        s.append(b"", 1, &[0]);
-        s.append(b"", 2, &[]);
-    }
-
-    #[test]
-    fn load_replay_add_zone_to_blob() {
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[1; 30000]);
-        s = s.remount();
-        s.append(b"", 30000, &[2; 20000]);
-        let buf = &mut [0];
-        let n = s.blob(b"").unwrap().unwrap().read_at(48000, buf).unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(buf, &[2]);
-    }
-
-    /// We did correctly update flushed for AppendBlob during replay
-    /// but forgot to reset it when encountering a CommitBlob entry.
-    #[test]
-    fn load_commit_blob_reset_flushed() {
-        const A: usize = 1;
-        const B: usize = 511;
-        const C: usize = 1;
-        let mut s = Test::new();
-        s.create_blob(b"").unwrap().unwrap();
-        s.append(b"", 0, &[0; A]);
-        s = s.remount();
-        s.append(b"", A as _, &[0; B]);
-        s = s.remount();
-        s.append(b"", (A + B) as _, &[0; C]);
-        s = s.remount();
-        s.assert_len(b"", (A + B + C) as u64);
-    }
+    with_dev!(memzones MemZones<512>);
+    with_dev!(memblocks MemBlocks<512>);
 }
