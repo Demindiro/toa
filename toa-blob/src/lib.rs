@@ -18,7 +18,7 @@ mod log {
             };
         }
         ty! {
-            0 NOP
+            0 LOG_BLOCK_END
             1 CREATE_BLOB
             2 DELETE_BLOB
             3 ADD_ZONE_TO_BLOB
@@ -34,10 +34,9 @@ mod log {
 
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-        pub struct Nop {
+        pub struct LogBlockEnd {
             pub ty: u8,
-            pub _pad_: [u8; 3],
-            pub padding_size: u32le,
+            pub _pad_0: [u8; 7],
         }
 
         #[repr(C)]
@@ -312,9 +311,7 @@ where
                 // we should have a helper function which just returns an entry,
                 // that way we can do a simple (==) check
                 match ty {
-                    log::entry::ty::NOP => {
-                        k += 1 + ((u32::from_le_bytes([e, f, g, h]) as usize) >> 3);
-                    }
+                    log::entry::ty::LOG_BLOCK_END => break,
                     log::entry::ty::CREATE_BLOB => {
                         let name_len = usize::from(b);
                         let name = &buf_a[k..].as_flattened()[2..2 + name_len];

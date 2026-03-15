@@ -56,14 +56,17 @@ All entries start with a 8-bit type ID.
 All entries are aligned to a 8-byte boundary,
 padded with zeros if necessary.
 
-##### 0. Nop
+##### 0. Log block end
 
 | type  | name                  |
 |:----- |:--------------------- |
 | u8    | (type)                |
-| u24   | (pad)                 |
-| u32   | padding size          |
-| u8[]  | padding               |
+| u56   | (zero)                |
+
+A log block is terminated prematurely if this entry is encountered.
+
+For non-zoned devices: if a block contains only this entry, it indicates
+the end of the log.
 
 ##### 1. Create blob
 
