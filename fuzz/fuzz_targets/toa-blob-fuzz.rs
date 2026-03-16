@@ -47,7 +47,9 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
     let dev: Box<dyn toa_blob::ZoneDev> = match dev {
         DevType::MemZones512 => Box::new(toa_blob::MemZones::<512>::new(200, 100)),
-        DevType::MemBlocks512 => Box::new(toa_blob::MemBlocks::<512>::new(200, 100)),
+        DevType::MemBlocks512 => {
+            Box::new(toa_blob::MemBlocks::new(toa_blob::BlockShift::N9, 200, 100))
+        }
     };
     let mut store = toa_blob::BlobStore::init(dev).unwrap();
 

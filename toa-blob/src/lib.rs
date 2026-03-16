@@ -192,11 +192,13 @@ pub struct MemZones<const B: usize> {
     zone_size: u32,
 }
 
-pub struct MemBlocks<const B: usize> {
-    blocks: RefCell<Box<[[u8; B]]>>,
-    zone_size: u32,
+pub struct MemBlocks {
+    blocks: RefCell<Box<[u8]>>,
+    block_size: BlockShift,
+    zone_blocks: u32,
 }
 
+#[derive(Clone, Copy)]
 pub enum BlockShift {
     N9 = 1 << 9,
     N12 = 1 << 12,
@@ -1036,40 +1038,52 @@ impl<const B: usize> MemZones<B> {
     }
 }
 
-impl<const B: usize> MemBlocks<B> {
-    const _B_IS_POWER_OF_2: () = assert!(B.count_ones() == 1);
+impl MemBlocks {
+    pub fn new(block_size: BlockShift, zone_blocks: u32, zone_count: u32) -> Self {
+        let n = zone_count as usize * zone_blocks as usize * usize::from(block_size);
+        Self::wrap(block_size, zone_blocks, vec![0; n].into())
+    }
 
-    pub fn new(zone_size: u32, zone_count: u32) -> Self {
+    pub fn wrap(block_size: BlockShift, zone_blocks: u32, data: Box<[u8]>) -> Self {
         Self {
-            blocks: RefCell::new(vec![[0; B]; zone_count as usize * zone_size as usize].into()),
-            zone_size: zone_size * B as u32,
+            blocks: RefCell::new(data),
+            block_size,
+            zone_blocks,
         }
+    }
+
+    fn zone_size(&self) -> u64 {
+        u64::from(self.zone_blocks) * u64::from(self.block_size)
     }
 
     #[track_caller]
     fn translate(&self, zone: u32, offset: u64) -> usize {
-        let offset = u128::from(zone) * u128::from(self.zone_size) + u128::from(offset);
+        let offset = u128::from(zone) * u128::from(self.zone_size()) + u128::from(offset);
         usize::try_from(offset).expect("offset out of bounds")
     }
 }
 
-impl<const B: usize> ZoneDev for MemBlocks<B> {
+impl ZoneDev for MemBlocks {
     #[track_caller]
     fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let start = self.translate(zone, offset);
         let end = start.checked_add(buf.len()).expect("offset out of bounds");
         let x = self.blocks.borrow();
-        buf.copy_from_slice(&x.as_flattened()[start..end]);
+        buf.copy_from_slice(&x[start..end]);
         Ok(())
     }
 
     #[track_caller]
     fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
-        let (data, []) = data.as_chunks() else {
-            panic!("data len is not a multiple of the block size")
-        };
-        assert!(offset % B as u64 == 0, "offset is not aligned");
-        let start = self.translate(zone, offset) / B;
+        assert!(
+            data.len() % usize::from(self.block_size) == 0,
+            "data len is not a multiple of the block size"
+        );
+        assert!(
+            offset % u64::from(self.block_size) == 0,
+            "offset is not aligned"
+        );
+        let start = self.translate(zone, offset);
         let end = start + data.len();
         self.blocks.borrow_mut()[start..end].copy_from_slice(data);
         Ok(())
@@ -1084,17 +1098,13 @@ impl<const B: usize> ZoneDev for MemBlocks<B> {
     }
 
     fn block_size(&self) -> BlockShift {
-        match B {
-            512 => BlockShift::N9,
-            4096 => BlockShift::N12,
-            _ => todo!(),
-        }
+        self.block_size
     }
     fn zone_blocks(&self) -> u32 {
-        self.zone_size / B as u32
+        self.zone_blocks
     }
     fn zone_count(&self) -> u32 {
-        (self.blocks.borrow().len() * B / self.zone_size as usize) as u32
+        (self.blocks.borrow().len() / self.zone_size() as usize) as u32
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1223,7 +1233,7 @@ mod test {
     const ZONE_SIZE: u32 = ZONE_BLOCKS * BLOCK_SIZE;
 
     macro_rules! with_dev {
-        ($mod:ident $dev:ty) => {
+        ($mod:ident $dev:ty : $init:expr) => {
             mod $mod {
                 use super::*;
 
@@ -1236,7 +1246,7 @@ mod test {
                 impl Test {
                     fn new() -> Self {
                         Self {
-                            store: BlobStore::init(Dev::new(42, 10)).unwrap(),
+                            store: BlobStore::init($init).unwrap(),
                         }
                     }
 
@@ -1477,17 +1487,17 @@ mod test {
         };
     }
 
-    with_dev!(memzones MemZones<512>);
-    with_dev!(memblocks MemBlocks<512>);
+    with_dev!(memzones  MemZones<512> : Dev::new(42, 10));
+    with_dev!(memblocks MemBlocks     : Dev::new(BlockShift::N9, 42, 10));
 
     #[test]
     fn snoop_header() {
-        let s = BlobStore::init(MemBlocks::<512>::new(42, 10))
+        let s = BlobStore::init(MemBlocks::new(BlockShift::N9, 42, 10))
             .unwrap()
             .unmount()
             .map_err(|e| e.1)
             .unwrap();
-        let x = s.blocks.borrow()[0][..Header::SIZE].try_into().unwrap();
+        let x = s.blocks.borrow()[..Header::SIZE].try_into().unwrap();
         let x = super::snoop_header(x).unwrap();
         assert_eq!(x.block_size, 512);
         assert_eq!(x.zone_blocks, 42);
