@@ -71,8 +71,8 @@ where
     T: BlobStore,
 {
     store: T,
-    data: BlobsTyped<T>,
-    refs: BlobsTyped<T>,
+    data: BlobsTyped<T::BlobHandle>,
+    refs: BlobsTyped<T::BlobHandle>,
     map: Map,
     root: Hash,
 }
@@ -103,19 +103,16 @@ struct Typed<'a, T>
 where
     T: BlobStore,
 {
-    blobs: &'a BlobsTyped<T>,
+    blobs: &'a BlobsTyped<T::BlobHandle>,
     map: &'a Map,
     store: &'a T,
     location: FileRef,
 }
 
-struct BlobsTyped<T>
-where
-    T: BlobStore,
-{
-    chunks_full: T::BlobHandle,
-    chunks_partial: T::BlobHandle,
-    pairs: T::BlobHandle,
+struct BlobsTyped<T> {
+    chunks_full: T,
+    chunks_partial: T,
+    pairs: T,
 }
 
 #[derive(Clone, Copy)]
@@ -254,11 +251,11 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T>
-where
-    T: BlobStore,
-{
-    fn open_at(store: &mut T, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self> {
+impl<T> BlobsTyped<T> {
+    fn open_at<S>(store: &mut S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let mut f = |name: &str| store.open(&format!("{dir}_{name}"));
         let mut s = Self {
             chunks_full: f("chunks_full.bin")?,
@@ -269,13 +266,16 @@ where
         Ok(s)
     }
 
-    fn add(
+    fn add<S>(
         &mut self,
-        store: &mut T,
+        store: &mut S,
         domain: Domain,
         data: &[u8],
         map: &mut Map,
-    ) -> io::Result<Hash> {
+    ) -> io::Result<Hash>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         if data.len() <= CHUNK_SIZE as usize {
             self.add_chunk(store, domain, data, map)
         } else {
@@ -312,13 +312,16 @@ where
         }
     }
 
-    fn add_chunk(
+    fn add_chunk<S>(
         &mut self,
-        store: &mut T,
+        store: &mut S,
         domain: Domain,
         chunk: &[u8],
         map: &mut Map,
-    ) -> io::Result<Hash> {
+    ) -> io::Result<Hash>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let key = toa_hash::hash_chunk(domain, chunk);
         if let Entry::Vacant(e) = map.entry(key) {
             e.insert(self.store_chunk(store, domain, chunk)?);
@@ -326,15 +329,18 @@ where
         Ok(key)
     }
 
-    fn add_pair(
+    fn add_pair<S>(
         &mut self,
-        store: &mut T,
+        store: &mut S,
         domain: Domain,
         x: &Hash,
         y: &Hash,
         len: u128,
         map: &mut Map,
-    ) -> io::Result<Hash> {
+    ) -> io::Result<Hash>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let key = toa_hash::hash_pair(*x, *y, len);
         if let Entry::Vacant(e) = map.entry(key) {
             e.insert(self.store_pair(store, domain, x, y, len)?);
@@ -342,7 +348,10 @@ where
         Ok(key)
     }
 
-    fn store_chunk(&mut self, store: &mut T, domain: Domain, bytes: &[u8]) -> io::Result<FileRef> {
+    fn store_chunk<S>(&mut self, store: &mut S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         if let Ok(bytes) = bytes.try_into() {
             self.store_chunk_full(store, domain, bytes)
         } else {
@@ -350,22 +359,28 @@ where
         }
     }
 
-    fn store_chunk_full(
+    fn store_chunk_full<S>(
         &mut self,
-        store: &mut T,
+        store: &mut S,
         domain: Domain,
         bytes: &[u8; CHUNK_SIZE as usize],
-    ) -> io::Result<FileRef> {
+    ) -> io::Result<FileRef>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let offt = store.append(&mut self.chunks_full, bytes)?;
         Ok(FileRef::new_chunk_full(domain, offt))
     }
 
-    fn store_chunk_partial(
+    fn store_chunk_partial<S>(
         &mut self,
-        store: &mut T,
+        store: &mut S,
         domain: Domain,
         bytes: &[u8],
-    ) -> io::Result<FileRef> {
+    ) -> io::Result<FileRef>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         assert!(bytes.len() < CHUNK_SIZE as usize, "partial chunk too large");
         let hdr = u16::try_from(bytes.len() << 3)
             .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
@@ -376,14 +391,17 @@ where
         Ok(FileRef::new_chunk_partial(domain, offt))
     }
 
-    fn store_pair(
+    fn store_pair<S>(
         &mut self,
-        store: &mut T,
+        store: &mut S,
         domain: Domain,
         x: &Hash,
         y: &Hash,
         len: u128,
-    ) -> io::Result<FileRef> {
+    ) -> io::Result<FileRef>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let mut buf = [0; 80];
         buf[00..32].copy_from_slice(x.as_bytes());
         buf[32..64].copy_from_slice(y.as_bytes());
@@ -392,14 +410,20 @@ where
         Ok(FileRef::new_pair(domain, offt))
     }
 
-    fn load(&mut self, store: &T, map: &mut Map, domain: Domain) -> io::Result<()> {
+    fn load<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         self.load_chunks_full(store, map, domain)?;
         self.load_chunks_partial(store, map, domain)?;
         self.load_pairs(store, map, domain)?;
         Ok(())
     }
 
-    fn load_chunks_full(&mut self, store: &T, map: &mut Map, domain: Domain) -> io::Result<()> {
+    fn load_chunks_full<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
         while store.read_at_exact_or_none(&self.chunks_full, offt, &mut buf)? {
@@ -410,7 +434,10 @@ where
         Ok(())
     }
 
-    fn load_chunks_partial(&mut self, store: &T, map: &mut Map, domain: Domain) -> io::Result<()> {
+    fn load_chunks_partial<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = 0;
@@ -425,7 +452,10 @@ where
         Ok(())
     }
 
-    fn load_pairs(&mut self, store: &T, map: &mut Map, domain: Domain) -> io::Result<()> {
+    fn load_pairs<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
         let mut buf = [0; 80];
         let mut offt = 0;
         while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
