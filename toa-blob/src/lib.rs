@@ -147,6 +147,14 @@ pub trait ZoneDev {
     /// the current zone head.
     fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()>;
 
+    /// Wipe a zone, resetting the write pointer to 0.
+    fn reset(&self, zone: u32) -> io::Result<()>;
+
+    /// Wipe multiple zones, resetting the write pointer of each to 0.
+    fn reset_many(&self, zones: &[u32]) -> io::Result<()> {
+        zones.iter().try_for_each(|x| self.reset(*x))
+    }
+
     /// The current write pointer of a zone.
     ///
     /// This may be `None` if the underlying device is not zoned (e.g. CMR HDD).
@@ -223,7 +231,8 @@ struct Blob {
     flushed: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(transparent)]
 struct ZoneId(u32);
 
 impl<U> BlobStore<U>
@@ -617,6 +626,12 @@ impl BlobStoreData {
         s
     }
 
+    /// # Note
+    ///
+    /// To minimize the risk of data loss, resetting zones should *only*
+    /// be done when *releasing* zones, i.e. during log rewrite or blob delete.
+    /// This increases the risk of a panic if a zone isn't empty as expected,
+    /// but helps with catching double allocations or other issues.
     fn alloc_zones(&mut self, buf: &mut [ZoneId]) -> Result<(), OutOfZones> {
         let mut bits = 0..self.allocated_zones.len();
         'slots: for (k, slot) in buf.iter_mut().enumerate() {
@@ -643,6 +658,15 @@ impl BlobStoreData {
         Ok(x)
     }
 
+    fn free_zones(&mut self, zones: &mut [ZoneId]) {
+        // sort zones first so we access bits linearly
+        // may or may not have a positive influence, should be benchmarked
+        zones.sort_by_key(|x| x.0);
+        for x in zones {
+            self.allocated_zones.set(x.0 as usize, false);
+        }
+    }
+
     fn mark_zone_allocated(&mut self, id: ZoneId) {
         self.allocated_zones.set(id.0 as usize, true);
     }
@@ -661,8 +685,9 @@ impl BlobStoreData {
     }
 
     fn replay_delete_blob(&mut self, index: u32) {
-        let old_name = self.blobs.swap_remove(index as usize).name;
-        self.blob_map.remove(&old_name);
+        let mut old = self.blobs.swap_remove(index as usize);
+        self.free_zones(&mut old.zones);
+        self.blob_map.remove(&old.name);
         if let Some(new) = self.blobs.get(index as usize) {
             *self.blob_map.get_mut(&new.name).unwrap() = index;
         }
@@ -671,21 +696,22 @@ impl BlobStoreData {
     /// # Returns
     ///
     /// `true` if the blob actually got renamed, `false` if the operation is a no-op.
-    fn replay_rename_blob(&mut self, index: u32, new_name: &[u8]) -> bool {
+    fn replay_rename_blob(&mut self, index: u32, new_name: &[u8]) -> (bool, Option<Blob>) {
         let blob = &mut self.blobs[index as usize];
         if &*blob.name == new_name {
-            return false;
+            return (false, None);
         }
         self.blob_map.remove(&*blob.name);
-        match self.blob_map.entry(new_name.into()) {
+        let mut old = match self.blob_map.entry(new_name.into()) {
             Entry::Vacant(e) => {
                 blob.name = e.key().clone();
                 e.insert(index);
+                None
             }
             Entry::Occupied(mut e) => {
                 blob.name = e.key().clone();
                 let other_idx = *e.get();
-                self.blobs.swap_remove(other_idx as usize);
+                let old = self.blobs.swap_remove(other_idx as usize);
                 // If the renamed blob is at the end, then that
                 // blob just got moved to other_idx, so nothing to do
                 if self.blobs.len() != index as usize {
@@ -703,9 +729,13 @@ impl BlobStoreData {
                             .expect("other blob is missing") = other_idx;
                     }
                 }
+                Some(old)
             }
+        };
+        if let Some(old) = old.as_mut() {
+            self.free_zones(&mut old.zones);
         }
-        true
+        (true, old)
     }
 
     fn replay_append_blob(&mut self, index: u32, data: &[u8]) {
@@ -750,8 +780,12 @@ where
 {
     pub fn delete(self) -> io::Result<()> {
         let s = &mut *self.store.data.borrow_mut();
+        self.store
+            .zone_dev
+            .reset_many(bytemuck::cast_slice(&s.blobs[self.index as usize].zones))?;
         s.replay_delete_blob(self.index);
-        self.store.log_delete_blob(s, self.index)
+        self.store.log_delete_blob(s, self.index)?;
+        Ok(())
     }
 
     /// # Returns
@@ -809,7 +843,13 @@ where
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
         // FIXME update index
         let s = &mut *self.store.data.borrow_mut();
-        if s.replay_rename_blob(self.index, new_name) {
+        let (renamed, old) = s.replay_rename_blob(self.index, new_name);
+        if renamed {
+            if let Some(old) = old {
+                self.store
+                    .zone_dev
+                    .reset_many(bytemuck::cast_slice(&old.zones))?;
+            }
             self.store.log_rename_blob(s, self.index, new_name)?;
         }
         Ok(())
@@ -950,6 +990,11 @@ impl<const B: usize> ZoneDev for MemZones<B> {
         Ok(())
     }
 
+    fn reset(&self, zone: u32) -> io::Result<()> {
+        self.zones.borrow_mut()[zone as usize].clear();
+        Ok(())
+    }
+
     fn zone_write_head(&self, zone: u32) -> io::Result<Option<u64>> {
         Ok(Some((self.zones.borrow()[zone as usize].len() * B) as u64))
     }
@@ -1024,6 +1069,10 @@ impl<const B: usize> ZoneDev for MemBlocks<B> {
         Ok(())
     }
 
+    fn reset(&self, _zone: u32) -> io::Result<()> {
+        Ok(())
+    }
+
     fn zone_write_head(&self, _zone: u32) -> io::Result<Option<u64>> {
         Ok(None)
     }
@@ -1058,6 +1107,15 @@ macro_rules! proxy_zonedev {
             #[track_caller]
             fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
                 (&**self).append(zone, offset, data)
+            }
+
+            #[track_caller]
+            fn reset(&self, zone: u32) -> io::Result<()> {
+                (&**self).reset(zone)
+            }
+            #[track_caller]
+            fn reset_many(&self, zones: &[u32]) -> io::Result<()> {
+                (&**self).reset_many(zones)
             }
 
             #[track_caller]
@@ -1367,6 +1425,27 @@ mod test {
                     s.append(b"", (A + B) as _, &[0; C]);
                     s = s.remount();
                     s.assert_len(b"", (A + B + C) as u64);
+                }
+
+                #[test]
+                fn delete_blob_release_zones() {
+                    let mut s = Test::new();
+                    for _ in 0..100 {
+                        let mut b = s.create_blob(b"").unwrap().unwrap();
+                        b.append(&[0; 1024]).unwrap();
+                        b.delete().unwrap();
+                    }
+                }
+
+                #[test]
+                fn rename_blob_release_zones() {
+                    let mut s = Test::new();
+                    s.create_blob(&[0]).unwrap().unwrap();
+                    for x in 0..100 {
+                        let mut b = s.create_blob(&[x + 1]).unwrap().unwrap();
+                        b.append(&[0; 1024]).unwrap();
+                        s.blob(&[x]).unwrap().unwrap().rename(&[x + 1]).unwrap();
+                    }
                 }
             }
         };
