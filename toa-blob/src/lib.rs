@@ -207,6 +207,12 @@ pub struct BlobRef<'a, T> {
     index: u32,
 }
 
+pub struct Header {
+    pub block_size: u32,
+    pub zone_blocks: u32,
+    pub zone_count: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct BlobHandle(u32);
 
@@ -1188,6 +1194,26 @@ impl Blob {
     }
 }
 
+impl Header {
+    pub const SIZE: usize = 32;
+}
+
+/// Try to extract information from the first few bytes of a blob store.
+///
+/// # Returns
+///
+/// `None` if magic or version is not recognized.
+/// Otherwise various information extracted from the header.
+pub fn snoop_header(first_bytes: [u8; Header::SIZE]) -> Option<Header> {
+    let hdr = bytemuck::cast::<_, log::entry::Header>(first_bytes);
+    (hdr.magic == log::entry::Header::MAGIC && hdr.version == log::entry::Header::VERSION)
+        .then_some(Header {
+            block_size: hdr.block_size.into(),
+            zone_blocks: hdr.zone_blocks.into(),
+            zone_count: hdr.zone_count.into(),
+        })
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1453,4 +1479,18 @@ mod test {
 
     with_dev!(memzones MemZones<512>);
     with_dev!(memblocks MemBlocks<512>);
+
+    #[test]
+    fn snoop_header() {
+        let s = BlobStore::init(MemBlocks::<512>::new(42, 10))
+            .unwrap()
+            .unmount()
+            .map_err(|e| e.1)
+            .unwrap();
+        let x = s.blocks.borrow()[0][..Header::SIZE].try_into().unwrap();
+        let x = super::snoop_header(x).unwrap();
+        assert_eq!(x.block_size, 512);
+        assert_eq!(x.zone_blocks, 42);
+        assert_eq!(x.zone_count, 10);
+    }
 }
