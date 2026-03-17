@@ -1,4 +1,6 @@
 use bitvec::boxed::BitBox;
+#[cfg(feature = "std")]
+use std::os::unix::fs::FileExt;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
@@ -198,6 +200,14 @@ pub struct MemBlocks {
     blocks: RefCell<Box<[u8]>>,
     block_size: BlockShift,
     zone_blocks: u32,
+}
+
+#[cfg(feature = "std")]
+pub struct FileBlocks {
+    file: std::fs::File,
+    block_size: BlockShift,
+    zone_blocks: u32,
+    zone_count: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1115,6 +1125,81 @@ impl ZoneDev for MemBlocks {
     }
     fn zone_count(&self) -> u32 {
         (self.blocks.borrow().len() / self.zone_size() as usize) as u32
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+impl FileBlocks {
+    pub fn new(
+        block_size: BlockShift,
+        zone_blocks: u32,
+        zone_count: u32,
+        file: std::fs::File,
+    ) -> io::Result<Self> {
+        let n = u64::from(zone_count) * u64::from(zone_blocks) * u64::from(block_size);
+        file.set_len(n)?;
+        Ok(Self::wrap(block_size, zone_blocks, zone_count, file))
+    }
+
+    pub fn wrap(
+        block_size: BlockShift,
+        zone_blocks: u32,
+        zone_count: u32,
+        file: std::fs::File,
+    ) -> Self {
+        Self {
+            file,
+            block_size,
+            zone_blocks,
+            zone_count,
+        }
+    }
+
+    fn zone_size(&self) -> u64 {
+        u64::from(self.zone_blocks) * u64::from(self.block_size)
+    }
+
+    #[track_caller]
+    fn translate(&self, zone: u32, offset: u64) -> u64 {
+        let offset = u128::from(zone) * u128::from(self.zone_size()) + u128::from(offset);
+        u64::try_from(offset).expect("offset out of bounds")
+    }
+}
+
+#[cfg(feature = "std")]
+impl ZoneDev for FileBlocks {
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let start = self.translate(zone, offset);
+        self.file.read_exact_at(buf, start)?;
+        Ok(())
+    }
+
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
+        let start = self.translate(zone, offset);
+        self.file.write_all_at(data, start)?;
+        Ok(())
+    }
+
+    fn reset(&self, _zone: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn zone_write_head(&self, _zone: u32) -> io::Result<Option<u64>> {
+        Ok(None)
+    }
+
+    fn block_size(&self) -> BlockShift {
+        self.block_size
+    }
+    fn zone_blocks(&self) -> u32 {
+        self.zone_blocks
+    }
+    fn zone_count(&self) -> u32 {
+        self.zone_count
     }
 
     fn clear(&mut self) -> io::Result<()> {

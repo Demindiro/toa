@@ -3,6 +3,9 @@ name = "toa-blob"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+std = []
+
 [dependencies]
 bitvec = { version = "1.0.1", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1.25.0", features = ["derive", "min_const_generics"] }
