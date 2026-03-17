@@ -1,13 +1,19 @@
-use std::{fs, io};
-use toa::{Blob, Data, Hash, Object, Refs, Toa};
+use std::io;
+use toa::{BlobStore, Data, Hash, Object, Refs, Toa};
 
-pub struct Dir<'a, T> {
+pub struct Dir<'a, T>
+where
+    T: BlobStore,
+{
     refs: Refs<'a, T>,
     data: Data<'a, T>,
     len: u64,
 }
 
-pub struct DirIter<'a, T> {
+pub struct DirIter<'a, T>
+where
+    T: BlobStore,
+{
     dir: Dir<'a, T>,
     cur: u64,
 }
@@ -37,8 +43,11 @@ pub struct DirData {
     len: u64,
 }
 
-impl<'a> Dir<'a, Blob<fs::File>> {
-    pub fn new(toa: &'a Toa<Blob<fs::File>>, refs: &Hash) -> Result<Self, io::Error> {
+impl<'a, T> Dir<'a, T>
+where
+    T: BlobStore,
+{
+    pub fn new(toa: &'a Toa<T>, refs: &Hash) -> Result<Self, io::Error> {
         let Some(refs) = toa.get(refs)? else { todo!() };
         let Object::Refs(refs) = refs else { todo!() };
         let [data] = refs.read_array(0).unwrap_or_else(|e| todo!("{e:?}"));
@@ -49,7 +58,10 @@ impl<'a> Dir<'a, Blob<fs::File>> {
     }
 }
 
-impl<T> Clone for Dir<'_, T> {
+impl<T> Clone for Dir<'_, T>
+where
+    T: BlobStore,
+{
     fn clone(&self) -> Self {
         Self {
             refs: self.refs,
@@ -59,7 +71,10 @@ impl<T> Clone for Dir<'_, T> {
     }
 }
 
-impl<'a, T> Dir<'a, T> {
+impl<'a, T> Dir<'a, T>
+where
+    T: BlobStore,
+{
     pub fn iter(&self) -> DirIter<'a, T> {
         DirIter {
             dir: self.clone(),
@@ -68,7 +83,10 @@ impl<'a, T> Dir<'a, T> {
     }
 }
 
-impl<'a> Dir<'a, Blob<fs::File>> {
+impl<'a, T> Dir<'a, T>
+where
+    T: BlobStore,
+{
     pub fn len(&self) -> u64 {
         self.len
     }
@@ -133,7 +151,10 @@ impl<'a> Dir<'a, Blob<fs::File>> {
     }
 }
 
-impl Iterator for DirIter<'_, Blob<fs::File>> {
+impl<T> Iterator for DirIter<'_, T>
+where
+    T: BlobStore,
+{
     type Item = Result<(u64, DirItem), toa::ReadExactError<io::Error>>;
 
     fn next(&mut self) -> Option<Self::Item> {

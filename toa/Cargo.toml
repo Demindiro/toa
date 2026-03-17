@@ -6,9 +6,7 @@ edition = "2024"
 [features]
 
 [dependencies]
-toa-core = { path = "../toa-core" }
+toa-blob = { path = "../toa-blob" }
+toa-hash = { path = "../toa-hash" }
 arrayvec = { version = "0.7.6", default-features = false }
 bytemuck = "1.25.0"
-
-[dev-dependencies]
-tempfile = "3.26.0"

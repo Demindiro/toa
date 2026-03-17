@@ -6,14 +6,16 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs, io,
-    io::Write,
+    io::{Read, Write},
     ops,
     path::{Path, PathBuf},
 };
-use toa::{Hash, Object};
+use toa::Hash;
+use toa_blob::{BlobStore, FileBlocks};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerToa = toa::Toa<toa::Blob<fs::File>>;
+type InnerToa = toa::Toa<BlobStore<FileBlocks>>;
+type Object<'a> = toa::Object<'a, BlobStore<FileBlocks>>;
 
 struct Toa {
     inner: InnerToa,
@@ -26,8 +28,28 @@ struct Stat {
 }
 
 impl Toa {
-    fn open(path: &Path) -> Result<Self> {
-        let inner = toa::Toa::open(path)?;
+    fn init(dev: FileBlocks) -> Result<Self> {
+        let store = BlobStore::init(dev)?;
+        let inner = toa::Toa::open(store)?;
+        let meta = BTreeMap::default();
+        Ok(Self { inner, meta })
+    }
+
+    fn open(path: &Path, write: bool) -> Result<Self> {
+        let inner = {
+            let mut hdr = [0; 32];
+            let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
+            (&dev).read_exact(&mut hdr)?;
+            let hdr = toa_blob::snoop_header(hdr).unwrap();
+            let blk = match hdr.block_size {
+                512 => toa_blob::BlockShift::N9,
+                4096 => toa_blob::BlockShift::N12,
+                x => todo!("block size {x}"),
+            };
+            let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+            let store = BlobStore::load(dev)?;
+            toa::Toa::open(store)?
+        };
 
         let root = inner.root();
         let mut meta = BTreeMap::default();
@@ -68,7 +90,7 @@ impl Toa {
         Ok(Self { inner, meta })
     }
 
-    fn get(&self, key: &Hash) -> Result<Object<'_, toa::Blob<fs::File>>> {
+    fn get(&self, key: &Hash) -> Result<Object<'_>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query store: {e:?}"))?
@@ -106,6 +128,10 @@ impl Toa {
     fn set_meta(&mut self, name: &str, value: &Hash) {
         self.meta.insert(name.into(), *value);
     }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 impl ops::Deref for Toa {
@@ -124,7 +150,7 @@ impl ops::DerefMut for Toa {
 
 impl Stat {
     fn summarize(self, toa: &Toa) {
-        let toa_size = toa.inner.size_on_disk();
+        let toa_size = toa.inner.size_on_disk().unwrap();
         let Self { size_sum } = self;
         let ratio = size_sum as f64 / toa_size as f64;
         println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
@@ -233,7 +259,7 @@ where
     let store = PathBuf::from(store);
 
     let key = toa::Hash::from_bytes(parse_hex(&key)?);
-    let dev = Toa::open(&store)?;
+    let dev = Toa::open(&store, false)?;
     dump_object(&dev, &key)?;
 
     Ok(())
@@ -248,7 +274,7 @@ where
 
     let store = PathBuf::from(store);
 
-    let dev = Toa::open(&store)?;
+    let dev = Toa::open(&store, false)?;
     dev.iter_with(|key| {
         println!("{key:?}");
         false
@@ -267,7 +293,7 @@ where
 
     let store = PathBuf::from(store);
 
-    let dev = Toa::open(&store)?;
+    let dev = Toa::open(&store, false)?;
     todo!("implement Toa::scrub");
 }
 

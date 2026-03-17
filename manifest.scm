@@ -3,4 +3,4 @@
 ;; that accepts a '--manifest' (or '-m') option.
 
 (specifications->manifest
-  (list "rust" "rust:cargo" "rust:tools" "clang-toolchain"))
+  (list "rust" "rust:cargo" "rust:tools"))

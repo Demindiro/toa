@@ -2,6 +2,7 @@
 
 use core::cell::RefCell;
 use toa::{Hash, Object};
+use toa_blob::{BlobStore, MemZones};
 
 /// Like a slice but shorter and designed for repeating.
 #[derive(Debug)]
@@ -30,12 +31,14 @@ enum Op<'a> {
 struct Buffers {
     data: Vec<u8>,
     refs: Vec<Hash>,
+    objs: Vec<(Vec<u8>, Hash)>,
 }
 
 thread_local! {
     static BUFFERS: RefCell<Buffers> = RefCell::new(Buffers {
         data: vec![0; 1 << 24],
         refs: vec![Hash::default(); 1 << 24],
+        objs: vec![],
     });
 }
 
@@ -47,16 +50,19 @@ impl<'a> arbitrary::Arbitrary<'a> for ShortSlice<'a> {
 }
 
 libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
-    let tempdir = tempfile::tempdir().unwrap();
-    let mut toa = toa::Toa::open(tempdir.path()).unwrap();
-    let mut objs = Vec::new();
-
     BUFFERS.with(|buffers| {
         let buffers = &mut *buffers.borrow_mut();
         let Buffers {
             data: buf_data,
             refs: buf_refs,
+            objs,
         } = buffers;
+
+        let store = BlobStore::init(MemZones::<512>::new(1 << 20, 20)).unwrap();
+
+        objs.clear();
+
+        let mut toa = toa::Toa::open(store).unwrap();
 
         for op in ops {
             let collect_refs = |slots: &[u8]| -> Option<Vec<Hash>> {
@@ -121,8 +127,9 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                     }
                 }
                 Op::Remount => {
-                    drop(toa);
-                    toa = toa::Toa::open(tempdir.path()).unwrap();
+                    let (store, res) = toa.unmount();
+                    res.unwrap();
+                    toa = toa::Toa::open(store).unwrap();
                 }
             }
         }

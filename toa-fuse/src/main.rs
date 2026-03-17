@@ -2,19 +2,25 @@ use std::{
     collections::{BTreeMap, btree_map},
     error::Error,
     ffi::{OsStr, OsString},
-    fs, ops,
+    fs,
+    io::Read,
+    ops,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
-use toa::{Blob, Data, Hash, Object};
+use toa::Hash;
+use toa_blob::{BlobStore, FileBlocks};
 use toa_unix::DirItemType;
 
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type InnerToa = toa::Toa<Blob<fs::File>>;
+type InnerToa = toa::Toa<BlobStore<FileBlocks>>;
+type Object<'a> = toa::Object<'a, BlobStore<FileBlocks>>;
+type Data<'a> = toa::Data<'a, BlobStore<FileBlocks>>;
+type Dir<'a> = toa_unix::Dir<'a, BlobStore<FileBlocks>>;
 
 struct Toa {
     inner: InnerToa,
@@ -43,7 +49,20 @@ struct Node {
 
 impl Toa {
     fn new(path: &Path) -> Result<Self> {
-        let inner = toa::Toa::open(path)?;
+        let inner = {
+            let mut hdr = [0; 32];
+            let dev = fs::OpenOptions::new().read(true).open(path)?;
+            (&dev).read_exact(&mut hdr)?;
+            let hdr = toa_blob::snoop_header(hdr).unwrap();
+            let blk = match hdr.block_size {
+                512 => toa_blob::BlockShift::N9,
+                4096 => toa_blob::BlockShift::N12,
+                x => todo!("block size {x}"),
+            };
+            let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+            let store = BlobStore::load(dev)?;
+            toa::Toa::open(store)?
+        };
         let mut meta = BTreeMap::default();
 
         let root = inner.root();
@@ -83,7 +102,7 @@ impl Toa {
         Ok(Self { inner, meta })
     }
 
-    fn get(&self, key: &Hash) -> Result<Object<'_, Blob<fs::File>>> {
+    fn get(&self, key: &Hash) -> Result<Object<'_>> {
         self.inner
             .get(&key)
             .map_err(|e| format!("failed to query pack: {e:?}"))?
@@ -106,19 +125,19 @@ impl Fs {
             .or_else(|| self.nodes.get(&ino))
     }
 
-    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, toa_unix::Dir<'_, Blob<fs::File>>)> {
+    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, Dir<'_>)> {
         self.get_ino(ino)
             .filter(|x| matches!(&x.ty, DirItemType::Dir))
             .map(|x| (x, toa_unix::Dir::new(&self.dev, &x.key).unwrap()))
     }
 
-    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Data<'_, Blob<fs::File>>)> {
+    fn get_ino_file(&self, ino: u64) -> Option<(&Node, Data<'_>)> {
         self.get_ino(ino)
             .filter(|x| matches!(&x.ty, DirItemType::File))
             .map(|x| (x, self.dev.get(&x.key).unwrap().into_data().unwrap()))
     }
 
-    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Data<'_, Blob<fs::File>>)> {
+    fn get_ino_symlink(&self, ino: u64) -> Option<(&Node, Data<'_>)> {
         self.get_ino(ino)
             .filter(|x| matches!(&x.ty, DirItemType::SymLink))
             .map(|x| (x, self.dev.get(&x.key).unwrap().into_data().unwrap()))
