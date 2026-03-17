@@ -22,6 +22,7 @@ pub trait BlobStore {
     fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
     fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
+    fn flush(&mut self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
 }
 
@@ -34,7 +35,7 @@ trait BlobStoreExt: BlobStore {
     ) -> io::Result<bool> {
         match self.read_at(blob, offset, buf) {
             Ok(n) if n == buf.len() => Ok(true),
-            Ok(_) => todo!(),
+            Ok(n) => todo!("want {}, got {n}", buf.len()),
             Err(e) => Err(e),
         }
     }
@@ -214,6 +215,10 @@ where
 
     pub fn unmount(self) -> (T, io::Result<()>) {
         (self.store, Ok(()))
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.store.flush()
     }
 }
 
@@ -874,6 +879,9 @@ impl BlobStore for Dir {
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         blob.read_at(offset, buf)
     }
+    fn flush(&mut self) -> io::Result<()> {
+        todo!("Dir flush")
+    }
     fn size_on_disk(&self) -> io::Result<u64> {
         std::fs::read_dir(&self.0)?.try_fold(0, |s, x| Ok(s + x?.metadata()?.len()))
     }
@@ -915,6 +923,9 @@ where
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.blob(blob)?.unwrap().read_at(offset, buf)
     }
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush()
+    }
     fn size_on_disk(&self) -> io::Result<u64> {
         self.size_on_disk()
     }
@@ -943,6 +954,9 @@ where
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read_at(blob, offset, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        (**self).flush()
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         (**self).size_on_disk()
