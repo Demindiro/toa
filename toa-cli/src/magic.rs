@@ -23,7 +23,7 @@ where
     let db = magic::cookie::DatabasePaths::default();
     let cookie = cookie.load(&db)?;
 
-    let dev = Toa::open(&std::path::PathBuf::from(pack))?;
+    let dev = Toa::open(&std::path::PathBuf::from(pack), false)?;
     let buf = &mut [0; 1 << 13];
     dev.iter_with(|key| {
         // TODO we can't load the entire file in memory as it may be hundred of GBs in size
