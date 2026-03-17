@@ -184,6 +184,8 @@ struct BlobStoreData {
     log_zone_b: ZoneId,
     /// Write pointer of the current log zone.
     log_zone_head: u64,
+    /// Total size of the log in bytes.
+    log_len: u64,
     allocated_zones: BitBox,
 }
 
@@ -406,6 +408,8 @@ where
                 break;
             }
 
+            store.log_len += block_size as u64;
+
             if store.log_zone_head < log_end {
                 zone_dev.read_at(log_zone_a, store.log_zone_head, block_a)?;
                 zone_dev.read_at(log_zone_b, store.log_zone_head, block_b)?;
@@ -458,9 +462,12 @@ where
     }
 
     pub fn size_on_disk(&self) -> io::Result<u64> {
-        // TODO proper accounting
-        let data = self.data.borrow();
-        Ok(data.log.len() as u64)
+        let s = self.data.borrow();
+        let mut n = s.log_len;
+        for x in s.blobs.iter() {
+            n += x.len;
+        }
+        Ok(n)
     }
 
     fn flush_blob<'a>(&'a self, s: &mut BlobStoreData, idx: usize) -> io::Result<()> {
@@ -613,6 +620,8 @@ where
             data.log_zone_head = 0;
         }
 
+        data.log_len += block_size as u64;
+
         Ok(())
     }
 }
@@ -627,6 +636,7 @@ impl BlobStoreData {
             log_zone_a: ZoneId(0),
             log_zone_b: ZoneId(nr_zones - 1),
             log_zone_head: 0,
+            log_len: 0,
             allocated_zones: bitvec::bitbox![0; nr_zones as usize],
         };
         s.allocated_zones.set(s.log_zone_a.0 as usize, true);
