@@ -807,7 +807,7 @@ where
     /// # Returns
     ///
     /// Start offset of written data.
-    pub fn append(&mut self, data: &[u8]) -> io::Result<u64> {
+    pub fn append(&self, data: &[u8]) -> io::Result<u64> {
         let s = &mut *self.store.data.borrow_mut();
         let block_size = usize::from(self.store.zone_dev.block_size());
         let idx = self.id;
@@ -842,7 +842,7 @@ where
     /// # Returns
     ///
     /// Start offset of written data.
-    pub fn append_many(&mut self, data: &[&[u8]]) -> io::Result<u64> {
+    pub fn append_many(&self, data: &[&[u8]]) -> io::Result<u64> {
         let offt = self.len()?;
         for x in data {
             self.append(x)?;
@@ -850,13 +850,13 @@ where
         Ok(offt)
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&self) -> io::Result<()> {
         let s = &mut *self.store.data.borrow_mut();
         self.store.flush_blob(s, self.id)?;
         Ok(())
     }
 
-    pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
+    pub fn rename(&self, new_name: &[u8]) -> io::Result<()> {
         // FIXME update index
         let s = &mut *self.store.data.borrow_mut();
         let (renamed, old) = s.replay_rename_blob(self.id, new_name);

@@ -103,7 +103,7 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 };
                 let name: &[u8] = name;
                 match store.blob(name).unwrap() {
-                    Some(mut y) => {
+                    Some(y) => {
                         let data = (0..count)
                             .map(|i| start.wrapping_add(step.wrapping_mul(i as u8)))
                             .collect::<Vec<u8>>();
