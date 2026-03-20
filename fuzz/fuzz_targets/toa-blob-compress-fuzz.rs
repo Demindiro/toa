@@ -2,7 +2,7 @@
 
 use std::collections::hash_map::{Entry, HashMap};
 use toa_blob::{BlobStore, MemBlocks};
-use toa_blob_compress::{BlobSet, BlobStoreCompress};
+use toa_blob_compress::{BlobSet, BlobStoreCompress, Compression, PageSize};
 
 #[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
@@ -49,7 +49,12 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
         match op {
             Op::CreateBlob { name } => {
                 let name = &name[..name.len().min(200)];
-                match (blob_map.entry(name), store.create_blob(name).unwrap()) {
+                match (
+                    blob_map.entry(name),
+                    store
+                        .create_blob(name, PageSize::K4, Compression::None, 0)
+                        .unwrap(),
+                ) {
                     (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
                         blobs.push(Some((name, Vec::new(), x.blob_set())));

@@ -3,5 +3,12 @@ name = "toa-blob-compress"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+lz4 = []
+zstd = ["dep:zstd-safe"]
+
 [dependencies]
 toa-blob = { path = "../toa-blob" }
+bytemuck = { version = "1.25.0", features = ["derive", "min_const_generics"] }
+zstd-safe = { version = "7.2.4", features = ["fat-lto"], optional = true }
+nora_endian = "0.1.3"
