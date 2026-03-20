@@ -882,7 +882,6 @@ where
     }
 
     pub fn rename(&self, new_name: &[u8]) -> io::Result<()> {
-        // FIXME update index
         let s = &mut *self.store.data.borrow_mut();
         let (renamed, old) = s.replay_rename_blob(self.id, new_name);
         if renamed {
