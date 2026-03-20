@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["toa", "toa-blob", "toa-cli", "toa-fuse", "toa-hash", "toa-unix", "fuzz"]
+members = ["toa", "toa-blob", "toa-cli", "toa-fuse", "toa-hash", "toa-unix", "fuzz", "toa-blob-compress"]
 
 [profile.dev]
 opt-level = 1
