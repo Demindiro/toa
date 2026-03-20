@@ -16,6 +16,9 @@ Blobs can be written to in byte-increments for convenience.
 Incomplete blocks are written to the log until a whole block can
 be appended to a zone.
 
+Each blob has a unique ID. This ID is stable, ensuring an ID can
+be used to refer directly to a blob. ID `0xffff_ffff` is reserved.
+
 *All integers are in little-endian format*.
 
 ## Header
@@ -70,6 +73,8 @@ the end of the log.
 
 ##### 1. Create blob
 
+The lowest free blob ID is assigned to to the new blob.
+
 | type  | name                  |
 |:----- |:--------------------- |
 | u8    | (type)                |
@@ -79,15 +84,11 @@ the end of the log.
 
 ##### 2. Delete blob
 
-This operations performs a **swap remove**: if the blob to be deleted
-is not the last element, the last element is put in the place of the
-deleted blob. This ensures the blob array remains contiguous.
-
 | type  | name                   |
 |:----- |:---------------------- |
 | u8    | (type)                 |
 | u24   | (pad)                  |
-| u32   | blob index             |
+| u32   | blob ID                |
 
 ##### 3. Add zone to blob
 
@@ -95,7 +96,7 @@ deleted blob. This ensures the blob array remains contiguous.
 |:----- |:---------------------- |
 | u8    | (type)                 |
 | u24   | (pad)                  |
-| u32   | blob index             |
+| u32   | blob ID                |
 | u64   | zone ID                |
 
 ##### 4. Rename blob
@@ -105,7 +106,7 @@ deleted blob. This ensures the blob array remains contiguous.
 | u8    | (type)                 |
 | u8    | name length            |
 | u16   | (pad)                  |
-| u32   | blob index             |
+| u32   | blob ID                |
 | u8[]  | name                   |
 | u8[]  | (pad)                  |
 
@@ -116,7 +117,7 @@ deleted blob. This ensures the blob array remains contiguous.
 | u8    | (type)                 |
 | u8    | (pad)                  |
 | u16   | data length            |
-| u32   | blob index             |
+| u32   | blob ID                |
 | u8[]  | data                   |
 | u8[]  | (pad)                  |
 
@@ -153,7 +154,7 @@ be smaller however.
 |:----- |:---------------------- |
 | u8    | (type)                 |
 | u24   | (pad)                  |
-| u32   | blob index             |
+| u32   | blob ID                |
 | u64   | length                 |
 
 ##### 84. Header
