@@ -93,12 +93,17 @@ where
     U: toa_blob::ZoneDev,
 {
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let clen = self.compressed_len()?;
+        if let Some(x) = offset.checked_sub(clen) {
+            // read from tail only
+            return self.tail()?.read_at(x, buf);
+        }
         // split into chunks and start reading
         todo!();
     }
 
     pub fn append(&self, data: &[u8]) -> io::Result<u64> {
-        todo!();
+        self.tail()?.append(data)
     }
 
     pub fn delete(self) -> io::Result<()> {
@@ -109,7 +114,22 @@ where
     }
 
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
+        // FIXME we need atomic renames
+        self.table()?.rename(&concat(new_name, TABLE_SUFFIX))?;
+        self.pages()?.rename(&concat(new_name, PAGES_SUFFIX))?;
+        self.tail()?.rename(&concat(new_name, TAIL_SUFFIX))?;
+        Ok(())
+    }
+
+    fn read_compressed(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         todo!();
+    }
+
+    /// # Returns
+    ///
+    /// The total amount of compressed data in bytes.
+    fn compressed_len(&self) -> io::Result<u64> {
+        Ok(0)
     }
 
     fn table(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {

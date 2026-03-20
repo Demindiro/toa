@@ -48,7 +48,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
     for op in ops {
         match op {
             Op::CreateBlob { name } => {
-                let name = &name[..name.len().min(255)];
+                let name = &name[..name.len().min(200)];
                 match (blob_map.entry(name), store.create_blob(name).unwrap()) {
                     (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
