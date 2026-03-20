@@ -1,6 +1,7 @@
 #![no_main]
 
 use std::collections::hash_map::{Entry, HashMap};
+use toa_blob::BlobId;
 
 #[derive(Debug, arbitrary::Arbitrary)]
 enum DevType {
@@ -15,7 +16,7 @@ enum Op<'a> {
         name: &'a [u8],
     },
     DeleteBlob {
-        name: &'a [u8],
+        slot: u16,
     },
     // to make more effective use of limited corpus size:
     // - select a start, step and count value
@@ -54,42 +55,40 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
     let mut store = toa_blob::BlobStore::init(dev).unwrap();
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
-    let mut blobs = Vec::<Option<(&[u8], Vec<u8>)>>::with_capacity(1 << 16);
+    let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobId)>>::with_capacity(1 << 16);
 
     for op in ops {
         match op {
             Op::Remount => {
                 let dev = store.unmount().map_err(|e| e.1).unwrap();
                 store = toa_blob::BlobStore::load(dev).unwrap();
-                for name in blob_map.keys() {
-                    store
-                        .blob(name)
+                for (name, &slot) in blob_map.iter() {
+                    let blob = store
+                        .find(name)
                         .unwrap()
                         .unwrap_or_else(|| panic!("store is missing blob {name:?}"));
+                    let expect_id = blobs[usize::from(slot)].as_ref().unwrap().2;
+                    assert_eq!(blob.id(), expect_id, "blob ID not stable");
                 }
             }
             Op::CreateBlob { name } => {
                 let name = &name[..name.len().min(255)];
                 match (blob_map.entry(name), store.create_blob(name).unwrap()) {
-                    (Entry::Vacant(e), Ok(_)) => {
+                    (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
-                        blobs.push(Some((name, Vec::<u8>::new())));
+                        blobs.push(Some((name, Vec::new(), x.id())));
                     }
                     (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
                     _ => panic!("blob map corrupt"),
                 }
             }
-            Op::DeleteBlob { name } => {
-                let name = &name[..name.len().min(255)];
-                match (blob_map.remove(name), store.blob(name).unwrap()) {
-                    (Some(x), Some(y)) => {
-                        blobs[usize::from(x)] = None;
-                        y.delete().unwrap();
-                    }
-                    (None, None) => {}
-                    (Some(_), None) => panic!("store is missing blob"),
-                    (None, Some(_)) => panic!("store has ghost blob"),
-                }
+            Op::DeleteBlob { slot } => {
+                let Some((name, _, id)) = blobs.get_mut(usize::from(slot)).and_then(|x| x.take())
+                else {
+                    continue;
+                };
+                store.blob(id).unwrap().delete().unwrap();
+                blob_map.remove(name);
             }
             Op::AppendBlob {
                 slot,
@@ -97,50 +96,36 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 step,
                 count,
             } => {
-                let Some((name, x)) = blobs.get_mut(usize::from(slot)).and_then(|x| x.as_mut())
+                let Some((_, x, id)) = blobs.get_mut(usize::from(slot)).and_then(|x| x.as_mut())
                 else {
                     continue;
                 };
-                let name: &[u8] = name;
-                match store.blob(name).unwrap() {
-                    Some(y) => {
-                        let data = (0..count)
-                            .map(|i| start.wrapping_add(step.wrapping_mul(i as u8)))
-                            .collect::<Vec<u8>>();
-                        let offt = y.append(&data).unwrap();
-                        assert_eq!(offt, x.len() as u64, "offset mismatch");
-                        x.extend(data);
-                    }
-                    None => panic!("store is missing blob"),
-                }
+                let y = store.blob(*id).unwrap();
+                let data = (0..count)
+                    .map(|i| start.wrapping_add(step.wrapping_mul(i as u8)))
+                    .collect::<Vec<u8>>();
+                let offt = y.append(&data).unwrap();
+                assert_eq!(offt, x.len() as u64, "offset mismatch");
+                x.extend(data);
             }
             Op::ReadBlob { slot, offset, len } => {
-                let Some((name, x)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref()) else {
+                let Some((_, x, id)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref()) else {
                     continue;
                 };
-                match store.blob(name).unwrap() {
-                    Some(y) => {
-                        let mut buf = vec![0; len.into()];
-                        let n = y.read_at(offset.into(), &mut buf).unwrap();
-                        let x = x.get(offset as usize..).unwrap_or(&[]);
-                        let x = x.get(..len.into()).unwrap_or(x);
-                        assert_eq!(x, &buf[..n]);
-                    }
-                    None => panic!("store is missing blob"),
-                }
+                let y = store.blob(*id).unwrap();
+                let mut buf = vec![0; len.into()];
+                let n = y.read_at(offset.into(), &mut buf).unwrap();
+                let x = x.get(offset as usize..).unwrap_or(&[]);
+                let x = x.get(..len.into()).unwrap_or(x);
+                assert_eq!(x, &buf[..n]);
             }
             Op::RenameBlob { slot, new_name } => {
                 let new_name = &new_name[..new_name.len().min(255)];
-                let Some((old_name, _)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref())
+                let Some((old_name, _, id)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref())
                 else {
                     continue;
                 };
-                store
-                    .blob(old_name)
-                    .unwrap()
-                    .expect("store is missing blob")
-                    .rename(new_name)
-                    .unwrap();
+                store.blob(*id).unwrap().rename(new_name).unwrap();
                 if *old_name != new_name {
                     blob_map.remove(old_name);
                     blob_map

@@ -227,7 +227,7 @@ pub struct Header {
     pub zone_count: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlobId(u32);
 
 #[derive(Debug)]
@@ -456,11 +456,15 @@ where
         Ok(self.zone_dev)
     }
 
-    pub fn blob(&self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
+    pub fn blob(&self, id: BlobId) -> io::Result<BlobRef<'_, Self>> {
+        Ok(BlobRef { store: self, id })
+    }
+
+    pub fn find(&self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
         assert!(name.len() <= 255, "name too long");
         match self.data.borrow().blob_map.get(name) {
             None => Ok(None),
-            Some(&id) => Ok(Some(BlobRef { store: self, id })),
+            Some(id) => self.blob(*id).map(Some),
         }
     }
 
@@ -1400,20 +1404,19 @@ mod test {
                     }
 
                     #[track_caller]
+                    fn blob<'a>(&'a self, name: &[u8]) -> BlobRef<'a, BlobStore<Dev>> {
+                        self.store.find(name).unwrap().expect("missing blob")
+                    }
+
+                    #[track_caller]
                     fn append(&self, blob: &[u8], expect_offset: u64, data: &[u8]) {
-                        let o = self
-                            .store
-                            .blob(blob)
-                            .unwrap()
-                            .unwrap()
-                            .append(data)
-                            .unwrap();
+                        let o = self.blob(blob).append(data).unwrap();
                         assert_eq!(o, expect_offset, "got <> expected")
                     }
 
                     #[track_caller]
                     fn assert_len(&self, blob: &[u8], expect_len: u64) {
-                        let x = self.store.blob(blob).unwrap().unwrap().len().unwrap();
+                        let x = self.blob(blob).len().unwrap();
                         assert_eq!(x, expect_len);
                     }
                 }
@@ -1446,20 +1449,20 @@ mod test {
                     let mut store = Test::new();
                     store.create_blob(b"a").unwrap().unwrap();
                     store.create_blob(b"b").unwrap().unwrap();
-                    store.blob(b"a").unwrap().expect("missing blob a");
-                    store.blob(b"b").unwrap().expect("missing blob b");
+                    store.blob(b"a");
+                    store.blob(b"b");
                     store = store.remount();
-                    store.blob(b"a").unwrap().expect("missing blob a");
-                    store.blob(b"b").unwrap().expect("missing blob b");
+                    store.blob(b"a");
+                    store.blob(b"b");
                     store = store.remount();
                     store.create_blob(b"c").unwrap().unwrap();
-                    store.blob(b"a").unwrap().expect("missing blob a");
-                    store.blob(b"b").unwrap().expect("missing blob b");
-                    store.blob(b"c").unwrap().expect("missing blob c");
+                    store.blob(b"a");
+                    store.blob(b"b");
+                    store.blob(b"c");
                     store = store.remount();
-                    store.blob(b"a").unwrap().expect("missing blob a");
-                    store.blob(b"b").unwrap().expect("missing blob b");
-                    store.blob(b"c").unwrap().expect("missing blob c");
+                    store.blob(b"a");
+                    store.blob(b"b");
+                    store.blob(b"c");
                 }
 
                 #[test]
@@ -1473,9 +1476,9 @@ mod test {
                 fn delete_blob() {
                     let mut store = Test::new();
                     store.create_blob(b"a").unwrap().unwrap();
-                    store.blob(b"a").unwrap().unwrap().delete().unwrap();
+                    store.blob(b"a").delete().unwrap();
                     store.create_blob(b"a").unwrap().unwrap();
-                    store.blob(b"a").unwrap().unwrap().delete().unwrap();
+                    store.blob(b"a").delete().unwrap();
                     store.remount();
                 }
 
@@ -1493,7 +1496,7 @@ mod test {
                     let mut s = Test::new();
                     s.create_blob(b"a").unwrap().unwrap();
                     s = s.remount();
-                    let o = s.blob(b"a").unwrap().unwrap().append(&[0; 513]).unwrap();
+                    let o = s.blob(b"a").append(&[0; 513]).unwrap();
                     assert_eq!(o, 0);
                 }
 
@@ -1520,7 +1523,7 @@ mod test {
                     s.create_blob(b"").unwrap().unwrap();
                     s.create_blob(b"a").unwrap().unwrap();
                     s.create_blob(b"b").unwrap().unwrap();
-                    s.blob(b"a").unwrap().unwrap().rename(b"").unwrap();
+                    s.blob(b"a").rename(b"").unwrap();
                     s.append(b"b", 0, b"");
                 }
 
@@ -1532,7 +1535,7 @@ mod test {
                     s.append(b"", 10000, &[b'b'; 20000]);
                     s = s.remount();
                     let buf = &mut [0; 40000];
-                    let n = s.blob(b"").unwrap().unwrap().read_at(0, buf).unwrap();
+                    let n = s.blob(b"").read_at(0, buf).unwrap();
                     assert_eq!(n, 30000);
                     assert_eq!(buf[..10000], [b'a'; 10000]);
                     assert_eq!(buf[10000..30000], [b'b'; 20000]);
@@ -1549,7 +1552,7 @@ mod test {
                     s.append(b"", 0, &[b'a'; 10000]);
                     s.append(b"", 10000, &[b'b'; 20000]);
                     s = s.remount();
-                    s.blob(b"").unwrap().unwrap().delete().unwrap();
+                    s.blob(b"").delete().unwrap();
                     s.remount();
                 }
 
@@ -1582,7 +1585,7 @@ mod test {
                     s = s.remount();
                     s.append(b"", 30000, &[2; 20000]);
                     let buf = &mut [0];
-                    let n = s.blob(b"").unwrap().unwrap().read_at(48000, buf).unwrap();
+                    let n = s.blob(b"").read_at(48000, buf).unwrap();
                     assert_eq!(n, 1);
                     assert_eq!(buf, &[2]);
                 }
@@ -1622,7 +1625,7 @@ mod test {
                     for x in 0..100 {
                         let mut b = s.create_blob(&[x + 1]).unwrap().unwrap();
                         b.append(&[0; 1024]).unwrap();
-                        s.blob(&[x]).unwrap().unwrap().rename(&[x + 1]).unwrap();
+                        s.blob(&[x]).rename(&[x + 1]).unwrap();
                     }
                 }
             }
