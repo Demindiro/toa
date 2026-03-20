@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4.12"
 arbitrary = { version = "1.4.2", features = ["derive"] }
 toa = { path = "../toa" }
 toa-blob = { path = "../toa-blob" }
+toa-blob-compress = { path = "../toa-blob-compress" }
 
 [[bin]]
 name = "fuzz_target_1"
@@ -23,6 +24,13 @@ bench = false
 [[bin]]
 name = "toa-blob-fuzz"
 path = "fuzz_targets/toa-blob-fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "toa-blob-compress-fuzz"
+path = "fuzz_targets/toa-blob-compress-fuzz.rs"
 test = false
 doc = false
 bench = false
