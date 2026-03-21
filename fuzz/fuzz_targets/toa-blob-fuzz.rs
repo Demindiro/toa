@@ -15,6 +15,9 @@ enum Op<'a> {
     CreateBlob {
         name: &'a [u8],
     },
+    CreateUnzonedBlob {
+        name: &'a [u8],
+    },
     DeleteBlob {
         slot: u16,
     },
@@ -74,6 +77,20 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
             Op::CreateBlob { name } => {
                 let name = &name[..name.len().min(255)];
                 match (blob_map.entry(name), store.create_blob(name).unwrap()) {
+                    (Entry::Vacant(e), Ok(x)) => {
+                        e.insert(blobs.len() as u16);
+                        blobs.push(Some((name, Vec::new(), x.id())));
+                    }
+                    (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
+                    _ => panic!("blob map corrupt"),
+                }
+            }
+            Op::CreateUnzonedBlob { name } => {
+                let name = &name[..name.len().min(255)];
+                match (
+                    blob_map.entry(name),
+                    store.create_unzoned_blob(name).unwrap(),
+                ) {
                     (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
                         blobs.push(Some((name, Vec::new(), x.id())));

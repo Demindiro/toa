@@ -28,6 +28,7 @@ mod log {
             5 APPEND_BLOB_TAIL
             6 NEXT_LOG_ZONE
             7 COMMIT_BLOB_TAIL
+            8 CREATE_UNZONED_BLOB
             84 HEADER
         }
 
@@ -247,7 +248,8 @@ pub struct OutOfZones;
 /// which is appended to until it is block-sized.
 struct Blob {
     name: Rc<[u8]>,
-    zones: Vec<ZoneId>,
+    /// `None` if this blob is unzoned.
+    zones: Option<Vec<ZoneId>>,
     tail: Vec<u8>,
     len: u64,
     flushed: usize,
@@ -357,14 +359,15 @@ where
                 // that way we can do a simple (==) check
                 match ty {
                     log::entry::ty::LOG_BLOCK_END => break,
-                    log::entry::ty::CREATE_BLOB => {
+                    log::entry::ty::CREATE_BLOB | log::entry::ty::CREATE_UNZONED_BLOB => {
                         let hdr = bytemuck::cast::<_, log::entry::CreateBlob>(*x);
                         k += 1;
                         let id = BlobId(hdr.blob_id.into());
                         let name_len = usize::from(b);
                         let name = &buf_a[k..].as_flattened()[..name_len];
                         k += (name_len + 7) >> 3;
-                        store.replay_create_blob(id, name).unwrap();
+                        let unzoned = ty == log::entry::ty::CREATE_UNZONED_BLOB;
+                        store.replay_create_blob(id, name, unzoned).unwrap();
                     }
                     log::entry::ty::DELETE_BLOB => {
                         k += 1;
@@ -477,14 +480,29 @@ where
         &'a self,
         name: &[u8],
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
+        self.create_blob_conf(name, false)
+    }
+
+    pub fn create_unzoned_blob<'a>(
+        &'a self,
+        name: &[u8],
+    ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
+        self.create_blob_conf(name, true)
+    }
+
+    fn create_blob_conf<'a>(
+        &'a self,
+        name: &[u8],
+        unzoned: bool,
+    ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
         assert!(name.len() <= 255, "name too long");
         let s = &mut *self.data.borrow_mut();
         match s.blob_map.entry(name.into()) {
             Entry::Occupied(_) => Ok(Err(DuplicateBlob)),
             Entry::Vacant(e) => {
-                let id = s.blobs.insert(Blob::new(e.key().clone()));
+                let id = s.blobs.insert(Blob::new(e.key().clone(), unzoned));
                 e.insert(id);
-                self.log_create_blob(s, id, name)
+                self.log_create_blob(s, id, name, unzoned)
                     .map(|()| Ok(BlobRef { store: self, id }))
             }
         }
@@ -516,9 +534,18 @@ where
         Ok(())
     }
 
-    fn log_create_blob(&self, s: &mut BlobStoreData, id: BlobId, name: &[u8]) -> io::Result<()> {
+    fn log_create_blob(
+        &self,
+        s: &mut BlobStoreData,
+        id: BlobId,
+        name: &[u8],
+        unzoned: bool,
+    ) -> io::Result<()> {
         let hdr = log::entry::CreateBlob {
-            ty: log::entry::ty::CREATE_BLOB,
+            ty: match unzoned {
+                false => log::entry::ty::CREATE_BLOB,
+                true => log::entry::ty::CREATE_UNZONED_BLOB,
+            },
             name_len: u8::try_from(name.len()).unwrap().into(),
             _pad_0: Default::default(),
             blob_id: id.0.into(),
@@ -720,12 +747,18 @@ impl BlobStoreData {
         self.allocated_zones.set(id.0 as usize, true);
     }
 
-    fn replay_create_blob(&mut self, id: BlobId, name: &[u8]) -> Result<(), DuplicateBlob> {
+    fn replay_create_blob(
+        &mut self,
+        id: BlobId,
+        name: &[u8],
+        unzoned: bool,
+    ) -> Result<(), DuplicateBlob> {
         assert!(name.len() <= 255, "name too long");
         match self.blob_map.entry(name.into()) {
             Entry::Occupied(_) => Err(DuplicateBlob),
             Entry::Vacant(e) => {
-                self.blobs.insert_at(id, Blob::new(e.key().clone()))?;
+                self.blobs
+                    .insert_at(id, Blob::new(e.key().clone(), unzoned))?;
                 e.insert(id);
                 Ok(())
             }
@@ -733,8 +766,10 @@ impl BlobStoreData {
     }
 
     fn replay_delete_blob(&mut self, id: BlobId) {
-        let mut old = self.blobs.remove(id).expect("old blob missing");
-        self.free_zones(&mut old.zones);
+        let old = self.blobs.remove(id).expect("old blob missing");
+        if let Some(mut old) = old.zones {
+            self.free_zones(&mut old);
+        }
         self.blob_map.remove(&old.name);
     }
 
@@ -761,8 +796,8 @@ impl BlobStoreData {
                 Some(old)
             }
         };
-        if let Some(old) = old.as_mut() {
-            self.free_zones(&mut old.zones);
+        if let Some(old) = old.as_mut().and_then(|x| x.zones.as_mut()) {
+            self.free_zones(old);
         }
         (true, old)
     }
@@ -773,7 +808,11 @@ impl BlobStoreData {
     }
 
     fn replay_add_zone_to_blob(&mut self, id: BlobId, zone: ZoneId) {
-        self.blobs[id].zones.push(zone);
+        self.blobs[id]
+            .zones
+            .as_mut()
+            .expect("todo: error: unzoned")
+            .push(zone);
         self.mark_zone_allocated(zone);
     }
 
@@ -810,9 +849,11 @@ where
 {
     pub fn delete(self) -> io::Result<()> {
         let s = &mut *self.store.data.borrow_mut();
-        self.store
-            .zone_dev
-            .reset_many(bytemuck::cast_slice(&s.blobs[self.id].zones))?;
+        if let Some(zones) = s.blobs[self.id].zones.as_ref() {
+            self.store
+                .zone_dev
+                .reset_many(bytemuck::cast_slice(zones))?;
+        }
         s.replay_delete_blob(self.id);
         self.store.log_delete_blob(s, self.id)?;
         Ok(())
@@ -831,6 +872,11 @@ where
             s.blobs[idx].flushed <= s.blobs[idx].tail.len(),
             "flushed not reset properly"
         );
+
+        if s.blobs[self.id].zones.is_none() {
+            s.blobs[idx].tail.extend(data);
+            return Ok(offt);
+        }
 
         let n = s.blobs[idx].tail.len().wrapping_neg() % block_size;
         let n = n.min(data.len());
@@ -874,10 +920,8 @@ where
         let s = &mut *self.store.data.borrow_mut();
         let (renamed, old) = s.replay_rename_blob(self.id, new_name);
         if renamed {
-            if let Some(old) = old {
-                self.store
-                    .zone_dev
-                    .reset_many(bytemuck::cast_slice(&old.zones))?;
+            if let Some(old) = old.and_then(|x| x.zones) {
+                self.store.zone_dev.reset_many(bytemuck::cast_slice(&old))?;
             }
             self.store.log_rename_blob(s, self.id, new_name)?;
         }
@@ -923,7 +967,7 @@ where
             while !zone_buf.is_empty() {
                 let n = zone_buf.len().min((zone_size - offt) as usize);
                 self.store.zone_dev.read_at(
-                    s.blobs[idx].zones[zone as usize].0,
+                    s.blobs[idx].zones.as_ref().expect("unzoned")[zone as usize].0,
                     offt,
                     &mut zone_buf[..n],
                 )?;
@@ -960,7 +1004,7 @@ where
 
         while !blocks.is_empty() {
             let mut zone;
-            match s.blobs[self.id].zones.last() {
+            match s.blobs[self.id].zones.as_ref().expect("unzoned").last() {
                 None => {
                     [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                     self.store.log_add_zone_to_blob(s, self.id, zone)?;
@@ -1339,10 +1383,10 @@ impl From<BlockShift> for usize {
 }
 
 impl Blob {
-    fn new(name: Rc<[u8]>) -> Self {
+    fn new(name: Rc<[u8]>, unzoned: bool) -> Self {
         Self {
             name,
-            zones: Vec::new(),
+            zones: (!unzoned).then(Vec::new),
             tail: Vec::new(),
             len: 0,
             flushed: 0,
@@ -1354,7 +1398,7 @@ impl Blob {
     }
 
     fn zones_capacity(&self, zone_size: u64) -> u64 {
-        self.zones.len() as u64 * zone_size
+        self.zones.as_ref().map_or(0, |x| x.len() as u64) * zone_size
     }
 }
 
@@ -1647,6 +1691,26 @@ mod test {
                         b.append(&[0; 1024]).unwrap();
                         s.blob(&[x]).rename(&[x + 1]).unwrap();
                     }
+                }
+
+                /// Ensure no attempts are made at remounting.
+                /// `zones` is None, so simply apppending and waiting for a panic (or not)
+                /// is sufficient.
+                #[test]
+                fn unzoned_blob_append() {
+                    let s = Test::new();
+                    let b = s.create_unzoned_blob(b"").unwrap().unwrap();
+                    b.append(&[0; 512]).unwrap();
+                }
+
+                /// Ensure the right log entry type is used by simulating a remount.
+                #[test]
+                fn unzoned_blob_log_ty() {
+                    let mut s = Test::new();
+                    let b = s.create_unzoned_blob(b"").unwrap().unwrap();
+                    b.append(&[0; 513]).unwrap();
+                    s = s.remount();
+                    s.append(b"", 513, &[]);
                 }
             }
         };

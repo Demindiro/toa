@@ -161,6 +161,24 @@ be smaller however.
 | u32   | blob ID                |
 | u64   | length                 |
 
+##### 8. Create unzoned blob
+
+Much like a regular blob, except this one will never allocate zones.
+Instead, all data is kept in the tail.
+Only recommended for blobs that will remain significantly shorter than
+a single zone.
+
+Blob ID allocation follows same recommendations as "1. Create blob".
+
+| type  | name                  |
+|:----- |:--------------------- |
+| u8    | (type)                |
+| u8    | name length           |
+| u16   | (pad)                 |
+| u32   | blob ID               |
+| u8[]  | name                  |
+| u8[]  | (pad)                 |
+
 ##### 84. Header
 
 Every log zone must start with this header.
