@@ -1466,14 +1466,14 @@ mod test {
 
                 #[test]
                 fn create_duplicate_blobs() {
-                    let mut store = Test::new();
+                    let store = Test::new();
                     store.create_blob(b"a").unwrap().unwrap();
                     assert!(store.create_blob(b"a").unwrap().is_err());
                 }
 
                 #[test]
                 fn delete_blob() {
-                    let mut store = Test::new();
+                    let store = Test::new();
                     store.create_blob(b"a").unwrap().unwrap();
                     store.blob(b"a").delete().unwrap();
                     store.create_blob(b"a").unwrap().unwrap();
@@ -1483,8 +1483,8 @@ mod test {
 
                 #[test]
                 fn append_blob() {
-                    let mut s = Test::new();
-                    let mut b = s.create_blob(b"a").unwrap().unwrap();
+                    let s = Test::new();
+                    let b = s.create_blob(b"a").unwrap().unwrap();
                     let o = b.append(&[0; 507]).unwrap();
                     assert_eq!(o, 0);
                     s.store.unmount().map_err(|e| e.1).unwrap();
@@ -1501,7 +1501,7 @@ mod test {
 
                 #[test]
                 fn append_blob_large() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
                     s.store.unmount().map_err(|e| e.1).unwrap();
@@ -1509,7 +1509,7 @@ mod test {
 
                 #[test]
                 fn append_blob_small_large() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0; 400]);
                     s.append(b"", 400, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
@@ -1518,7 +1518,7 @@ mod test {
 
                 #[test]
                 fn rename_blob_shuffle_bloblist() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.create_blob(b"a").unwrap().unwrap();
                     s.create_blob(b"b").unwrap().unwrap();
@@ -1569,7 +1569,7 @@ mod test {
 
                 #[test]
                 fn append_blob_truncated_tail() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0]);
                     s.append(b"", 1, &[0]);
@@ -1609,9 +1609,9 @@ mod test {
 
                 #[test]
                 fn delete_blob_release_zones() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     for _ in 0..100 {
-                        let mut b = s.create_blob(b"").unwrap().unwrap();
+                        let b = s.create_blob(b"").unwrap().unwrap();
                         b.append(&[0; 1024]).unwrap();
                         b.delete().unwrap();
                     }
@@ -1619,10 +1619,10 @@ mod test {
 
                 #[test]
                 fn rename_blob_release_zones() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(&[0]).unwrap().unwrap();
                     for x in 0..100 {
-                        let mut b = s.create_blob(&[x + 1]).unwrap().unwrap();
+                        let b = s.create_blob(&[x + 1]).unwrap().unwrap();
                         b.append(&[0; 1024]).unwrap();
                         s.blob(&[x]).rename(&[x + 1]).unwrap();
                     }
