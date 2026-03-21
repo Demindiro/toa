@@ -20,5 +20,5 @@ Table is put in "<name>.table.compr"
 | -----:|:------------------ |
 |   7:0 | offset             |
 |   8:8 | algorithm          |
-|  11:9 | compressed length  |
-| 15:12 | (zero)             |
+|  12:9 | (zero)             |
+| 15:12 | compressed length  |

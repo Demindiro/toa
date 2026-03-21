@@ -1,6 +1,8 @@
+#![forbid(unused_must_use)]
+
 pub use toa_blob::DuplicateBlob;
 
-use nora_endian::u32le;
+use nora_endian::{u32le, u64le};
 use std::io;
 
 const TABLE_SUFFIX: &[u8] = b".table.compr";
@@ -61,6 +63,15 @@ struct TableHeader {
     compression: u8,
     compression_level: u8,
     _pad_0: [u8; 14],
+}
+
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct TableEntry {
+    offset: u64le,
+    algorithm: u8,
+    _pad_0: [u8; 3],
+    compressed_len: u32le,
 }
 
 impl<T> BlobStoreCompress<T> {
@@ -191,11 +202,58 @@ where
             return self.tail()?.read_at(x, buf);
         }
         // split into chunks and start reading
-        todo!();
+        let og_len = buf.len();
+        let n = self.read_compressed_partial(offset, buf)?;
+        let (offset, buf) = (offset + n as u64, &mut buf[n..]);
+        if buf.is_empty() {
+            return Ok(og_len);
+        }
+        let n = self.read_compressed_whole(offset, buf)?;
+        let (offset, buf) = (offset + n as u64, &mut buf[n..]);
+        let n = if offset < self.compressed_len()? {
+            self.read_compressed_partial(offset, buf)?
+        } else {
+            self.tail()?.read_at(0, buf)?
+        };
+        Ok(og_len - (buf.len() - n))
     }
 
     pub fn append(&self, data: &[u8]) -> io::Result<u64> {
-        self.tail()?.append(data)
+        // split into (start, middle, end)
+        // add tail with start to fill a page
+        // add middle directly as pages
+        // add remainder to "cleared" tail
+
+        let offset = self.len()?;
+
+        let page_size = self.blobs.page_size as u64;
+        let page_mask = page_size - 1;
+
+        let tail = self.tail()?;
+        let n = tail.len()?.wrapping_neg() & page_mask;
+        let n = usize::try_from(n).expect("u32 <= usize");
+        let n = n.min(data.len());
+        let (start, data) = data.split_at(n);
+        tail.append(start)?;
+
+        if tail.len()? >= page_size {
+            assert!(tail.len()? == page_size, "tail too large");
+            let buf = &mut vec![0; page_size as usize];
+            let n = tail.read_at(0, buf)?;
+            assert_eq!(n, buf.len());
+            self.append_page(buf)?;
+            tail.clear()?;
+        }
+
+        let mut it = data.chunks_exact(page_size as usize);
+        for page in &mut it {
+            self.append_page(page)?;
+        }
+
+        tail.append(it.remainder())?;
+        assert!(tail.len()? < page_size, "tail is full");
+
+        Ok(offset)
     }
 
     pub fn delete(self) -> io::Result<()> {
@@ -213,8 +271,65 @@ where
         Ok(())
     }
 
-    fn read_compressed(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        todo!();
+    fn read_compressed_partial(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let page_size = self.blobs.page_size as u64;
+        let page_mask = page_size - 1;
+        let cbuf = &mut vec![0; page_size as usize];
+        let offt = offset & !page_mask;
+        self.read_compressed_whole(offt, cbuf)?;
+        let start = (offset & page_mask) as usize;
+        let end = start + buf.len();
+        let start = start.min(cbuf.len());
+        let end = end.min(cbuf.len());
+        let buf = &mut buf[..end - start];
+        buf.copy_from_slice(&cbuf[start..end]);
+        Ok(buf.len())
+    }
+
+    fn read_compressed_whole(&self, mut offset: u64, mut buf: &mut [u8]) -> io::Result<usize> {
+        let page_size = self.blobs.page_size as u64;
+        let page_mask = page_size - 1;
+        assert_eq!(offset & page_mask, 0);
+        let og_len = buf.len();
+
+        while buf.len() >= page_size as usize {
+            let entry = &mut TableEntry::default();
+            let entry_offt = core::mem::size_of::<TableHeader>() as u64;
+            let entry_offt =
+                entry_offt + (offset / page_size) * core::mem::size_of_val(entry) as u64;
+            let n = self
+                .table()?
+                .read_at(entry_offt, bytemuck::bytes_of_mut(entry))?;
+            if n == 0 {
+                break;
+            }
+            assert_eq!(n, core::mem::size_of_val(entry));
+            let compression = Compression::try_from(entry.algorithm).unwrap();
+            let clen = u32::from(entry.compressed_len) as usize;
+            let cbuf = &mut vec![0; clen];
+            let part;
+            (part, buf) = buf.split_at_mut(page_size as usize);
+            self.pages()?.read_at(entry.offset.into(), cbuf)?;
+            decompress(compression, part, cbuf);
+            offset += page_size;
+        }
+        Ok(og_len - buf.len())
+    }
+
+    fn append_page(&self, page: &[u8]) -> io::Result<()> {
+        assert_eq!(page.len(), self.blobs.page_size as usize, "not page sized");
+        let buf = &mut vec![0; page.len()];
+        let (algorithm, clen) = self.blobs.compress(page, buf);
+        let clen32 = u32::try_from(clen).expect("compressed len exceeds page size");
+        let offset = self.pages()?.append(&buf[..clen])?;
+        let entry = TableEntry {
+            offset: offset.into(),
+            algorithm: algorithm as u8,
+            _pad_0: [0; 3],
+            compressed_len: clen32.into(),
+        };
+        self.table()?.append(bytemuck::bytes_of(&entry))?;
+        Ok(())
     }
 
     /// # Returns
@@ -228,6 +343,10 @@ where
         Ok(n)
     }
 
+    fn len(&self) -> io::Result<u64> {
+        Ok(self.compressed_len()? + self.tail()?.len()?)
+    }
+
     fn table(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
         self.store.store.blob(self.blobs.table)
     }
@@ -238,6 +357,18 @@ where
 
     fn tail(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
         self.store.store.blob(self.blobs.tail)
+    }
+}
+
+impl BlobSet {
+    fn compress(&self, page: &[u8], out: &mut [u8]) -> (Compression, usize) {
+        assert!(out.len() >= page.len());
+        match self.compression {
+            c @ Compression::None => {
+                out[..page.len()].copy_from_slice(page);
+                (c, page.len())
+            }
+        }
     }
 }
 
@@ -288,4 +419,50 @@ impl TableHeader {
 
 fn concat(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().chain(b).copied().collect::<Vec<u8>>()
+}
+
+fn decompress(compression: Compression, out: &mut [u8], buf: &mut [u8]) {
+    match compression {
+        Compression::None => out.copy_from_slice(buf),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use toa_blob::{BlobStore, BlockShift, MemBlocks};
+
+    fn init() -> BlobStoreCompress<BlobStore<MemBlocks>> {
+        BlobStoreCompress::new(BlobStore::init(MemBlocks::new(BlockShift::N9, 42, 10)).unwrap())
+    }
+
+    #[test]
+    fn read_large() {
+        let s = init();
+        let b = s
+            .create_blob(b"", PageSize::K4, Compression::None, 0)
+            .unwrap()
+            .unwrap();
+        let x = &[1; 20000];
+        let y = &mut [0; 20000];
+        b.append(x).unwrap();
+        let n = b.read_at(1000, y).unwrap();
+        assert_eq!(x.len() - 1000, n);
+        assert_eq!(&x[..x.len() - 1000], &y[..n]);
+    }
+
+    #[test]
+    fn read_small() {
+        let s = init();
+        let b = s
+            .create_blob(b"", PageSize::K4, Compression::None, 0)
+            .unwrap()
+            .unwrap();
+        let x = &[1; 20000];
+        let y = &mut [0; 100];
+        b.append(x).unwrap();
+        let n = b.read_at(100, y).unwrap();
+        assert_eq!(n, 100);
+        assert_eq!(&x[..n], &y[..n]);
+    }
 }
