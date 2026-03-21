@@ -179,6 +179,17 @@ Blob ID allocation follows same recommendations as "1. Create blob".
 | u8[]  | name                  |
 | u8[]  | (pad)                 |
 
+##### 9. Clear blob
+
+Erase all data from a blob, releasing associated zones and clearing the tail.
+Unlike delete, the blob and its ID is kept.
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u24   | (pad)                  |
+| u32   | blob ID                |
+
 ##### 84. Header
 
 Every log zone must start with this header.

@@ -18,6 +18,9 @@ enum Op<'a> {
     CreateUnzonedBlob {
         name: &'a [u8],
     },
+    ClearBlob {
+        slot: u16,
+    },
     DeleteBlob {
         slot: u16,
     },
@@ -98,6 +101,13 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                     (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
                     _ => panic!("blob map corrupt"),
                 }
+            }
+            Op::ClearBlob { slot } => {
+                let Some(Some((_, x, id))) = blobs.get_mut(usize::from(slot)) else {
+                    continue;
+                };
+                store.blob(*id).unwrap().clear().unwrap();
+                x.clear();
             }
             Op::DeleteBlob { slot } => {
                 let Some((name, _, id)) = blobs.get_mut(usize::from(slot)).and_then(|x| x.take())

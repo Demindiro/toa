@@ -29,6 +29,7 @@ mod log {
             6 NEXT_LOG_ZONE
             7 COMMIT_BLOB_TAIL
             8 CREATE_UNZONED_BLOB
+            9 CLEAR_BLOB
             84 HEADER
         }
 
@@ -50,6 +51,14 @@ mod log {
             pub _pad_0: [u8; 2],
             pub blob_id: u32le,
             // name: u8[]
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        pub struct ClearBlob {
+            pub ty: u8,
+            pub _pad_0: [u8; 3],
+            pub blob_id: u32le,
         }
 
         #[repr(C)]
@@ -369,6 +378,11 @@ where
                         let unzoned = ty == log::entry::ty::CREATE_UNZONED_BLOB;
                         store.replay_create_blob(id, name, unzoned).unwrap();
                     }
+                    log::entry::ty::CLEAR_BLOB => {
+                        k += 1;
+                        let id = u32::from_le_bytes([e, f, g, h]);
+                        store.replay_clear_blob(BlobId(id));
+                    }
                     log::entry::ty::DELETE_BLOB => {
                         k += 1;
                         let id = u32::from_le_bytes([e, f, g, h]);
@@ -551,6 +565,15 @@ where
             blob_id: id.0.into(),
         };
         self.log_push(s, &[bytemuck::bytes_of(&hdr), name])
+    }
+
+    fn log_clear_blob(&self, s: &mut BlobStoreData, id: BlobId) -> io::Result<()> {
+        let hdr = log::entry::ClearBlob {
+            ty: log::entry::ty::CLEAR_BLOB,
+            _pad_0: Default::default(),
+            blob_id: id.0.into(),
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
     }
 
     fn log_delete_blob(&self, s: &mut BlobStoreData, id: BlobId) -> io::Result<()> {
@@ -765,6 +788,13 @@ impl BlobStoreData {
         }
     }
 
+    fn replay_clear_blob(&mut self, id: BlobId) {
+        self.blobs[id].zones.as_mut().map(|x| x.clear());
+        self.blobs[id].tail.clear();
+        self.blobs[id].flushed = 0;
+        self.blobs[id].len = 0;
+    }
+
     fn replay_delete_blob(&mut self, id: BlobId) {
         let old = self.blobs.remove(id).expect("old blob missing");
         if let Some(mut old) = old.zones {
@@ -847,6 +877,18 @@ impl<'a, U> BlobRef<'a, BlobStore<U>>
 where
     U: ZoneDev,
 {
+    pub fn clear(&self) -> io::Result<()> {
+        let s = &mut *self.store.data.borrow_mut();
+        if let Some(zones) = s.blobs[self.id].zones.as_mut() {
+            self.store
+                .zone_dev
+                .reset_many(bytemuck::cast_slice(zones))?;
+        }
+        s.replay_clear_blob(self.id);
+        self.store.log_clear_blob(s, self.id)?;
+        Ok(())
+    }
+
     pub fn delete(self) -> io::Result<()> {
         let s = &mut *self.store.data.borrow_mut();
         if let Some(zones) = s.blobs[self.id].zones.as_ref() {
