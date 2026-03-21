@@ -92,8 +92,11 @@ where
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
-        let f = |x| self.store.create_blob(x);
-        match (f(&table)?, f(&pages)?, f(&tail)?) {
+        match (
+            self.store.create_blob(&table)?,
+            self.store.create_blob(&pages)?,
+            self.store.create_unzoned_blob(&tail)?,
+        ) {
             (Ok(table), Ok(pages), Ok(tail)) => {
                 let hdr = TableHeader {
                     magic: TableHeader::MAGIC,
