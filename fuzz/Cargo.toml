@@ -12,7 +12,7 @@ libfuzzer-sys = "0.4.12"
 arbitrary = { version = "1.4.2", features = ["derive"] }
 toa = { path = "../toa" }
 toa-blob = { path = "../toa-blob" }
-toa-blob-compress = { path = "../toa-blob-compress" }
+toa-blob-compress = { path = "../toa-blob-compress", features = ["lz4"] }
 
 [[bin]]
 name = "fuzz_target_1"

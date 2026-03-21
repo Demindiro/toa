@@ -35,7 +35,10 @@ enum Op<'a> {
     },
 }
 
-libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
+libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
+    let (compress, ops) = compr_ops;
+    let compress = if compress { Compression::Lz4 } else { Compression::None };
+
     // allocate plenty of zones as we don't care to test out-of-storage conditions here
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
     let dev = MemBlocks::new(toa_blob::BlockShift::N9, 200, 100);
@@ -52,7 +55,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op<'_>>| {
                 match (
                     blob_map.entry(name),
                     store
-                        .create_blob(name, PageSize::K4, Compression::None, 0)
+                        .create_blob(name, PageSize::K4, compress, 0)
                         .unwrap(),
                 ) {
                     (Entry::Vacant(e), Ok(x)) => {
