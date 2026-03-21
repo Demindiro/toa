@@ -363,10 +363,15 @@ where
 impl BlobSet {
     fn compress(&self, page: &[u8], out: &mut [u8]) -> (Compression, usize) {
         assert!(out.len() >= page.len());
+        let f = |out: &mut [_]| {
+            out[..page.len()].copy_from_slice(page);
+            (Compression::None, page.len())
+        };
         match self.compression {
-            c @ Compression::None => {
-                out[..page.len()].copy_from_slice(page);
-                (c, page.len())
+            Compression::None => f(out),
+            #[cfg(feature = "lz4")]
+            c @ Compression::Lz4 => {
+                lz4_flex::compress_into(page, out).map_or_else(|_| f(out), |n| (c, n))
             }
         }
     }
@@ -421,9 +426,14 @@ fn concat(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().chain(b).copied().collect::<Vec<u8>>()
 }
 
-fn decompress(compression: Compression, out: &mut [u8], buf: &mut [u8]) {
+fn decompress(compression: Compression, out: &mut [u8], data: &[u8]) {
     match compression {
-        Compression::None => out.copy_from_slice(buf),
+        Compression::None => out.copy_from_slice(data),
+        #[cfg(feature = "lz4")]
+        Compression::Lz4 => {
+            let n = lz4_flex::decompress_into(data, out).unwrap();
+            assert_eq!(n, out.len());
+        }
     }
 }
 
