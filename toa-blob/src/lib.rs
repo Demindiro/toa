@@ -46,6 +46,8 @@ mod log {
         pub struct CreateBlob {
             pub ty: u8,
             pub name_len: u8,
+            pub _pad_0: [u8; 2],
+            pub blob_id: u32le,
             // name: u8[]
         }
 
@@ -356,10 +358,13 @@ where
                 match ty {
                     log::entry::ty::LOG_BLOCK_END => break,
                     log::entry::ty::CREATE_BLOB => {
+                        let hdr = bytemuck::cast::<_, log::entry::CreateBlob>(*x);
+                        k += 1;
+                        let id = BlobId(hdr.blob_id.into());
                         let name_len = usize::from(b);
-                        let name = &buf_a[k..].as_flattened()[2..2 + name_len];
-                        k += ((2 + name_len) + 7) >> 3;
-                        store.replay_create_blob(name).unwrap();
+                        let name = &buf_a[k..].as_flattened()[..name_len];
+                        k += (name_len + 7) >> 3;
+                        store.replay_create_blob(id, name).unwrap();
                     }
                     log::entry::ty::DELETE_BLOB => {
                         k += 1;
@@ -472,13 +477,16 @@ where
         &'a self,
         name: &[u8],
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
+        assert!(name.len() <= 255, "name too long");
         let s = &mut *self.data.borrow_mut();
-        let res = s.replay_create_blob(name);
-        match res {
-            Ok(id) => self
-                .log_create_blob(s, name)
-                .map(|()| Ok(BlobRef { store: self, id })),
-            Err(e) => Ok(Err(e)),
+        match s.blob_map.entry(name.into()) {
+            Entry::Occupied(_) => Ok(Err(DuplicateBlob)),
+            Entry::Vacant(e) => {
+                let id = s.blobs.insert(Blob::new(e.key().clone()));
+                e.insert(id);
+                self.log_create_blob(s, id, name)
+                    .map(|()| Ok(BlobRef { store: self, id }))
+            }
         }
     }
 
@@ -508,10 +516,12 @@ where
         Ok(())
     }
 
-    fn log_create_blob(&self, s: &mut BlobStoreData, name: &[u8]) -> io::Result<()> {
+    fn log_create_blob(&self, s: &mut BlobStoreData, id: BlobId, name: &[u8]) -> io::Result<()> {
         let hdr = log::entry::CreateBlob {
             ty: log::entry::ty::CREATE_BLOB,
             name_len: u8::try_from(name.len()).unwrap().into(),
+            _pad_0: Default::default(),
+            blob_id: id.0.into(),
         };
         self.log_push(s, &[bytemuck::bytes_of(&hdr), name])
     }
@@ -710,14 +720,14 @@ impl BlobStoreData {
         self.allocated_zones.set(id.0 as usize, true);
     }
 
-    fn replay_create_blob(&mut self, name: &[u8]) -> Result<BlobId, DuplicateBlob> {
+    fn replay_create_blob(&mut self, id: BlobId, name: &[u8]) -> Result<(), DuplicateBlob> {
         assert!(name.len() <= 255, "name too long");
         match self.blob_map.entry(name.into()) {
             Entry::Occupied(_) => Err(DuplicateBlob),
             Entry::Vacant(e) => {
-                let id = self.blobs.insert(Blob::new(e.key().clone()));
+                self.blobs.insert_at(id, Blob::new(e.key().clone()))?;
                 e.insert(id);
-                Ok(id)
+                Ok(())
             }
         }
     }
@@ -999,6 +1009,17 @@ impl BlobTable {
         }
         self.table.push(Some(blob));
         BlobId((self.table.len() - 1) as u32)
+    }
+
+    fn insert_at(&mut self, id: BlobId, blob: Blob) -> Result<(), DuplicateBlob> {
+        let n = self.table.len().max(id.0 as usize + 1);
+        self.table.resize_with(n, || None);
+        let x = &mut self.table[id.0 as usize];
+        if x.is_some() {
+            return Err(DuplicateBlob);
+        }
+        *x = Some(blob);
+        Ok(())
     }
 
     fn remove(&mut self, id: BlobId) -> Option<Blob> {
