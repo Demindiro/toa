@@ -930,7 +930,7 @@ where
         self.blob(*blob)?.read_at(offset, buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.flush()
+        (&*self).flush()
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         self.size_on_disk()
