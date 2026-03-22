@@ -99,8 +99,7 @@ impl Toa {
         let store = toa::BlobStoreCompress {
             store,
             page_size: PageSize::K128,
-            compression: Compression::Lz4,
-            //compression: Compression::None,
+            compression: Compression::Zstd,
             compression_level: u8::MAX,
         };
         store

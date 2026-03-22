@@ -383,14 +383,28 @@ impl BlobSet {
             out[..page.len()].copy_from_slice(page);
             (Compression::None, page.len())
         };
-        match self.compression {
-            Compression::None => f(out),
+        let n = match self.compression {
+            Compression::None => return f(out),
             #[cfg(feature = "lz4")]
-            c @ Compression::Lz4 => match lz4_flex::compress_into(page, out) {
-                Ok(n) if n < page.len() => (c, n),
-                Ok(_) | Err(_) => f(out),
-            },
+            Compression::Lz4 => self.compress_lz4(page, out),
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => self.compress_zstd(page, out),
+        };
+        if n < page.len() {
+            (self.compression, n)
+        } else {
+            f(out)
         }
+    }
+
+    #[cfg(feature = "lz4")]
+    fn compress_lz4(&self, page: &[u8], out: &mut [u8]) -> usize {
+        lz4_flex::compress_into(page, out).unwrap()
+    }
+
+    #[cfg(feature = "zstd")]
+    fn compress_zstd(&self, page: &[u8], out: &mut [u8]) -> usize {
+        zstd_safe::compress(out, page, self.compression_level.into()).unwrap()
     }
 }
 
@@ -451,11 +465,21 @@ fn decompress(compression: Compression, out: &mut [u8], data: &[u8]) {
             let n = lz4_flex::decompress_into(data, out).unwrap();
             assert_eq!(n, out.len());
         }
+        #[cfg(feature = "zstd")]
+        Compression::Zstd => {
+            let n = zstd_safe::decompress(out, data).unwrap();
+            assert_eq!(n, out.len());
+        }
     }
 }
 
 fn max_compress_size(input_len: usize) -> usize {
-    lz4_flex::block::get_maximum_output_size(input_len)
+    let n = input_len;
+    #[cfg(feature = "lz4")]
+    let n = n.max(lz4_flex::block::get_maximum_output_size(input_len));
+    #[cfg(feature = "zstd")]
+    let n = n.max(zstd_safe::compress_bound(input_len));
+    n
 }
 
 #[cfg(test)]
