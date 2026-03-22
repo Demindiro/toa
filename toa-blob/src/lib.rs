@@ -437,7 +437,7 @@ where
         })
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&self) -> io::Result<()> {
         let s = &mut *self.data.borrow_mut();
         let blob_num = s.blobs.table.len() as u32;
         for id in (0..blob_num).map(BlobId) {
@@ -449,7 +449,7 @@ where
         Ok(())
     }
 
-    pub fn unmount(mut self) -> Result<U, (Self, io::Error)> {
+    pub fn unmount(self) -> Result<U, (Self, io::Error)> {
         if let Err(e) = self.flush() {
             return Err((self, e));
         }
@@ -469,7 +469,7 @@ where
     }
 
     pub fn create_blob<'a>(
-        &'a mut self,
+        &'a self,
         name: &[u8],
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
         let s = &mut *self.data.borrow_mut();
@@ -1467,14 +1467,14 @@ mod test {
 
                 #[test]
                 fn create_duplicate_blobs() {
-                    let mut store = Test::new();
+                    let store = Test::new();
                     store.create_blob(b"a").unwrap().unwrap();
                     assert!(store.create_blob(b"a").unwrap().is_err());
                 }
 
                 #[test]
                 fn delete_blob() {
-                    let mut store = Test::new();
+                    let store = Test::new();
                     store.create_blob(b"a").unwrap().unwrap();
                     store.blob(b"a").delete().unwrap();
                     store.create_blob(b"a").unwrap().unwrap();
@@ -1484,8 +1484,8 @@ mod test {
 
                 #[test]
                 fn append_blob() {
-                    let mut s = Test::new();
-                    let mut b = s.create_blob(b"a").unwrap().unwrap();
+                    let s = Test::new();
+                    let b = s.create_blob(b"a").unwrap().unwrap();
                     let o = b.append(&[0; 507]).unwrap();
                     assert_eq!(o, 0);
                     s.store.unmount().map_err(|e| e.1).unwrap();
@@ -1493,16 +1493,16 @@ mod test {
 
                 #[test]
                 fn append_blob_remount() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"a").unwrap().unwrap();
-                    s = s.remount();
+                    let s = s.remount();
                     let o = s.blob(b"a").append(&[0; 513]).unwrap();
                     assert_eq!(o, 0);
                 }
 
                 #[test]
                 fn append_blob_large() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
                     s.store.unmount().map_err(|e| e.1).unwrap();
@@ -1510,7 +1510,7 @@ mod test {
 
                 #[test]
                 fn append_blob_small_large() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0; 400]);
                     s.append(b"", 400, &[0; (ZONE_SIZE + BLOCK_SIZE) as usize]);
@@ -1519,7 +1519,7 @@ mod test {
 
                 #[test]
                 fn rename_blob_shuffle_bloblist() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.create_blob(b"a").unwrap().unwrap();
                     s.create_blob(b"b").unwrap().unwrap();
@@ -1529,11 +1529,11 @@ mod test {
 
                 #[test]
                 fn log_overflow() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[b'a'; 10000]);
                     s.append(b"", 10000, &[b'b'; 20000]);
-                    s = s.remount();
+                    let s = s.remount();
                     let buf = &mut [0; 40000];
                     let n = s.blob(b"").read_at(0, buf).unwrap();
                     assert_eq!(n, 30000);
@@ -1547,30 +1547,30 @@ mod test {
                 // triggered a particular case where the mirror log used the wrong zone ID
                 #[test]
                 fn log_overflow_delete() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[b'a'; 10000]);
                     s.append(b"", 10000, &[b'b'; 20000]);
-                    s = s.remount();
+                    let s = s.remount();
                     s.blob(b"").delete().unwrap();
                     s.remount();
                 }
 
                 #[test]
                 fn log_overflow_load_zone_allocation_map() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     // 42 * 512 = 21504
                     // hence, assuming no "commit blob", this forcibly allocates a second log zone
                     s.append(b"", 0, &[0; 30000]);
-                    s = s.remount();
+                    let s = s.remount();
                     // this breaks after a remount if *zone allocation* tracking isn't done properly
                     s.append(b"", 30000, &[0; 20000]);
                 }
 
                 #[test]
                 fn append_blob_truncated_tail() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0]);
                     s.append(b"", 1, &[0]);
@@ -1579,10 +1579,10 @@ mod test {
 
                 #[test]
                 fn load_replay_add_zone_to_blob() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[1; 30000]);
-                    s = s.remount();
+                    let s = s.remount();
                     s.append(b"", 30000, &[2; 20000]);
                     let buf = &mut [0];
                     let n = s.blob(b"").read_at(48000, buf).unwrap();
@@ -1597,22 +1597,22 @@ mod test {
                     const A: usize = 1;
                     const B: usize = 511;
                     const C: usize = 1;
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(b"").unwrap().unwrap();
                     s.append(b"", 0, &[0; A]);
-                    s = s.remount();
+                    let s = s.remount();
                     s.append(b"", A as _, &[0; B]);
-                    s = s.remount();
+                    let s = s.remount();
                     s.append(b"", (A + B) as _, &[0; C]);
-                    s = s.remount();
+                    let s = s.remount();
                     s.assert_len(b"", (A + B + C) as u64);
                 }
 
                 #[test]
                 fn delete_blob_release_zones() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     for _ in 0..100 {
-                        let mut b = s.create_blob(b"").unwrap().unwrap();
+                        let b = s.create_blob(b"").unwrap().unwrap();
                         b.append(&[0; 1024]).unwrap();
                         b.delete().unwrap();
                     }
@@ -1620,10 +1620,10 @@ mod test {
 
                 #[test]
                 fn rename_blob_release_zones() {
-                    let mut s = Test::new();
+                    let s = Test::new();
                     s.create_blob(&[0]).unwrap().unwrap();
                     for x in 0..100 {
-                        let mut b = s.create_blob(&[x + 1]).unwrap().unwrap();
+                        let b = s.create_blob(&[x + 1]).unwrap().unwrap();
                         b.append(&[0; 1024]).unwrap();
                         s.blob(&[x]).rename(&[x + 1]).unwrap();
                     }
