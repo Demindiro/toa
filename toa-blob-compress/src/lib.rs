@@ -334,7 +334,7 @@ where
 
     fn append_page(&self, page: &[u8]) -> io::Result<()> {
         assert_eq!(page.len(), self.blobs.page_size as usize, "not page sized");
-        let buf = &mut vec![0; max_compress_size(page.len())];
+        let buf = &mut Vec::new();
         let (algorithm, clen) = self.blobs.compress(page, buf);
         let clen32 = u32::try_from(clen).expect("compressed len exceeds page size");
         let offset = self.pages()?.append(&buf[..clen])?;
@@ -377,9 +377,10 @@ where
 }
 
 impl BlobSet {
-    fn compress(&self, page: &[u8], out: &mut [u8]) -> (Compression, usize) {
-        assert!(out.len() >= page.len());
-        let f = |out: &mut [_]| {
+    fn compress(&self, page: &[u8], out: &mut Vec<u8>) -> (Compression, usize) {
+        let f = |out: &mut Vec<u8>| {
+            let n = page.len().max(out.len());
+            out.resize(n, 0);
             out[..page.len()].copy_from_slice(page);
             (Compression::None, page.len())
         };
@@ -398,13 +399,19 @@ impl BlobSet {
     }
 
     #[cfg(feature = "lz4")]
-    fn compress_lz4(&self, page: &[u8], out: &mut [u8]) -> usize {
+    fn compress_lz4(&self, page: &[u8], out: &mut Vec<u8>) -> usize {
+        let n = out
+            .len()
+            .max(lz4_flex::block::get_maximum_output_size(page.len()));
+        out.resize(n, 0);
         lz4_flex::compress_into(page, out).unwrap()
     }
 
     #[cfg(feature = "zstd")]
-    fn compress_zstd(&self, page: &[u8], out: &mut [u8]) -> usize {
-        zstd_safe::compress(out, page, self.compression_level.into()).unwrap()
+    fn compress_zstd(&self, page: &[u8], out: &mut Vec<u8>) -> usize {
+        let n = out.len().max(zstd_safe::compress_bound(page.len()));
+        out.resize(n, 0);
+        zstd_safe::compress(&mut **out, page, self.compression_level.into()).unwrap()
     }
 }
 
@@ -471,15 +478,6 @@ fn decompress(compression: Compression, out: &mut [u8], data: &[u8]) {
             assert_eq!(n, out.len());
         }
     }
-}
-
-fn max_compress_size(input_len: usize) -> usize {
-    let n = input_len;
-    #[cfg(feature = "lz4")]
-    let n = n.max(lz4_flex::block::get_maximum_output_size(input_len));
-    #[cfg(feature = "zstd")]
-    let n = n.max(zstd_safe::compress_bound(input_len));
-    n
 }
 
 #[cfg(test)]
