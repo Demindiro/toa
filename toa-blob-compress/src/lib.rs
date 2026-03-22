@@ -195,6 +195,14 @@ impl<'a, U> BlobRef<&'a BlobStoreCompress<toa_blob::BlobStore<U>>>
 where
     U: toa_blob::ZoneDev,
 {
+    pub fn clear(&self) -> io::Result<()> {
+        // TODO transactions!
+        self.table()?.clear()?;
+        self.pages()?.clear()?;
+        self.tail()?.clear()?;
+        Ok(())
+    }
+
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let clen = self.compressed_len()?;
         if let Some(x) = offset.checked_sub(clen) {
@@ -254,6 +262,14 @@ where
         assert!(tail.len()? < page_size, "tail is full");
 
         Ok(offset)
+    }
+
+    pub fn append_many(&self, data: &[&[u8]]) -> io::Result<u64> {
+        let n = self.len()?;
+        for x in data {
+            self.append(x)?;
+        }
+        Ok(n)
     }
 
     pub fn delete(self) -> io::Result<()> {
@@ -318,7 +334,7 @@ where
 
     fn append_page(&self, page: &[u8]) -> io::Result<()> {
         assert_eq!(page.len(), self.blobs.page_size as usize, "not page sized");
-        let buf = &mut vec![0; page.len()];
+        let buf = &mut vec![0; max_compress_size(page.len())];
         let (algorithm, clen) = self.blobs.compress(page, buf);
         let clen32 = u32::try_from(clen).expect("compressed len exceeds page size");
         let offset = self.pages()?.append(&buf[..clen])?;
@@ -370,9 +386,10 @@ impl BlobSet {
         match self.compression {
             Compression::None => f(out),
             #[cfg(feature = "lz4")]
-            c @ Compression::Lz4 => {
-                lz4_flex::compress_into(page, out).map_or_else(|_| f(out), |n| (c, n))
-            }
+            c @ Compression::Lz4 => match lz4_flex::compress_into(page, out) {
+                Ok(n) if n < page.len() => (c, n),
+                Ok(_) | Err(_) => f(out),
+            },
         }
     }
 }
@@ -435,6 +452,10 @@ fn decompress(compression: Compression, out: &mut [u8], data: &[u8]) {
             assert_eq!(n, out.len());
         }
     }
+}
+
+fn max_compress_size(input_len: usize) -> usize {
+    lz4_flex::block::get_maximum_output_size(input_len)
 }
 
 #[cfg(test)]

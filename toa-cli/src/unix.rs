@@ -9,7 +9,7 @@ use std::{
 use toa::Hash;
 use toa_unix::{DirItem, DirItemType};
 
-type Dir<'a> = toa_unix::Dir<'a, toa_blob::BlobStore<toa_blob::FileBlocks>>;
+type Dir<'a> = toa_unix::Dir<'a, super::Store>;
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
 where

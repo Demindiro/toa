@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+blob-compress = []
+lz4 = ["blob-compress", "toa-blob-compress/lz4"]
 
 [dependencies]
 toa-blob = { path = "../toa-blob" }
+toa-blob-compress = { path = "../toa-blob-compress" }
 toa-hash = { path = "../toa-hash" }
 arrayvec = { version = "0.7.6", default-features = false }
 bytemuck = "1.25.0"

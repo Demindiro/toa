@@ -98,6 +98,14 @@ pub struct Refs<'a, T>(Typed<'a, T>)
 where
     T: BlobStore;
 
+#[cfg(feature = "blob-compress")]
+pub struct BlobStoreCompress<T> {
+    pub store: toa_blob_compress::BlobStoreCompress<T>,
+    pub page_size: toa_blob_compress::PageSize,
+    pub compression: toa_blob_compress::Compression,
+    pub compression_level: u8,
+}
+
 type Map = BTreeMap<Hash, FileRef>;
 
 struct Typed<'a, T>
@@ -894,14 +902,14 @@ where
     type BlobHandle = toa_blob::BlobId;
 
     fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = std::rc::Rc::from(name.as_bytes());
+        let name = name.as_bytes();
         match self.create_blob(&name)? {
             Ok(x) => Ok(x.id()),
             Err(_) => Ok(self.find(&name)?.unwrap().id()),
         }
     }
     fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = std::rc::Rc::from(name.as_bytes());
+        let name = name.as_bytes();
         if let Some(x) = self.find(&name)? {
             x.delete()?;
         }
@@ -926,6 +934,67 @@ where
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         self.size_on_disk()
+    }
+}
+
+#[cfg(feature = "blob-compress")]
+impl<U> BlobStore for BlobStoreCompress<toa_blob::BlobStore<U>>
+where
+    U: toa_blob::ZoneDev,
+{
+    type BlobHandle = toa_blob_compress::BlobSet;
+
+    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = name.as_bytes();
+        match self.store.create_blob(
+            name,
+            self.page_size,
+            self.compression,
+            self.compression_level,
+        )? {
+            Ok(x) => Ok(x.blob_set()),
+            Err(_) => Ok(self.store.find(&name)?.unwrap().blob_set()),
+        }
+    }
+    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = name.as_bytes();
+        match self.store.find(name)? {
+            Some(x) => {
+                x.clear()?;
+                Ok(x.blob_set())
+            }
+            None => Ok(self
+                .store
+                .create_blob(
+                    name,
+                    self.page_size,
+                    self.compression,
+                    self.compression_level,
+                )?
+                .unwrap()
+                .blob_set()),
+        }
+    }
+    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+        self.store
+            .find(old_name.as_bytes())?
+            .unwrap()
+            .rename(new_name.as_bytes())
+    }
+    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        self.store.blob(*blob)?.append(data)
+    }
+    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        self.store.blob(*blob)?.append_many(data)
+    }
+    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.store.blob(*blob)?.read_at(offset, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.store.flush()
+    }
+    fn size_on_disk(&self) -> io::Result<u64> {
+        self.store.size_on_disk()
     }
 }
 
