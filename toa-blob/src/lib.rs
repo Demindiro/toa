@@ -287,10 +287,12 @@ where
         let mut data = BlobStoreData::new(generation, nr_zones);
         data.log_zone_head = zone_dev.block_size().into();
 
-        Ok(Self {
+        let s = Self {
             zone_dev,
             data: data.into(),
-        })
+        };
+        s.log_terminate(&mut s.data.borrow_mut())?;
+        Ok(s)
     }
 
     pub fn load(zone_dev: U) -> io::Result<Self> {
@@ -643,6 +645,25 @@ where
 
         data.log_len += block_size as u64;
 
+        self.log_terminate(data)
+    }
+
+    fn log_terminate(&self, s: &mut BlobStoreData) -> io::Result<()> {
+        let block_size = usize::from(self.zone_dev.block_size());
+        let f = |x: ZoneId| self.zone_dev.zone_write_head(x.0);
+        match [f(s.log_zone_a)?, f(s.log_zone_b)?] {
+            [Some(_), Some(_)] => {}
+            [None, None] => {
+                // write a block of all zeros to ensure we can detect end-of-log.
+                s.log.resize(block_size, 0);
+                self.zone_dev
+                    .append(s.log_zone_a.0, s.log_zone_head, &s.log)?;
+                self.zone_dev
+                    .append(s.log_zone_b.0, s.log_zone_head, &s.log)?;
+                s.log.clear();
+            }
+            [_, _] => unreachable!("ZoneDev cannot mix zoned and unzoned regions"),
+        }
         Ok(())
     }
 }
@@ -1627,6 +1648,22 @@ mod test {
                         b.append(&[0; 1024]).unwrap();
                         s.blob(&[x]).rename(&[x + 1]).unwrap();
                     }
+                }
+
+                #[test]
+                fn dirty_dev() {
+                    let s = Test::new().store;
+                    s.create_blob(b"").unwrap().unwrap();
+                    // reset
+                    let dev = s.unmount().map_err(|e| e.1).unwrap();
+                    let s = BlobStore::init(dev).unwrap();
+                    // remount
+                    let dev = s.unmount().map_err(|e| e.1).unwrap();
+                    let s = BlobStore::load(dev).unwrap();
+                    // will fail if stale log entries are used
+                    s.create_blob(b"")
+                        .unwrap()
+                        .expect("stale log should not be used");
                 }
             }
         };

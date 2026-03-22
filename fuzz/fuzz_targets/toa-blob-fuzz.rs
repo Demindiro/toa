@@ -1,7 +1,7 @@
 #![no_main]
 
 use std::collections::hash_map::{Entry, HashMap};
-use toa_blob::BlobId;
+use toa_blob::{BlobId, BlobStore, BlockShift, MemBlocks, MemZones, ZoneDev};
 
 #[derive(Debug, arbitrary::Arbitrary)]
 enum DevType {
@@ -11,7 +11,13 @@ enum DevType {
 
 #[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
+    /// Flush, unmount then load the store again.
     Remount,
+    /// Unmount and reinitialize the store, starting from scratch.
+    ///
+    /// This is to detect instances where stale data of the previous
+    /// store is incorrectly interpreted as belonging to the current store.
+    Reset,
     CreateBlob {
         name: &'a [u8],
     },
@@ -46,13 +52,11 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
 
     // allocate plenty of zones as we don't care to test out-of-storage conditions here
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
-    let dev: Box<dyn toa_blob::ZoneDev> = match dev {
-        DevType::MemZones512 => Box::new(toa_blob::MemZones::<512>::new(200, 100)),
-        DevType::MemBlocks512 => {
-            Box::new(toa_blob::MemBlocks::new(toa_blob::BlockShift::N9, 200, 100))
-        }
+    let dev: Box<dyn ZoneDev> = match dev {
+        DevType::MemZones512 => Box::new(MemZones::<512>::new(200, 100)),
+        DevType::MemBlocks512 => Box::new(MemBlocks::new(BlockShift::N9, 200, 100)),
     };
-    let mut store = toa_blob::BlobStore::init(dev).unwrap();
+    let mut store = BlobStore::init(dev).unwrap();
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobId)>>::with_capacity(1 << 16);
@@ -70,6 +74,12 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                     let expect_id = blobs[usize::from(slot)].as_ref().unwrap().2;
                     assert_eq!(blob.id(), expect_id, "blob ID not stable");
                 }
+            }
+            Op::Reset => {
+                let dev = store.unmount().map_err(|e| e.1).unwrap();
+                store = BlobStore::init(dev).unwrap();
+                blob_map.clear();
+                blobs.clear();
             }
             Op::CreateBlob { name } => {
                 let name = &name[..name.len().min(255)];
