@@ -1,31 +1,13 @@
 #![no_main]
 
 use std::collections::hash_map::{Entry, HashMap};
-use toa_blob::{BlobId, BlobStore, BlockShift, MemBlocks, MemZones, ZoneDev};
-
-#[derive(Debug, arbitrary::Arbitrary)]
-enum DevType {
-    MemZones512,
-    MemBlocks512,
-}
+use toa_blob::{BlobStore, MemBlocks};
+use toa_blob_compress::{BlobSet, BlobStoreCompress, Compression, PageSize};
 
 #[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
-    /// Flush, unmount then load the store again.
-    Remount,
-    /// Unmount and reinitialize the store, starting from scratch.
-    ///
-    /// This is to detect instances where stale data of the previous
-    /// store is incorrectly interpreted as belonging to the current store.
-    Reset,
     CreateBlob {
         name: &'a [u8],
-    },
-    CreateUnzonedBlob {
-        name: &'a [u8],
-    },
-    ClearBlob {
-        slot: u16,
     },
     DeleteBlob {
         slot: u16,
@@ -53,71 +35,38 @@ enum Op<'a> {
     },
 }
 
-libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
-    let (dev, ops) = dev_ops;
+libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
+    let (compress, ops) = compr_ops;
+    let compress = if compress {
+        Compression::Lz4
+    } else {
+        Compression::None
+    };
 
     // allocate plenty of zones as we don't care to test out-of-storage conditions here
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
-    let dev: Box<dyn ZoneDev> = match dev {
-        DevType::MemZones512 => Box::new(MemZones::<512>::new(200, 100)),
-        DevType::MemBlocks512 => Box::new(MemBlocks::new(BlockShift::N9, 200, 100)),
-    };
-    let mut store = BlobStore::init(dev).unwrap();
+    let dev = MemBlocks::new(toa_blob::BlockShift::N9, 200, 100);
+    let store = BlobStore::init(dev).unwrap();
+    let store = BlobStoreCompress::new(store);
 
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
-    let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobId)>>::with_capacity(1 << 16);
+    let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobSet)>>::with_capacity(1 << 16);
 
     for op in ops {
         match op {
-            Op::Remount => {
-                let dev = store.unmount().map_err(|e| e.1).unwrap();
-                store = toa_blob::BlobStore::load(dev).unwrap();
-                for (name, &slot) in blob_map.iter() {
-                    let blob = store
-                        .find(name)
-                        .unwrap()
-                        .unwrap_or_else(|| panic!("store is missing blob {name:?}"));
-                    let expect_id = blobs[usize::from(slot)].as_ref().unwrap().2;
-                    assert_eq!(blob.id(), expect_id, "blob ID not stable");
-                }
-            }
-            Op::Reset => {
-                let dev = store.unmount().map_err(|e| e.1).unwrap();
-                store = BlobStore::init(dev).unwrap();
-                blob_map.clear();
-                blobs.clear();
-            }
             Op::CreateBlob { name } => {
-                let name = &name[..name.len().min(255)];
-                match (blob_map.entry(name), store.create_blob(name).unwrap()) {
-                    (Entry::Vacant(e), Ok(x)) => {
-                        e.insert(blobs.len() as u16);
-                        blobs.push(Some((name, Vec::new(), x.id())));
-                    }
-                    (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
-                    _ => panic!("blob map corrupt"),
-                }
-            }
-            Op::CreateUnzonedBlob { name } => {
-                let name = &name[..name.len().min(255)];
+                let name = &name[..name.len().min(200)];
                 match (
                     blob_map.entry(name),
-                    store.create_unzoned_blob(name).unwrap(),
+                    store.create_blob(name, PageSize::K4, compress, 0).unwrap(),
                 ) {
                     (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
-                        blobs.push(Some((name, Vec::new(), x.id())));
+                        blobs.push(Some((name, Vec::new(), x.blob_set())));
                     }
                     (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
                     _ => panic!("blob map corrupt"),
                 }
-            }
-            Op::ClearBlob { slot } => {
-                let Some(Some((_, x, id))) = blobs.get_mut(usize::from(slot)) else {
-                    continue;
-                };
-                store.blob(*id).unwrap().clear().unwrap();
-                x.clear();
             }
             Op::DeleteBlob { slot } => {
                 let Some((name, _, id)) = blobs.get_mut(usize::from(slot)).and_then(|x| x.take())

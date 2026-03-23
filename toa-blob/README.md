@@ -73,12 +73,16 @@ the end of the log.
 
 ##### 1. Create blob
 
-The lowest free blob ID is assigned to to the new blob.
+The blob ID must not conflict with any other active blob IDs.
+
+The blob ID should be as low as possible.
 
 | type  | name                  |
 |:----- |:--------------------- |
 | u8    | (type)                |
 | u8    | name length           |
+| u16   | (pad)                 |
+| u32   | blob ID               |
 | u8[]  | name                  |
 | u8[]  | (pad)                 |
 
@@ -156,6 +160,35 @@ be smaller however.
 | u24   | (pad)                  |
 | u32   | blob ID                |
 | u64   | length                 |
+
+##### 8. Create unzoned blob
+
+Much like a regular blob, except this one will never allocate zones.
+Instead, all data is kept in the tail.
+Only recommended for blobs that will remain significantly shorter than
+a single zone.
+
+Blob ID allocation follows same recommendations as "1. Create blob".
+
+| type  | name                  |
+|:----- |:--------------------- |
+| u8    | (type)                |
+| u8    | name length           |
+| u16   | (pad)                 |
+| u32   | blob ID               |
+| u8[]  | name                  |
+| u8[]  | (pad)                 |
+
+##### 9. Clear blob
+
+Erase all data from a blob, releasing associated zones and clearing the tail.
+Unlike delete, the blob and its ID is kept.
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u24   | (pad)                  |
+| u32   | blob ID                |
 
 ##### 84. Header
 
