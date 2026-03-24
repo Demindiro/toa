@@ -12,14 +12,14 @@ use toa_hash::Domain;
 const CHUNK_SIZE: u128 = 1 << 13;
 
 pub trait BlobStore {
-    type BlobHandle;
+    type BlobHandle: Copy;
 
     fn open(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()>;
-    fn append(&self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
-    fn append_many(&self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
+    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
+    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
+    fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
     fn flush(&self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
 }
@@ -27,7 +27,7 @@ pub trait BlobStore {
 trait BlobStoreExt: BlobStore {
     fn read_at_exact(
         &self,
-        blob: &Self::BlobHandle,
+        blob: Self::BlobHandle,
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<bool> {
@@ -39,7 +39,7 @@ trait BlobStoreExt: BlobStore {
     }
     fn read_at_exact_or_none(
         &self,
-        blob: &Self::BlobHandle,
+        blob: Self::BlobHandle,
         offset: u64,
         buf: &mut [u8],
     ) -> io::Result<bool> {
@@ -52,7 +52,7 @@ trait BlobStoreExt: BlobStore {
     }
     fn read_at_array<const N: usize>(
         &self,
-        blob: &Self::BlobHandle,
+        blob: Self::BlobHandle,
         offset: u64,
     ) -> io::Result<[u8; N]> {
         let mut buf = [0; N];
@@ -143,7 +143,7 @@ where
         let refs = BlobsTyped::open_at(&mut store, "refs", &mut map, Domain::Refs)?;
         let mut root = [0; 32];
         let x = store.open("root.bin")?;
-        let n = store.read_at(&x, 0, &mut root)?;
+        let n = store.read_at(x, 0, &mut root)?;
         if n != 32 && n != 0 {
             todo!()
         };
@@ -205,8 +205,8 @@ where
     }
 
     pub fn set_root(&mut self, new_root: Hash) -> io::Result<()> {
-        let mut x = self.store.open_clear("new_root.bin")?;
-        self.store.append(&mut x, new_root.as_bytes())?;
+        let x = self.store.open_clear("new_root.bin")?;
+        self.store.append(x, new_root.as_bytes())?;
         self.store.rename("new_root.bin", "root.bin")?;
         self.root = new_root;
         Ok(())
@@ -221,7 +221,10 @@ where
     }
 }
 
-impl<T> BlobsTyped<T> {
+impl<T> BlobsTyped<T>
+where
+    T: Copy,
+{
     fn open_at<S>(store: &mut S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self>
     where
         S: BlobStore<BlobHandle = T>,
@@ -338,7 +341,7 @@ impl<T> BlobsTyped<T> {
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let offt = store.append(&mut self.chunks_full, bytes)?;
+        let offt = store.append(self.chunks_full, bytes)?;
         Ok(FileRef::new_chunk_full(domain, offt))
     }
 
@@ -356,8 +359,7 @@ impl<T> BlobsTyped<T> {
             .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
         let pad = (!(2 + bytes.len()) + 1) & 7;
         let pad = &[0; 8][..pad];
-        let offt =
-            store.append_many(&mut self.chunks_partial, &[&hdr.to_le_bytes(), bytes, pad])?;
+        let offt = store.append_many(self.chunks_partial, &[&hdr.to_le_bytes(), bytes, pad])?;
         Ok(FileRef::new_chunk_partial(domain, offt))
     }
 
@@ -376,7 +378,7 @@ impl<T> BlobsTyped<T> {
         buf[00..32].copy_from_slice(x.as_bytes());
         buf[32..64].copy_from_slice(y.as_bytes());
         buf[64..].copy_from_slice(&len.to_le_bytes());
-        let offt = store.append(&mut self.pairs, &buf)?;
+        let offt = store.append(self.pairs, &buf)?;
         Ok(FileRef::new_pair(domain, offt))
     }
 
@@ -396,7 +398,7 @@ impl<T> BlobsTyped<T> {
     {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.chunks_full, offt, &mut buf)? {
+        while store.read_at_exact_or_none(self.chunks_full, offt, &mut buf)? {
             let key = toa_hash::hash_chunk(domain, &buf);
             map.insert(key, FileRef::new_chunk_full(domain, offt));
             offt += buf.len() as u64;
@@ -411,10 +413,10 @@ impl<T> BlobsTyped<T> {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.chunks_partial, offt, len)? {
+        while store.read_at_exact_or_none(self.chunks_partial, offt, len)? {
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
-            store.read_at_exact(&self.chunks_partial, offt + 2, buf)?;
+            store.read_at_exact(self.chunks_partial, offt + 2, buf)?;
             let key = toa_hash::hash_chunk(domain, buf);
             map.insert(key, FileRef::new_chunk_partial(domain, offt));
             offt += align8(2 + u64::from(len));
@@ -428,7 +430,7 @@ impl<T> BlobsTyped<T> {
     {
         let mut buf = [0; 80];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
+        while store.read_at_exact_or_none(self.pairs, offt, &mut buf)? {
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
             map.insert(key, FileRef::new_pair(domain, offt));
@@ -634,12 +636,12 @@ where
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
             FileRef::TY_CHUNK_PARTIAL => self
                 .store
-                .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+                .read_at_array(self.blobs.chunks_partial, self.location.offset())
                 .map(u16::from_le_bytes)
                 .map(u128::from),
             FileRef::TY_PAIR => self
                 .store
-                .read_at_array(&self.blobs.pairs, self.location.offset() + 64)
+                .read_at_array(self.blobs.pairs, self.location.offset() + 64)
                 .map(u128::from_le_bytes),
             _ => unreachable!("invalid FileRef type"),
         }
@@ -652,7 +654,7 @@ where
 
         let ([x, y], len) = self
             .store
-            .read_at_array(&self.blobs.pairs, self.location.offset())
+            .read_at_array(self.blobs.pairs, self.location.offset())
             .map(bytes_to_pair)
             .map_err(ReadError::Io)?;
 
@@ -677,7 +679,7 @@ where
         }
         self.store
             .read_at(
-                &self.blobs.chunks_full,
+                self.blobs.chunks_full,
                 self.location.offset() + offset as u64,
                 buf,
             )
@@ -692,7 +694,7 @@ where
     ) -> Result<usize, ReadError<io::Error>> {
         let nb = self
             .store
-            .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+            .read_at_array(self.blobs.chunks_partial, self.location.offset())
             .map(u16::from_le_bytes)
             .map_err(ReadError::Io)?;
         let n = align8(nb) >> 3;
@@ -703,7 +705,7 @@ where
         }
         self.store
             .read_at(
-                &self.blobs.chunks_partial,
+                self.blobs.chunks_partial,
                 self.location.offset() + 2 + offset as u64,
                 buf,
             )
@@ -719,7 +721,7 @@ where
             FileRef::TY_CHUNK_PARTIAL => {
                 let nb = self
                     .store
-                    .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+                    .read_at_array(self.blobs.chunks_partial, self.location.offset())
                     .map(u16::from_le_bytes)
                     .unwrap();
                 println!("{}", nb);
@@ -727,7 +729,7 @@ where
             FileRef::TY_PAIR => {
                 let ([x, y], len) = self
                     .store
-                    .read_at_array(&self.blobs.pairs, self.location.offset())
+                    .read_at_array(self.blobs.pairs, self.location.offset())
                     .map(bytes_to_pair)
                     .unwrap();
                 println!("{}", len);
@@ -814,14 +816,14 @@ where
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.blob(*blob)?.append(data)
+    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        self.blob(blob)?.append(data)
     }
-    fn append_many(&self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.blob(*blob)?.append_many(data)
+    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        self.blob(blob)?.append_many(data)
     }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.blob(*blob)?.read_at(offset, buf)
+    fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.blob(blob)?.read_at(offset, buf)
     }
     fn flush(&self) -> io::Result<()> {
         (&*self).flush()
@@ -875,14 +877,14 @@ where
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.store.blob(*blob)?.append(data)
+    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        self.store.blob(blob)?.append(data)
     }
-    fn append_many(&self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.store.blob(*blob)?.append_many(data)
+    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        self.store.blob(blob)?.append_many(data)
     }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.store.blob(*blob)?.read_at(offset, buf)
+    fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.store.blob(blob)?.read_at(offset, buf)
     }
     fn flush(&self) -> io::Result<()> {
         self.store.flush()
@@ -907,13 +909,13 @@ where
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         (**self).rename(old_name, new_name)
     }
-    fn append(&self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         (**self).append(blob, data)
     }
-    fn append_many(&self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         (**self).append_many(blob, data)
     }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+    fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read_at(blob, offset, buf)
     }
     fn flush(&self) -> io::Result<()> {
