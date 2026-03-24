@@ -4,6 +4,7 @@ pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
 use std::{
+    cell::{Cell, RefCell},
     collections::btree_map::{BTreeMap, Entry},
     io,
 };
@@ -71,7 +72,7 @@ where
     data: BlobsTyped<T::BlobHandle>,
     refs: BlobsTyped<T::BlobHandle>,
     map: Map,
-    root: Hash,
+    root: Cell<Hash>,
 }
 
 pub enum Object<'a, T>
@@ -97,7 +98,7 @@ pub struct BlobStoreCompress<T> {
     pub compression_level: u8,
 }
 
-type Map = BTreeMap<Hash, FileRef>;
+type Map = RefCell<BTreeMap<Hash, FileRef>>;
 
 struct Typed<'a, T>
 where
@@ -137,10 +138,10 @@ impl<T> Toa<T>
 where
     T: BlobStore,
 {
-    pub fn open(mut store: T) -> io::Result<Self> {
+    pub fn open(store: T) -> io::Result<Self> {
         let mut map = Map::default();
-        let data = BlobsTyped::open_at(&mut store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::open_at(&mut store, "refs", &mut map, Domain::Refs)?;
+        let data = BlobsTyped::open_at(&store, "data", &mut map, Domain::Data)?;
+        let refs = BlobsTyped::open_at(&store, "refs", &mut map, Domain::Refs)?;
         let mut root = [0; 32];
         let x = store.open("root.bin")?;
         let n = store.read_at(x, 0, &mut root)?;
@@ -152,13 +153,13 @@ where
             store,
             data,
             refs,
-            map,
-            root,
+            map: map.into(),
+            root: root.into(),
         })
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
-        Ok(self.map.contains_key(key))
+        Ok(self.map.borrow().contains_key(key))
     }
 
     pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, T>>> {
@@ -176,23 +177,22 @@ where
     where
         F: FnMut(Hash) -> bool,
     {
-        self.map.keys().for_each(|x| {
+        self.map.borrow().keys().for_each(|x| {
             f(*x);
         });
         Ok(())
     }
 
-    pub fn add_data(&mut self, data: &[u8]) -> io::Result<Hash> {
-        self.data
-            .add(&mut self.store, Domain::Data, data, &mut self.map)
+    pub fn add_data(&self, data: &[u8]) -> io::Result<Hash> {
+        self.data.add(&self.store, Domain::Data, data, &self.map)
     }
 
-    pub fn add_refs(&mut self, refs: &[Hash]) -> io::Result<Hash> {
+    pub fn add_refs(&self, refs: &[Hash]) -> io::Result<Hash> {
         self.refs.add(
-            &mut self.store,
+            &self.store,
             Domain::Refs,
             bytemuck::cast_slice(refs),
-            &mut self.map,
+            &self.map,
         )
     }
 
@@ -201,14 +201,14 @@ where
     }
 
     pub fn root(&self) -> Hash {
-        self.root
+        self.root.get()
     }
 
-    pub fn set_root(&mut self, new_root: Hash) -> io::Result<()> {
+    pub fn set_root(&self, new_root: Hash) -> io::Result<()> {
         let x = self.store.open_clear("new_root.bin")?;
         self.store.append(x, new_root.as_bytes())?;
         self.store.rename("new_root.bin", "root.bin")?;
-        self.root = new_root;
+        self.root.set(new_root);
         Ok(())
     }
 
@@ -216,7 +216,7 @@ where
         (self.store, Ok(()))
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&self) -> io::Result<()> {
         self.store.flush()
     }
 }
@@ -225,12 +225,12 @@ impl<T> BlobsTyped<T>
 where
     T: Copy,
 {
-    fn open_at<S>(store: &mut S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self>
+    fn open_at<S>(store: &S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self>
     where
         S: BlobStore<BlobHandle = T>,
     {
         let f = |name: &str| store.open(&format!("{dir}_{name}"));
-        let mut s = Self {
+        let s = Self {
             chunks_full: f("chunks_full.bin")?,
             chunks_partial: f("chunks_partial.bin")?,
             pairs: f("pairs.bin")?,
@@ -239,13 +239,7 @@ where
         Ok(s)
     }
 
-    fn add<S>(
-        &mut self,
-        store: &mut S,
-        domain: Domain,
-        data: &[u8],
-        map: &mut Map,
-    ) -> io::Result<Hash>
+    fn add<S>(&self, store: &S, domain: Domain, data: &[u8], map: &Map) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -285,43 +279,37 @@ where
         }
     }
 
-    fn add_chunk<S>(
-        &mut self,
-        store: &mut S,
-        domain: Domain,
-        chunk: &[u8],
-        map: &mut Map,
-    ) -> io::Result<Hash>
+    fn add_chunk<S>(&self, store: &S, domain: Domain, chunk: &[u8], map: &Map) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
     {
         let key = toa_hash::hash_chunk(domain, chunk);
-        if let Entry::Vacant(e) = map.entry(key) {
+        if let Entry::Vacant(e) = map.borrow_mut().entry(key) {
             e.insert(self.store_chunk(store, domain, chunk)?);
         }
         Ok(key)
     }
 
     fn add_pair<S>(
-        &mut self,
-        store: &mut S,
+        &self,
+        store: &S,
         domain: Domain,
         x: &Hash,
         y: &Hash,
         len: u128,
-        map: &mut Map,
+        map: &Map,
     ) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
     {
         let key = toa_hash::hash_pair(*x, *y, len);
-        if let Entry::Vacant(e) = map.entry(key) {
+        if let Entry::Vacant(e) = map.borrow_mut().entry(key) {
             e.insert(self.store_pair(store, domain, x, y, len)?);
         }
         Ok(key)
     }
 
-    fn store_chunk<S>(&mut self, store: &mut S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
+    fn store_chunk<S>(&self, store: &S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -333,8 +321,8 @@ where
     }
 
     fn store_chunk_full<S>(
-        &mut self,
-        store: &mut S,
+        &self,
+        store: &S,
         domain: Domain,
         bytes: &[u8; CHUNK_SIZE as usize],
     ) -> io::Result<FileRef>
@@ -345,12 +333,7 @@ where
         Ok(FileRef::new_chunk_full(domain, offt))
     }
 
-    fn store_chunk_partial<S>(
-        &mut self,
-        store: &mut S,
-        domain: Domain,
-        bytes: &[u8],
-    ) -> io::Result<FileRef>
+    fn store_chunk_partial<S>(&self, store: &S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -364,8 +347,8 @@ where
     }
 
     fn store_pair<S>(
-        &mut self,
-        store: &mut S,
+        &self,
+        store: &S,
         domain: Domain,
         x: &Hash,
         y: &Hash,
@@ -382,7 +365,7 @@ where
         Ok(FileRef::new_pair(domain, offt))
     }
 
-    fn load<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    fn load<S>(&self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -392,7 +375,7 @@ where
         Ok(())
     }
 
-    fn load_chunks_full<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    fn load_chunks_full<S>(&self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -400,13 +383,14 @@ where
         let mut offt = 0;
         while store.read_at_exact_or_none(self.chunks_full, offt, &mut buf)? {
             let key = toa_hash::hash_chunk(domain, &buf);
-            map.insert(key, FileRef::new_chunk_full(domain, offt));
+            map.borrow_mut()
+                .insert(key, FileRef::new_chunk_full(domain, offt));
             offt += buf.len() as u64;
         }
         Ok(())
     }
 
-    fn load_chunks_partial<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    fn load_chunks_partial<S>(&self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -418,13 +402,14 @@ where
             let buf = &mut buf[..usize::from(len)];
             store.read_at_exact(self.chunks_partial, offt + 2, buf)?;
             let key = toa_hash::hash_chunk(domain, buf);
-            map.insert(key, FileRef::new_chunk_partial(domain, offt));
+            map.borrow_mut()
+                .insert(key, FileRef::new_chunk_partial(domain, offt));
             offt += align8(2 + u64::from(len));
         }
         Ok(())
     }
 
-    fn load_pairs<S>(&mut self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
+    fn load_pairs<S>(&self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -433,7 +418,8 @@ where
         while store.read_at_exact_or_none(self.pairs, offt, &mut buf)? {
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
-            map.insert(key, FileRef::new_pair(domain, offt));
+            map.borrow_mut()
+                .insert(key, FileRef::new_pair(domain, offt));
             offt += buf.len() as u64;
         }
         Ok(())
@@ -497,7 +483,7 @@ where
     T: BlobStore,
 {
     fn new(toa: &'a Toa<T>, key: Hash) -> Option<Self> {
-        let location = *toa.map.get(&key)?;
+        let location = *toa.map.borrow_mut().get(&key)?;
         let blobs = match location.ty().1 {
             Domain::Data => &toa.data,
             Domain::Refs => &toa.refs,
@@ -512,7 +498,7 @@ where
 
     fn with_key(&self, key: Hash) -> Option<Self> {
         Some(Self {
-            location: *self.map.get(&key)?,
+            location: *self.map.borrow_mut().get(&key)?,
             ..*self
         })
     }
@@ -952,7 +938,7 @@ mod test {
     }
 
     impl Test {
-        fn add(&mut self, data: &[u8]) -> Hash {
+        fn add(&self, data: &[u8]) -> Hash {
             let key = self.toa.add_data(data).expect("add_data failed");
             assert_eq!(key, toa_hash::hash(Domain::Data, data));
             key
@@ -990,21 +976,21 @@ mod test {
 
     #[test]
     fn insert_one_empty() {
-        let mut s = init();
+        let s = init();
         let key = s.add(b"");
         s.assert_eq(&key, &[]);
     }
 
     #[test]
     fn insert_one() {
-        let mut s = init();
+        let s = init();
         let key = s.add(b"Hello, world!");
         s.assert_eq(&key, b"Hello, world!");
     }
 
     #[test]
     fn insert_two() {
-        let mut s = init();
+        let s = init();
         let a = s.add(b"Hello, world!");
         let b = s.add(b"Greetings!");
         s.assert_eq(&a, b"Hello, world!");
@@ -1013,7 +999,7 @@ mod test {
 
     #[test]
     fn insert_many() {
-        let mut s = init();
+        let s = init();
         let f = |x| format!("A number {x}").into_bytes();
         let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
         keys.iter()
@@ -1023,7 +1009,7 @@ mod test {
 
     #[test]
     fn insert_one_3div2_chunks() {
-        let mut s = init();
+        let s = init();
         let v = (0..CHUNK_SIZE as usize * 3 / 2)
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
@@ -1033,7 +1019,7 @@ mod test {
 
     #[test]
     fn insert_one_2_chunks() {
-        let mut s = init();
+        let s = init();
         let v = (0..CHUNK_SIZE as usize * 2)
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
@@ -1043,7 +1029,7 @@ mod test {
 
     #[test]
     fn insert_one_large() {
-        let mut s = init();
+        let s = init();
         let v = (0..1 << 19)
             .fold(String::new(), |s, _| s + "x")
             .into_bytes();
@@ -1053,7 +1039,7 @@ mod test {
 
     #[test]
     fn insert_one_large_zeros() {
-        let mut s = init();
+        let s = init();
         let v = vec![0; 1 << 20];
         let k = s.add(&v);
         s.assert_eq(&k, &v);
@@ -1062,7 +1048,7 @@ mod test {
     #[test]
     fn insert_many_large() {
         let n = 1 << 21;
-        let mut s = init();
+        let s = init();
         let keys = (0..=255)
             .map(|x| (x, s.add(&vec![x; n])))
             .collect::<Vec<_>>();
@@ -1071,7 +1057,7 @@ mod test {
 
     #[test]
     fn reload() {
-        let mut s = init();
+        let s = init();
         let a = s.add(b"Hello, world!");
         let b = s.add(b"Hello, planet!");
         let c = s.add(&vec![b'x'; 1 << 15]);
@@ -1094,7 +1080,7 @@ mod test {
         #[test]
         fn read_partial_chunk_truncated() {
             let bytes = vec![0; 11 * 8192 + 1];
-            let mut s = init();
+            let s = init();
             let k = s.add(&bytes);
             s.assert_eq(&k, &bytes);
         }
