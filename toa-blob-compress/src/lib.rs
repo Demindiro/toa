@@ -226,7 +226,27 @@ where
         Ok(og_len - (buf.len() - n))
     }
 
-    pub fn append(&self, data: &[u8]) -> io::Result<u64> {
+    pub fn append<F>(&self, data: &[u8], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        (f)(self.append_sync(data))
+    }
+
+    pub fn append_many<F>(&self, data: &[&[u8]], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        (f)((|| {
+            let n = self.len()?;
+            for x in data {
+                self.append_sync(x)?;
+            }
+            Ok(n)
+        })())
+    }
+
+    fn append_sync(&self, data: &[u8]) -> io::Result<u64> {
         // split into (start, middle, end)
         // add tail with start to fill a page
         // add middle directly as pages
@@ -262,14 +282,6 @@ where
         assert!(tail.len()? < page_size, "tail is full");
 
         Ok(offset)
-    }
-
-    pub fn append_many(&self, data: &[&[u8]]) -> io::Result<u64> {
-        let n = self.len()?;
-        for x in data {
-            self.append(x)?;
-        }
-        Ok(n)
     }
 
     pub fn delete(self) -> io::Result<()> {
@@ -498,10 +510,12 @@ mod test {
             .unwrap();
         let x = &[1; 20000];
         let y = &mut [0; 20000];
-        b.append(x).unwrap();
-        let n = b.read_at(1000, y).unwrap();
-        assert_eq!(x.len() - 1000, n);
-        assert_eq!(&x[..x.len() - 1000], &y[..n]);
+        b.append(x, |res| {
+            res.unwrap();
+            let n = b.read_at(1000, y).unwrap();
+            assert_eq!(x.len() - 1000, n);
+            assert_eq!(&x[..x.len() - 1000], &y[..n]);
+        });
     }
 
     #[test]
@@ -513,9 +527,11 @@ mod test {
             .unwrap();
         let x = &[1; 20000];
         let y = &mut [0; 100];
-        b.append(x).unwrap();
-        let n = b.read_at(100, y).unwrap();
-        assert_eq!(n, 100);
-        assert_eq!(&x[..n], &y[..n]);
+        b.append(x, |res| {
+            res.unwrap();
+            let n = b.read_at(100, y).unwrap();
+            assert_eq!(n, 100);
+            assert_eq!(&x[..n], &y[..n]);
+        })
     }
 }

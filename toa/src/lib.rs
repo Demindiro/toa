@@ -18,8 +18,12 @@ pub trait BlobStore {
     fn open(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()>;
-    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
-    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
+    fn append<F>(&self, blob: Self::BlobHandle, data: &[u8], f: F)
+    where
+        F: FnOnce(io::Result<u64>);
+    fn append_many<F>(&self, blob: Self::BlobHandle, data: &[&[u8]], f: F)
+    where
+        F: FnOnce(io::Result<u64>);
     fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
     fn flush(&self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
@@ -183,16 +187,23 @@ where
         Ok(())
     }
 
-    pub fn add_data(&self, data: &[u8]) -> io::Result<Hash> {
-        self.data.add(&self.store, Domain::Data, data, &self.map)
+    pub fn add_data<F>(&self, data: &[u8], f: F)
+    where
+        F: FnOnce(io::Result<Hash>),
+    {
+        self.data.add(&self.store, Domain::Data, data, &self.map, f)
     }
 
-    pub fn add_refs(&self, refs: &[Hash]) -> io::Result<Hash> {
+    pub fn add_refs<F>(&self, refs: &[Hash], f: F)
+    where
+        F: FnOnce(io::Result<Hash>),
+    {
         self.refs.add(
             &self.store,
             Domain::Refs,
             bytemuck::cast_slice(refs),
             &self.map,
+            f,
         )
     }
 
@@ -204,12 +215,21 @@ where
         self.root.get()
     }
 
-    pub fn set_root(&self, new_root: Hash) -> io::Result<()> {
-        let x = self.store.open_clear("new_root.bin")?;
-        self.store.append(x, new_root.as_bytes())?;
-        self.store.rename("new_root.bin", "root.bin")?;
-        self.root.set(new_root);
-        Ok(())
+    pub fn set_root<F>(&self, new_root: Hash, f: F)
+    where
+        F: FnOnce(io::Result<()>),
+    {
+        match self.store.open_clear("new_root.bin") {
+            Ok(x) => self.store.append(x, new_root.as_bytes(), |offt| {
+                (f)((|| {
+                    offt?;
+                    self.store.rename("new_root.bin", "root.bin")?;
+                    self.root.set(new_root);
+                    Ok(())
+                })())
+            }),
+            Err(e) => (f)(Err(e)),
+        }
     }
 
     pub fn unmount(self) -> (T, io::Result<()>) {
@@ -239,58 +259,74 @@ where
         Ok(s)
     }
 
-    fn add<S>(&self, store: &S, domain: Domain, data: &[u8], map: &Map) -> io::Result<Hash>
+    fn add<S, F>(&self, store: &S, domain: Domain, data: &[u8], map: &Map, f: F)
     where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<Hash>),
     {
         if data.len() <= CHUNK_SIZE as usize {
-            self.add_chunk(store, domain, data, map)
+            self.add_chunk(store, domain, data, map, f)
         } else {
-            let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
-            let split_n = ((data.len() - 1) & 0x1fff) + 1;
-            let (perfect, tail) = data.split_at(data.len() - split_n);
-            for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
-                let mut y = self.add_chunk(store, domain, y, map)?;
-                let mut len = 1 << 16;
-                while stack.len() >= (i + 1).count_ones() as usize {
-                    let x = stack.pop().expect("at least one element");
-                    len <<= 1;
-                    y = self.add_pair(store, domain, &x, &y, len, map)?;
+            (f)((|| {
+                let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
+                let split_n = ((data.len() - 1) & 0x1fff) + 1;
+                let (perfect, tail) = data.split_at(data.len() - split_n);
+                // FIXME do callbacks properly
+                for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
+                    let mut n_y = None;
+                    self.add_chunk(store, domain, y, map, |t| n_y = Some(t));
+                    let mut y = n_y.unwrap()?; // FIXME
+                    let mut len = 1 << 16;
+                    while stack.len() >= (i + 1).count_ones() as usize {
+                        let x = stack.pop().expect("at least one element");
+                        len <<= 1;
+                        let mut n_y = None;
+                        self.add_pair(store, domain, &x, &y, len, map, |t| n_y = Some(t));
+                        y = n_y.unwrap()?; // FIXME
+                    }
+                    stack.push(y);
                 }
-                stack.push(y);
-            }
 
-            let len = (data.len() as u128) << 3;
-            let mut y = self.add_chunk(store, domain, tail, map)?;
-            let mut mask = 0xffff;
-            let top_i = len.wrapping_sub(1); // special-case for len=0
-            while let Some(x) = stack.pop() {
-                debug_assert_eq!(
-                    (top_i & !mask).count_ones(),
-                    1 + stack.len() as u32,
-                    "length bits should correlate to stack depth"
-                );
-                let bits = (top_i & !mask).trailing_zeros();
-                mask = (1 << (bits + 1)) - 1;
-                let pair_len = (top_i & mask) + 1;
-                y = self.add_pair(store, domain, &x, &y, pair_len, map)?;
-            }
-            Ok(y)
+                let len = (data.len() as u128) << 3;
+                let mut n_y = None;
+                self.add_chunk(store, domain, tail, map, |t| n_y = Some(t));
+                let mut y = n_y.unwrap()?; // FIXME
+                let mut mask = 0xffff;
+                let top_i = len.wrapping_sub(1); // special-case for len=0
+                while let Some(x) = stack.pop() {
+                    debug_assert_eq!(
+                        (top_i & !mask).count_ones(),
+                        1 + stack.len() as u32,
+                        "length bits should correlate to stack depth"
+                    );
+                    let bits = (top_i & !mask).trailing_zeros();
+                    mask = (1 << (bits + 1)) - 1;
+                    let pair_len = (top_i & mask) + 1;
+                    let mut n_y = None;
+                    self.add_pair(store, domain, &x, &y, pair_len, map, |t| n_y = Some(t));
+                    y = n_y.unwrap()?;
+                }
+                Ok(y)
+            })())
         }
     }
 
-    fn add_chunk<S>(&self, store: &S, domain: Domain, chunk: &[u8], map: &Map) -> io::Result<Hash>
+    fn add_chunk<S, F>(&self, store: &S, domain: Domain, chunk: &[u8], map: &Map, f: F)
     where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<Hash>),
     {
         let key = toa_hash::hash_chunk(domain, chunk);
         if let Entry::Vacant(e) = map.borrow_mut().entry(key) {
-            e.insert(self.store_chunk(store, domain, chunk)?);
+            self.store_chunk(store, domain, chunk, |fileref| {
+                (f)(fileref.map(|x| e.insert(x)).map(|_| key))
+            })
+        } else {
+            (f)(Ok(key))
         }
-        Ok(key)
     }
 
-    fn add_pair<S>(
+    fn add_pair<S, F>(
         &self,
         store: &S,
         domain: Domain,
@@ -298,71 +334,77 @@ where
         y: &Hash,
         len: u128,
         map: &Map,
-    ) -> io::Result<Hash>
-    where
+        f: F,
+    ) where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<Hash>),
     {
         let key = toa_hash::hash_pair(*x, *y, len);
         if let Entry::Vacant(e) = map.borrow_mut().entry(key) {
-            e.insert(self.store_pair(store, domain, x, y, len)?);
+            self.store_pair(store, domain, x, y, len, |fileref| {
+                (f)(fileref.map(|x| e.insert(x)).map(|_| key))
+            })
+        } else {
+            (f)(Ok(key))
         }
-        Ok(key)
     }
 
-    fn store_chunk<S>(&self, store: &S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
+    fn store_chunk<S, F>(&self, store: &S, domain: Domain, bytes: &[u8], f: F)
     where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<FileRef>),
     {
         if let Ok(bytes) = bytes.try_into() {
-            self.store_chunk_full(store, domain, bytes)
+            self.store_chunk_full(store, domain, bytes, f)
         } else {
-            self.store_chunk_partial(store, domain, bytes)
+            self.store_chunk_partial(store, domain, bytes, f)
         }
     }
 
-    fn store_chunk_full<S>(
+    fn store_chunk_full<S, F>(
         &self,
         store: &S,
         domain: Domain,
         bytes: &[u8; CHUNK_SIZE as usize],
-    ) -> io::Result<FileRef>
-    where
+        f: F,
+    ) where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<FileRef>),
     {
-        let offt = store.append(self.chunks_full, bytes)?;
-        Ok(FileRef::new_chunk_full(domain, offt))
+        store.append(self.chunks_full, bytes, |offt| {
+            (f)(offt.map(|offt| FileRef::new_chunk_full(domain, offt)))
+        })
     }
 
-    fn store_chunk_partial<S>(&self, store: &S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
+    fn store_chunk_partial<S, F>(&self, store: &S, domain: Domain, bytes: &[u8], f: F)
     where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<FileRef>),
     {
         assert!(bytes.len() < CHUNK_SIZE as usize, "partial chunk too large");
         let hdr = u16::try_from(bytes.len() << 3)
             .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
         let pad = (!(2 + bytes.len()) + 1) & 7;
         let pad = &[0; 8][..pad];
-        let offt = store.append_many(self.chunks_partial, &[&hdr.to_le_bytes(), bytes, pad])?;
-        Ok(FileRef::new_chunk_partial(domain, offt))
+        store.append_many(
+            self.chunks_partial,
+            &[&hdr.to_le_bytes(), bytes, pad],
+            |offt| (f)(offt.map(|offt| FileRef::new_chunk_partial(domain, offt))),
+        )
     }
 
-    fn store_pair<S>(
-        &self,
-        store: &S,
-        domain: Domain,
-        x: &Hash,
-        y: &Hash,
-        len: u128,
-    ) -> io::Result<FileRef>
+    fn store_pair<S, F>(&self, store: &S, domain: Domain, x: &Hash, y: &Hash, len: u128, f: F)
     where
         S: BlobStore<BlobHandle = T>,
+        F: FnOnce(io::Result<FileRef>),
     {
         let mut buf = [0; 80];
         buf[00..32].copy_from_slice(x.as_bytes());
         buf[32..64].copy_from_slice(y.as_bytes());
         buf[64..].copy_from_slice(&len.to_le_bytes());
-        let offt = store.append(self.pairs, &buf)?;
-        Ok(FileRef::new_pair(domain, offt))
+        store.append(self.pairs, &buf, |offt| {
+            (f)(offt.map(|offt| FileRef::new_pair(domain, offt)))
+        })
     }
 
     fn load<S>(&self, store: &S, map: &mut Map, domain: Domain) -> io::Result<()>
@@ -802,11 +844,17 @@ where
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.blob(blob)?.append(data)
+    fn append<F>(&self, blob: Self::BlobHandle, data: &[u8], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        (f)(self.blob(blob).and_then(|x| x.append(data)))
     }
-    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.blob(blob)?.append_many(data)
+    fn append_many<F>(&self, blob: Self::BlobHandle, data: &[&[u8]], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        (f)(self.blob(blob).and_then(|x| x.append_many(data)))
     }
     fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.blob(blob)?.read_at(offset, buf)
@@ -863,11 +911,23 @@ where
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.store.blob(blob)?.append(data)
+    fn append<F>(&self, blob: Self::BlobHandle, data: &[u8], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        match self.store.blob(blob) {
+            Err(e) => (f)(Err(e)),
+            Ok(x) => x.append(data, f),
+        }
     }
-    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.store.blob(blob)?.append_many(data)
+    fn append_many<F>(&self, blob: Self::BlobHandle, data: &[&[u8]], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        match self.store.blob(blob) {
+            Err(e) => (f)(Err(e)),
+            Ok(x) => x.append_many(data, f),
+        }
     }
     fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.store.blob(blob)?.read_at(offset, buf)
@@ -895,11 +955,17 @@ where
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         (**self).rename(old_name, new_name)
     }
-    fn append(&self, blob: Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        (**self).append(blob, data)
+    fn append<F>(&self, blob: Self::BlobHandle, data: &[u8], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        (**self).append(blob, data, f)
     }
-    fn append_many(&self, blob: Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        (**self).append_many(blob, data)
+    fn append_many<F>(&self, blob: Self::BlobHandle, data: &[&[u8]], f: F)
+    where
+        F: FnOnce(io::Result<u64>),
+    {
+        (**self).append_many(blob, data, f)
     }
     fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read_at(blob, offset, buf)
@@ -939,7 +1005,9 @@ mod test {
 
     impl Test {
         fn add(&self, data: &[u8]) -> Hash {
-            let key = self.toa.add_data(data).expect("add_data failed");
+            let mut key = None;
+            self.toa.add_data(data, |x| key = Some(x));
+            let key = key.expect("closure not called").expect("add_data failed");
             assert_eq!(key, toa_hash::hash(Domain::Data, data));
             key
         }

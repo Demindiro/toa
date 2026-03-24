@@ -120,19 +120,20 @@ impl Toa {
             data.push(kl);
             data.extend(k.bytes());
         }
-        let root = self
-            .add_data(&data)
-            .map_err(|e| format!("failed to create meta data: {e:?}"))?;
+        let mut root = Ok(Default::default()); // FIXME
+        self.add_data(&data, |t| root = t);
+        let root = root.map_err(|e| format!("failed to create meta data: {e:?}"))?;
 
         let mut hashes = Vec::with_capacity(1 + self.meta.len());
         hashes.push(root);
         hashes.extend(self.meta.values());
-        let root = self
-            .add_refs(&hashes)
-            .map_err(|e| format!("failed to create meta refs: {e:?}"))?;
+        let mut root = Ok(Default::default()); // FIXME
+        self.add_refs(&hashes, |t| root = t);
+        let root = root.map_err(|e| format!("failed to create meta refs: {e:?}"))?;
 
-        self.set_root(root)
-            .map_err(|e| format!("failed to set root: {e:?}"))?;
+        let mut res = Ok(()); // FIXME
+        self.set_root(root, |t| res = t);
+        res.map_err(|e| format!("failed to set root: {e:?}"))?;
         Ok(())
     }
 
@@ -235,8 +236,10 @@ fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
             .map_err(|e| format!("failed to memory-map {path:?}: {e}"))?
     };
     stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
-    let key = dev
-        .add_data(&data)
+    let mut n_key = None; // FIXME
+    dev.add_data(&data, |t| n_key = Some(t));
+    let key = n_key
+        .unwrap()
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
 }

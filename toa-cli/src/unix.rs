@@ -231,16 +231,16 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     for e in &entries {
         data.extend(e.name.as_bytes());
     }
-    let data = dev
-        .add_data(&data)
-        .map_err(|e| format!("failed to add : {e:?}"))?;
+    let mut n_data = Ok(Default::default()); // FIXME
+    dev.add_data(&data, |t| n_data = t);
+    let data = n_data.map_err(|e| format!("failed to add : {e:?}"))?;
 
     let mut refs = Vec::with_capacity(1 + entries.len());
     refs.push(data);
     refs.extend(entries.iter().map(|e| e.key));
-    let refs = dev
-        .add_refs(&refs)
-        .map_err(|e| format!("failed to add : {e:?}"))?;
+    let mut n_refs = Ok(Default::default()); // FIXME
+    dev.add_refs(&refs, |t| n_refs = t);
+    let refs = n_refs.map_err(|e| format!("failed to add : {e:?}"))?;
     Ok(refs)
 }
 
@@ -249,9 +249,9 @@ fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
         fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
     let link = path_to_utf8(&link)?;
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
-    let key = dev
-        .add_data(link.as_bytes())
-        .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
+    let mut key = Ok(Default::default()); // FIXME
+    dev.add_data(link.as_bytes(), |t| key = t);
+    let key = key.map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
 }
 
