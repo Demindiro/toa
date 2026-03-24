@@ -5,9 +5,7 @@ pub use toa_hash::Hash;
 use ::core::{fmt, mem, ops};
 use std::{
     collections::btree_map::{BTreeMap, Entry},
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
+    io,
 };
 use toa_hash::Domain;
 
@@ -65,8 +63,6 @@ trait BlobStoreExt: BlobStore {
 
 impl<T: BlobStore> BlobStoreExt for T {}
 
-pub struct Dir(pub Box<Path>);
-
 pub struct Toa<T>
 where
     T: BlobStore,
@@ -76,11 +72,6 @@ where
     refs: BlobsTyped<T::BlobHandle>,
     map: Map,
     root: Hash,
-}
-
-pub struct Blob<T> {
-    file: T,
-    len: u64,
 }
 
 pub enum Object<'a, T>
@@ -227,40 +218,6 @@ where
 
     pub fn flush(&mut self) -> io::Result<()> {
         self.store.flush()
-    }
-}
-
-impl Blob<fs::File> {
-    /// # Returns
-    ///
-    /// Offset.
-    fn append(&mut self, data: &[u8]) -> io::Result<u64> {
-        self.append_many(&[data])
-    }
-
-    /// # Returns
-    ///
-    /// Offset.
-    fn append_many(&mut self, data: &[&[u8]]) -> io::Result<u64> {
-        let o = self.len;
-        for x in data {
-            self.file.write_all(x)?;
-            self.len += x.len() as u64;
-        }
-        Ok(o)
-    }
-
-    fn read_at(&self, offset: u64, mut buf: &mut [u8]) -> io::Result<usize> {
-        let mut o = offset;
-        while !buf.is_empty() {
-            let m = std::os::unix::fs::FileExt::read_at(&self.file, buf, o)?;
-            if m == 0 {
-                break;
-            }
-            o += m as u64;
-            buf = &mut buf[m..];
-        }
-        Ok((o - offset) as usize)
     }
 }
 
@@ -829,69 +786,6 @@ impl fmt::Debug for FileRef {
             _ => "??",
         };
         write!(f, "{ty}:{domain:?}:{}", self.offset())
-    }
-}
-
-impl Dir {
-    pub fn new(path: PathBuf) -> io::Result<Self> {
-        fs::create_dir_all(&path)?;
-        Ok(Self(path.into()))
-    }
-
-    fn open_or_create(
-        &self,
-        name: &str,
-        create: bool,
-        truncate: bool,
-    ) -> io::Result<Blob<fs::File>> {
-        let mut path = PathBuf::from(&*self.0);
-        path.push(name);
-        fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .append(true)
-            .create(create)
-            .truncate(truncate)
-            .open(path)
-            .and_then(|file| {
-                let len = file.metadata()?.len();
-                Ok(Blob { file, len })
-            })
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        let mut x = PathBuf::from(&*self.0);
-        x.push(name);
-        x
-    }
-}
-
-impl BlobStore for Dir {
-    type BlobHandle = Blob<fs::File>;
-
-    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        self.open_or_create(name, true, false)
-    }
-    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        self.open_or_create(name, true, true)
-    }
-    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
-        fs::rename(self.path(old_name), self.path(new_name))
-    }
-    fn append(&self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        blob.append(data)
-    }
-    fn append_many(&self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        blob.append_many(data)
-    }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        blob.read_at(offset, buf)
-    }
-    fn flush(&self) -> io::Result<()> {
-        todo!("Dir flush")
-    }
-    fn size_on_disk(&self) -> io::Result<u64> {
-        std::fs::read_dir(&self.0)?.try_fold(0, |s, x| Ok(s + x?.metadata()?.len()))
     }
 }
 
