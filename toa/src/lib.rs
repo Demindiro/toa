@@ -4,11 +4,15 @@ pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
 use std::{
-    cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
     io,
 };
 use toa_hash::Domain;
+//#[cfg(feature = "dataflow")]
+use std::{
+    sync::{RwLock, mpsc},
+    thread::Scope,
+};
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
@@ -71,8 +75,12 @@ where
     store: T,
     data: BlobsTyped<T::BlobHandle>,
     refs: BlobsTyped<T::BlobHandle>,
+    // TODO benchmark RwLock vs Mutex
+    // RwLock should be better for read-heavy workloads,
+    // but sometimes we have on write-heavy workloads (e.g. toa-cli unix new)
+    // Ideally, we'd have a generic "Lock" trait.
     // TODO terrible name. I'd call it data but...
-    toa: RefCell<ToaData>,
+    toa: NonPoisonRwLock<ToaData>,
 }
 
 pub enum Object<'a, T>
@@ -102,6 +110,31 @@ pub struct BlobStoreCompress<T> {
 struct ToaData {
     map: BTreeMap<Hash, FileRef>,
     root: Hash,
+}
+
+pub struct Sink<U> {
+    channel: mpsc::SyncSender<(Command, U)>,
+}
+
+pub struct Source<U> {
+    channel: mpsc::Receiver<(io::Result<ResultValue>, U)>,
+}
+
+pub struct SourceIntoIter<U> {
+    source: Source<U>,
+}
+
+pub enum ResultValue {
+    Key(Hash),
+}
+
+// TODO to use generics or trait objects?
+// Using generics will probably end up unmaintainable,
+// even if it should theoretically be a bit more efficient.
+// The question is: how much is the overhead?
+enum Command {
+    AddData(Box<dyn AsRef<[u8]> + Send>),
+    AddRefs(Box<dyn AsRef<[Hash]> + Send>),
 }
 
 struct Typed<'a, T>
@@ -137,6 +170,15 @@ pub enum ReadExactError<S> {
     Io(S),
 }
 
+#[derive(Debug)]
+pub struct SinkDropped<U>(pub U);
+
+#[derive(Debug)]
+pub struct SourceDropped;
+
+// can't be arsed with this poison nonsense
+struct NonPoisonRwLock<T>(RwLock<T>);
+
 impl<T> Toa<T>
 where
     T: BlobStore,
@@ -161,7 +203,7 @@ where
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
-        Ok(self.toa.borrow().map.contains_key(key))
+        Ok(self.toa.read().map.contains_key(key))
     }
 
     pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, T>>> {
@@ -179,7 +221,7 @@ where
     where
         F: FnMut(Hash) -> bool,
     {
-        self.toa.borrow().map.keys().for_each(|x| {
+        self.toa.read().map.keys().for_each(|x| {
             f(*x);
         });
         Ok(())
@@ -187,7 +229,7 @@ where
 
     pub fn add_data(&self, data: &[u8]) -> io::Result<Hash> {
         self.data
-            .add(&self.store, Domain::Data, data, &mut self.toa.borrow_mut())
+            .add(&self.store, Domain::Data, data, &mut self.toa.write())
     }
 
     pub fn add_refs(&self, refs: &[Hash]) -> io::Result<Hash> {
@@ -195,7 +237,7 @@ where
             &self.store,
             Domain::Refs,
             bytemuck::cast_slice(refs),
-            &mut self.toa.borrow_mut(),
+            &mut self.toa.write(),
         )
     }
 
@@ -204,14 +246,14 @@ where
     }
 
     pub fn root(&self) -> Hash {
-        self.toa.borrow().root
+        self.toa.read().root
     }
 
     pub fn set_root(&self, new_root: Hash) -> io::Result<()> {
         let x = self.store.open_clear("new_root.bin")?;
         self.store.append(x, new_root.as_bytes())?;
         self.store.rename("new_root.bin", "root.bin")?;
-        self.toa.borrow_mut().root = new_root;
+        self.toa.write().root = new_root;
         Ok(())
     }
 
@@ -221,6 +263,90 @@ where
 
     pub fn flush(&self) -> io::Result<()> {
         self.store.flush()
+    }
+}
+
+impl<T> Toa<T>
+where
+    T: BlobStore + Sync,
+    T::BlobHandle: Send + Sync,
+{
+    pub fn dataflow<'env, U, R, F>(
+        &'env self,
+        command_queue_depth: usize,
+        result_queue_depth: usize,
+        f: F,
+    ) -> R
+    where
+        F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>, Sink<U>, Source<U>) -> R,
+        U: Send + 'env,
+    {
+        std::thread::scope(|scope| {
+            let (cmd_tx, cmd_rx) = mpsc::sync_channel(command_queue_depth);
+            let (res_tx, res_rx) = mpsc::sync_channel(result_queue_depth);
+            let cmd = Sink { channel: cmd_tx };
+            let res = Source { channel: res_rx };
+
+            scope.spawn(move || {
+                for (cmd, user_data) in cmd_rx {
+                    let res = match cmd {
+                        Command::AddData(x) => self.add_data((*x).as_ref()).map(ResultValue::Key),
+                        Command::AddRefs(x) => self.add_refs((*x).as_ref()).map(ResultValue::Key),
+                    };
+                    // TODO to panic or not to?
+                    res_tx
+                        .send((res, user_data))
+                        .expect("cmd_rx prematurely dropped")
+                }
+            });
+
+            (f)(scope, cmd, res)
+        })
+    }
+}
+
+impl<U> Sink<U> {
+    pub fn add_data<T>(&mut self, user_data: U, data: T) -> Result<(), SinkDropped<U>>
+    where
+        T: AsRef<[u8]> + Send + 'static,
+    {
+        self.send(user_data, Command::AddData(Box::new(data)))
+    }
+
+    pub fn add_refs<T>(&mut self, user_data: U, refs: T) -> Result<(), SinkDropped<U>>
+    where
+        T: AsRef<[Hash]> + Send + 'static,
+    {
+        self.send(user_data, Command::AddRefs(Box::new(refs)))
+    }
+
+    fn send(&mut self, user_data: U, cmd: Command) -> Result<(), SinkDropped<U>> {
+        self.channel
+            .send((cmd, user_data))
+            .map_err(|x| SinkDropped(x.0.1))
+    }
+}
+
+impl<U> Source<U> {
+    fn recv(&mut self) -> Result<(io::Result<ResultValue>, U), SourceDropped> {
+        self.channel.recv().map_err(|_| SourceDropped)
+    }
+}
+
+impl<U> IntoIterator for Source<U> {
+    type IntoIter = SourceIntoIter<U>;
+    type Item = (io::Result<ResultValue>, U);
+
+    fn into_iter(self) -> Self::IntoIter {
+        SourceIntoIter { source: self }
+    }
+}
+
+impl<U> Iterator for SourceIntoIter<U> {
+    type Item = (io::Result<ResultValue>, U);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.source.recv().ok()
     }
 }
 
@@ -490,7 +616,7 @@ where
     T: BlobStore,
 {
     fn new(toa: &'a Toa<T>, key: Hash) -> Option<Self> {
-        let location = *toa.toa.borrow().map.get(&key)?;
+        let location = *toa.toa.read().map.get(&key)?;
         let blobs = match location.ty().1 {
             Domain::Data => &toa.data,
             Domain::Refs => &toa.refs,
@@ -504,7 +630,7 @@ where
 
     fn with_key(&self, key: Hash) -> Option<Self> {
         Some(Self {
-            location: *self.toa.toa.borrow().map.get(&key)?,
+            location: *self.toa.toa.read().map.get(&key)?,
             ..*self
         })
     }
@@ -776,6 +902,22 @@ impl<T: BlobStore> Clone for Typed<'_, T> {
 impl<T: BlobStore> Copy for Data<'_, T> {}
 impl<T: BlobStore> Copy for Refs<'_, T> {}
 impl<T: BlobStore> Copy for Typed<'_, T> {}
+
+impl<T> NonPoisonRwLock<T> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.0.read().unwrap()
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.0.write().unwrap()
+    }
+}
+
+impl<T> From<T> for NonPoisonRwLock<T> {
+    fn from(x: T) -> Self {
+        Self(x.into())
+    }
+}
 
 impl fmt::Debug for FileRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1096,6 +1238,33 @@ mod test {
             let s = init();
             let k = s.add(&bytes);
             s.assert_eq(&k, &bytes);
+        }
+    }
+
+    mod dataflow {
+        use crate::{ResultValue, Toa};
+        use toa_blob::{BlobStore, BlockShift, MemBlocks};
+
+        #[test]
+        fn insert_many_large() {
+            let n = 1 << 21;
+            let store = BlobStore::init(MemBlocks::new(BlockShift::N9, 1 << 20, 20)).unwrap();
+            let toa = Toa::open(store).expect("toa init failed");
+            toa.dataflow::<u8, _, _>(10, 10, |scope, mut cmd, res| {
+                scope.spawn(move || {
+                    for x in 0..=255 {
+                        cmd.add_data(x, vec![x; n]).unwrap();
+                    }
+                });
+                scope.spawn(move || {
+                    for (res, x) in res {
+                        let res = res.unwrap();
+                        let ResultValue::Key(k) = res; // else { panic!("expected key") };
+                        let expect = toa_hash::hash(toa_hash::Domain::Data, &vec![x; n]);
+                        assert_eq!(k, expect);
+                    }
+                });
+            })
         }
     }
 }

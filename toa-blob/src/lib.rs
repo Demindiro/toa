@@ -1,11 +1,15 @@
+extern crate alloc;
+
 use bitvec::boxed::BitBox;
 #[cfg(feature = "std")]
 use std::os::unix::fs::FileExt;
+//#[cfg(feature = "std")]
+use alloc::sync::Arc;
+use std::sync::RwLock;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
     fmt, io, ops,
-    rc::Rc,
 };
 
 mod log {
@@ -186,13 +190,14 @@ pub trait ZoneDev {
 
 pub struct BlobStore<U> {
     zone_dev: U,
-    data: RefCell<BlobStoreData>,
+    // TODO generic lock type
+    data: NonPoisonRwLock<BlobStoreData>,
 }
 
 struct BlobStoreData {
     generation: u64,
     blobs: BlobTable,
-    blob_map: BTreeMap<Rc<[u8]>, BlobId>,
+    blob_map: BTreeMap<Arc<[u8]>, BlobId>,
     log: Vec<u8>,
     log_zone_a: ZoneId,
     log_zone_b: ZoneId,
@@ -209,7 +214,7 @@ pub struct MemZones<const B: usize> {
 }
 
 pub struct MemBlocks {
-    blocks: RefCell<Box<[u8]>>,
+    blocks: NonPoisonRwLock<Box<[u8]>>,
     block_size: BlockShift,
     zone_blocks: u32,
 }
@@ -248,6 +253,9 @@ pub struct DuplicateBlob;
 #[derive(Debug)]
 pub struct OutOfZones;
 
+// can't be arsed with this poison nonsense
+struct NonPoisonRwLock<T>(RwLock<T>);
+
 /// # Note about zone data alignment
 ///
 /// Data is *not* aligned to block boundaries.
@@ -256,7 +264,7 @@ pub struct OutOfZones;
 /// To ensure blocks are written as a whole there is a second tail buffer,
 /// which is appended to until it is block-sized.
 struct Blob {
-    name: Rc<[u8]>,
+    name: Arc<[u8]>,
     /// `None` if this blob is unzoned.
     zones: Option<Vec<ZoneId>>,
     tail: Vec<u8>,
@@ -304,7 +312,7 @@ where
             zone_dev,
             data: data.into(),
         };
-        s.log_terminate(&mut s.data.borrow_mut())?;
+        s.log_terminate(&mut s.data.write())?;
         Ok(s)
     }
 
@@ -462,7 +470,7 @@ where
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        let s = &mut *self.data.borrow_mut();
+        let s = &mut *self.data.write();
         let blob_num = s.blobs.table.len() as u32;
         for id in (0..blob_num).map(BlobId) {
             if s.blobs.get(id).is_some() {
@@ -486,7 +494,7 @@ where
 
     pub fn find(&self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
         assert!(name.len() <= 255, "name too long");
-        match self.data.borrow().blob_map.get(name) {
+        match self.data.read().blob_map.get(name) {
             None => Ok(None),
             Some(id) => self.blob(*id).map(Some),
         }
@@ -512,7 +520,7 @@ where
         unzoned: bool,
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
         assert!(name.len() <= 255, "name too long");
-        let s = &mut *self.data.borrow_mut();
+        let s = &mut *self.data.write();
         match s.blob_map.entry(name.into()) {
             Entry::Occupied(_) => Ok(Err(DuplicateBlob)),
             Entry::Vacant(e) => {
@@ -525,7 +533,7 @@ where
     }
 
     pub fn size_on_disk(&self) -> io::Result<u64> {
-        let s = self.data.borrow();
+        let s = self.data.read();
         let mut n = s.log_len;
         for x in s.blobs.iter() {
             n += x.len;
@@ -899,7 +907,7 @@ where
     U: ZoneDev,
 {
     pub fn clear(&self) -> io::Result<()> {
-        let s = &mut *self.store.data.borrow_mut();
+        let s = &mut *self.store.data.write();
         if let Some(zones) = s.blobs[self.id].zones.as_mut() {
             self.store
                 .zone_dev
@@ -911,7 +919,7 @@ where
     }
 
     pub fn delete(self) -> io::Result<()> {
-        let s = &mut *self.store.data.borrow_mut();
+        let s = &mut *self.store.data.write();
         if let Some(zones) = s.blobs[self.id].zones.as_ref() {
             self.store
                 .zone_dev
@@ -926,7 +934,7 @@ where
     ///
     /// Start offset of written data.
     pub fn append(&self, data: &[u8]) -> io::Result<u64> {
-        let s = &mut *self.store.data.borrow_mut();
+        let s = &mut *self.store.data.write();
         let block_size = usize::from(self.store.zone_dev.block_size());
         let idx = self.id;
         let offt = s.blobs[idx].total_len();
@@ -974,13 +982,13 @@ where
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        let s = &mut *self.store.data.borrow_mut();
+        let s = &mut *self.store.data.write();
         self.store.flush_blob(s, self.id)?;
         Ok(())
     }
 
     pub fn rename(&self, new_name: &[u8]) -> io::Result<()> {
-        let s = &mut *self.store.data.borrow_mut();
+        let s = &mut *self.store.data.write();
         let (renamed, old) = s.replay_rename_blob(self.id, new_name);
         if renamed {
             if let Some(old) = old.and_then(|x| x.zones) {
@@ -992,7 +1000,7 @@ where
     }
 
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        let s = self.store.data.borrow();
+        let s = self.store.data.read();
         let block_size = usize::from(self.store.zone_dev.block_size());
         let idx = self.id;
 
@@ -1043,7 +1051,7 @@ where
     }
 
     pub fn len(&self) -> io::Result<u64> {
-        Ok(self.store.data.borrow().blobs[self.id].total_len())
+        Ok(self.store.data.read().blobs[self.id].total_len())
     }
 
     fn append_blocks(&self, s: &mut BlobStoreData, mut blocks: &[u8]) -> io::Result<()> {
@@ -1232,7 +1240,7 @@ impl MemBlocks {
 
     pub fn wrap(block_size: BlockShift, zone_blocks: u32, data: Box<[u8]>) -> Self {
         Self {
-            blocks: RefCell::new(data),
+            blocks: data.into(),
             block_size,
             zone_blocks,
         }
@@ -1254,7 +1262,7 @@ impl ZoneDev for MemBlocks {
     fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let start = self.translate(zone, offset);
         let end = start.checked_add(buf.len()).expect("offset out of bounds");
-        let x = self.blocks.borrow();
+        let x = self.blocks.read();
         buf.copy_from_slice(&x[start..end]);
         Ok(())
     }
@@ -1271,7 +1279,7 @@ impl ZoneDev for MemBlocks {
         );
         let start = self.translate(zone, offset);
         let end = start + data.len();
-        self.blocks.borrow_mut()[start..end].copy_from_slice(data);
+        self.blocks.write()[start..end].copy_from_slice(data);
         Ok(())
     }
 
@@ -1290,7 +1298,7 @@ impl ZoneDev for MemBlocks {
         self.zone_blocks
     }
     fn zone_count(&self) -> u32 {
-        (self.blocks.borrow().len() / self.zone_size() as usize) as u32
+        (self.blocks.read().len() / self.zone_size() as usize) as u32
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1445,8 +1453,24 @@ impl From<BlockShift> for usize {
     }
 }
 
+impl<T> NonPoisonRwLock<T> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.0.read().unwrap()
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.0.write().unwrap()
+    }
+}
+
+impl<T> From<T> for NonPoisonRwLock<T> {
+    fn from(x: T) -> Self {
+        Self(x.into())
+    }
+}
+
 impl Blob {
-    fn new(name: Rc<[u8]>, unzoned: bool) -> Self {
+    fn new(name: Arc<[u8]>, unzoned: bool) -> Self {
         Self {
             name,
             zones: (!unzoned).then(Vec::new),
@@ -1805,7 +1829,7 @@ mod test {
             .unmount()
             .map_err(|e| e.1)
             .unwrap();
-        let x = s.blocks.borrow()[..Header::SIZE].try_into().unwrap();
+        let x = s.blocks.read()[..Header::SIZE].try_into().unwrap();
         let x = super::snoop_header(x).unwrap();
         assert_eq!(x.block_size, 512);
         assert_eq!(x.zone_blocks, 42);
