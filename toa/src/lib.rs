@@ -68,6 +68,10 @@ trait BlobStoreExt: BlobStore {
 
 impl<T: BlobStore> BlobStoreExt for T {}
 
+trait AsBytes {
+    fn as_bytes(&self) -> &[u8];
+}
+
 pub struct Toa<T>
 where
     T: BlobStore,
@@ -135,8 +139,8 @@ pub enum ResultValue {
 // The question is: how much is the overhead?
 enum Command {
     Passthrough,
-    AddData(Box<dyn AsRef<[u8]> + Send>),
-    AddRefs(Box<dyn AsRef<[Hash]> + Send>),
+    AddData(Box<dyn AsBytes + Send>),
+    AddRefs(Box<dyn AsBytes + Send>),
 }
 
 struct Typed<'a, T>
@@ -285,18 +289,50 @@ where
         let (res_tx, res_rx) = mpsc::sync_channel(queue_depth);
         let cmd = Sink { channel: cmd_tx };
         let res = Source { channel: res_rx };
+        let res_tx2 = res_tx.clone();
 
+        let (data_tx, data_rx) = self
+            .data
+            .dataflow::<U, _>(scope, queue_depth, self, Domain::Data);
+        let (refs_tx, refs_rx) = self
+            .refs
+            .dataflow::<U, _>(scope, queue_depth, self, Domain::Refs);
+
+        // commands
         scope.spawn(move || {
             for (cmd, user_data) in cmd_rx {
-                let res = match cmd {
-                    Command::Passthrough => Ok(ResultValue::None),
-                    Command::AddData(x) => self.add_data((*x).as_ref()).map(ResultValue::Key),
-                    Command::AddRefs(x) => self.add_refs((*x).as_ref()).map(ResultValue::Key),
+                match cmd {
+                    Command::Passthrough => res_tx2
+                        .send((Ok(ResultValue::None), user_data))
+                        .expect("cmd_rx prematurely dropped"),
+                    Command::AddData(x) => data_tx
+                        .send((x, user_data))
+                        .unwrap_or_else(|_| unreachable!()),
+                    Command::AddRefs(x) => refs_tx
+                        .send((x, user_data))
+                        .unwrap_or_else(|_| unreachable!()),
                 };
-                // TODO to panic or not to?
+            }
+        });
+
+        // results (data)
+        let res_tx2 = res_tx.clone();
+        scope.spawn(move || {
+            for (res, user_data) in data_rx {
+                let res = res.map(ResultValue::Key);
+                res_tx2
+                    .send((res, user_data))
+                    .unwrap_or_else(|_| unreachable!());
+            }
+        });
+
+        // results (refs)
+        scope.spawn(move || {
+            for (res, user_data) in refs_rx {
+                let res = res.map(ResultValue::Key);
                 res_tx
                     .send((res, user_data))
-                    .expect("cmd_rx prematurely dropped")
+                    .unwrap_or_else(|_| unreachable!());
             }
         });
 
@@ -313,6 +349,8 @@ impl<U> Sink<U> {
     where
         T: AsRef<[u8]> + Send + 'static,
     {
+        // FIXME double box is silly
+        let data: Box<dyn AsRef<[u8]> + Send> = Box::new(data);
         self.send(user_data, Command::AddData(Box::new(data)))
     }
 
@@ -320,6 +358,8 @@ impl<U> Sink<U> {
     where
         T: AsRef<[Hash]> + Send + 'static,
     {
+        // FIXME double box is silly
+        let refs: Box<dyn AsRef<[Hash]> + Send> = Box::new(refs);
         self.send(user_data, Command::AddRefs(Box::new(refs)))
     }
 
@@ -567,6 +607,78 @@ where
             offt += buf.len() as u64;
         }
         Ok(())
+    }
+}
+
+impl<T> BlobsTyped<T>
+where
+    T: Copy + Sync + Send,
+{
+    pub fn dataflow<'scope, 'env: 'scope, U, S>(
+        &'env self,
+        scope: &'scope Scope<'scope, 'env>,
+        queue_depth: usize,
+        toa: &'scope Toa<S>,
+        domain: Domain,
+    ) -> (
+        mpsc::SyncSender<(Box<dyn AsBytes + Send>, U)>,
+        mpsc::Receiver<(io::Result<Hash>, U)>,
+    )
+    where
+        S: BlobStore<BlobHandle = T> + Sync + 'scope,
+        U: Send + 'env,
+    {
+        let (in_tx, in_rx) = mpsc::sync_channel::<(Box<dyn AsBytes + Send>, U)>(queue_depth);
+        let (out_tx, out_rx) = mpsc::sync_channel(queue_depth);
+
+        scope.spawn(move || {
+            for (data, user_data) in in_rx {
+                let data = data.as_bytes();
+                let store = &toa.store;
+                let toa = &mut *toa.toa.write();
+                let res = (|| {
+                    if data.len() <= CHUNK_SIZE as usize {
+                        self.add_chunk(store, domain, data, toa)
+                    } else {
+                        let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
+                        let split_n = ((data.len() - 1) & 0x1fff) + 1;
+                        let (perfect, tail) = data.split_at(data.len() - split_n);
+                        for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
+                            let mut y = self.add_chunk(store, domain, y, toa)?;
+                            let mut len = 1 << 16;
+                            while stack.len() >= (i + 1).count_ones() as usize {
+                                let x = stack.pop().expect("at least one element");
+                                len <<= 1;
+                                y = self.add_pair(store, domain, &x, &y, len, toa)?;
+                            }
+                            stack.push(y);
+                        }
+
+                        let len = (data.len() as u128) << 3;
+                        let mut y = self.add_chunk(store, domain, tail, toa)?;
+                        let mut mask = 0xffff;
+                        let top_i = len.wrapping_sub(1); // special-case for len=0
+                        while let Some(x) = stack.pop() {
+                            debug_assert_eq!(
+                                (top_i & !mask).count_ones(),
+                                1 + stack.len() as u32,
+                                "length bits should correlate to stack depth"
+                            );
+                            let bits = (top_i & !mask).trailing_zeros();
+                            mask = (1 << (bits + 1)) - 1;
+                            let pair_len = (top_i & mask) + 1;
+                            y = self.add_pair(store, domain, &x, &y, pair_len, toa)?;
+                        }
+                        Ok(y)
+                    }
+                })();
+                out_tx
+                    .send((res, user_data))
+                    .unwrap_or_else(|_| panic!("out_rx dropped"));
+            }
+        });
+
+        (in_tx, out_rx)
     }
 }
 
@@ -1075,6 +1187,18 @@ where
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         (**self).size_on_disk()
+    }
+}
+
+impl AsBytes for Box<dyn AsRef<[u8]> + Send> {
+    fn as_bytes(&self) -> &[u8] {
+        (**self).as_ref()
+    }
+}
+
+impl AsBytes for Box<dyn AsRef<[Hash]> + Send> {
+    fn as_bytes(&self) -> &[u8] {
+        bytemuck::cast_slice((**self).as_ref())
     }
 }
 
