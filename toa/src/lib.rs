@@ -276,14 +276,13 @@ where
     pub fn dataflow<'scope, 'env: 'scope, U>(
         &'env self,
         scope: &'scope Scope<'scope, 'env>,
-        command_queue_depth: usize,
-        result_queue_depth: usize,
+        queue_depth: usize,
     ) -> (Sink<U>, Source<U>)
     where
         U: Send + 'env,
     {
-        let (cmd_tx, cmd_rx) = mpsc::sync_channel(command_queue_depth);
-        let (res_tx, res_rx) = mpsc::sync_channel(result_queue_depth);
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(queue_depth);
+        let (res_tx, res_rx) = mpsc::sync_channel(queue_depth);
         let cmd = Sink { channel: cmd_tx };
         let res = Source { channel: res_rx };
 

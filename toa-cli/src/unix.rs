@@ -135,7 +135,7 @@ where
     let mut stat = Stat::default();
     println!("d {root}");
     let root_key = std::thread::scope(|scope| -> Result<Hash> {
-        let (mut cmd, res) = dev.dataflow(scope, 128, 128);
+        let (mut cmd, res) = dev.dataflow(scope, 128);
         let stub_entry = DirEntry {
             type_perms: 0,
             name: Default::default(),
