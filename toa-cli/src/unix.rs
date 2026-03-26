@@ -12,6 +12,7 @@ use toa_unix::{DirItem, DirItemType};
 type Dir<'a> = toa_unix::Dir<'a, super::Store>;
 type Sink = toa::Sink<Result<Action>>;
 
+#[derive(Default)]
 struct DirEntry {
     type_perms: u16,
     name: Box<str>,
@@ -32,11 +33,6 @@ struct DirBuilder {
 }
 
 enum Action {
-    DirBegin {
-        dir: u64,
-        parent: u64,
-        entry: DirEntry,
-    },
     DirAdd {
         dir: u64,
         entry: DirEntry,
@@ -44,6 +40,8 @@ enum Action {
     DirEnd {
         dir: u64,
         count: u64,
+        parent: u64,
+        entry: DirEntry,
     },
     DirEndData {
         parent: u64,
@@ -151,25 +149,12 @@ where
 
         scope.spawn(move || add_dir(&mut cmd2, &root, stat, ROOT_PARENT, stub_entry));
 
-        use std::collections::hash_map::{Entry as MapEntry, HashMap};
+        use std::collections::hash_map::HashMap;
 
         let mut dirs = HashMap::<u64, DirBuilder>::default();
         for (res, action) in res {
             let res = res?;
             match action? {
-                Action::DirBegin { dir, parent, entry } => {
-                    let prev = dirs.insert(
-                        dir,
-                        DirBuilder {
-                            parent,
-                            entries: Default::default(),
-                            refs: vec![Hash::default()],
-                            count: u64::MAX,
-                            entry,
-                        },
-                    );
-                    assert!(prev.is_none(), "duplicate dir ID: {dir}");
-                }
                 Action::DirAdd { dir, entry } => {
                     let toa::ResultValue::Key(key) = res else {
                         unreachable!("expect key for DirAdd")
@@ -177,24 +162,25 @@ where
                     if dir == ROOT_PARENT {
                         return Ok(key);
                     }
-                    let MapEntry::Occupied(mut x) = dirs.entry(dir) else {
-                        unreachable!("invalid dir ID: {dir}")
-                    };
-                    let nx = x.get_mut();
-                    nx.entries.push(entry);
-                    nx.refs.push(key);
-                    if nx.count == nx.entries.len() as u64 {
-                        x.remove().finalize(&mut cmd);
+                    let x = dirs.entry(dir).or_default();
+                    x.entries.push(entry);
+                    x.refs.push(key);
+                    if x.count == x.entries.len() as u64 {
+                        dirs.remove(&dir).expect("exists").finalize(&mut cmd);
                     }
                 }
-                Action::DirEnd { dir, count } => {
-                    let MapEntry::Occupied(mut x) = dirs.entry(dir) else {
-                        unreachable!("invalid dir ID: {dir}")
-                    };
-                    let nx = x.get_mut();
-                    nx.count = count;
-                    if nx.count == nx.entries.len() as u64 {
-                        x.remove().finalize(&mut cmd);
+                Action::DirEnd {
+                    dir,
+                    count,
+                    parent,
+                    entry,
+                } => {
+                    let x = dirs.entry(dir).or_default();
+                    x.parent = parent;
+                    x.entry = entry;
+                    x.count = count;
+                    if x.count == x.entries.len() as u64 {
+                        dirs.remove(&dir).expect("exists").finalize(&mut cmd);
                     }
                 }
                 Action::DirEndData {
@@ -320,12 +306,6 @@ fn add_dir(
     stat.num_directories += 1;
 
     let dir = fs::read_dir(path).map_err(e)?;
-    cmd.passthrough(Ok(Action::DirBegin {
-        dir: id,
-        parent,
-        entry,
-    }))
-    .unwrap_or_else(|_| unreachable!());
 
     let mut count = 0;
     for x in dir {
@@ -336,8 +316,13 @@ fn add_dir(
         }
     }
 
-    cmd.passthrough(Ok(Action::DirEnd { dir: id, count }))
-        .unwrap_or_else(|_| unreachable!());
+    cmd.passthrough(Ok(Action::DirEnd {
+        dir: id,
+        count,
+        parent,
+        entry,
+    }))
+    .unwrap_or_else(|_| unreachable!());
     Ok(())
 }
 
@@ -467,6 +452,18 @@ impl DirBuilder {
             data,
         )
         .unwrap_or_else(|_| unreachable!());
+    }
+}
+
+impl Default for DirBuilder {
+    fn default() -> Self {
+        Self {
+            parent: u64::MAX,
+            entries: Default::default(),
+            refs: vec![Hash::default()],
+            count: u64::MAX,
+            entry: Default::default(),
+        }
     }
 }
 
