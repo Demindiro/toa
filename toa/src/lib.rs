@@ -273,38 +273,35 @@ where
     T: BlobStore + Sync,
     T::BlobHandle: Send + Sync,
 {
-    pub fn dataflow<'env, U, R, F>(
+    pub fn dataflow<'scope, 'env: 'scope, U>(
         &'env self,
+        scope: &'scope Scope<'scope, 'env>,
         command_queue_depth: usize,
         result_queue_depth: usize,
-        f: F,
-    ) -> R
+    ) -> (Sink<U>, Source<U>)
     where
-        F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>, Sink<U>, Source<U>) -> R,
         U: Send + 'env,
     {
-        std::thread::scope(|scope| {
-            let (cmd_tx, cmd_rx) = mpsc::sync_channel(command_queue_depth);
-            let (res_tx, res_rx) = mpsc::sync_channel(result_queue_depth);
-            let cmd = Sink { channel: cmd_tx };
-            let res = Source { channel: res_rx };
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(command_queue_depth);
+        let (res_tx, res_rx) = mpsc::sync_channel(result_queue_depth);
+        let cmd = Sink { channel: cmd_tx };
+        let res = Source { channel: res_rx };
 
-            scope.spawn(move || {
-                for (cmd, user_data) in cmd_rx {
-                    let res = match cmd {
-                        Command::Passthrough => Ok(ResultValue::None),
-                        Command::AddData(x) => self.add_data((*x).as_ref()).map(ResultValue::Key),
-                        Command::AddRefs(x) => self.add_refs((*x).as_ref()).map(ResultValue::Key),
-                    };
-                    // TODO to panic or not to?
-                    res_tx
-                        .send((res, user_data))
-                        .expect("cmd_rx prematurely dropped")
-                }
-            });
+        scope.spawn(move || {
+            for (cmd, user_data) in cmd_rx {
+                let res = match cmd {
+                    Command::Passthrough => Ok(ResultValue::None),
+                    Command::AddData(x) => self.add_data((*x).as_ref()).map(ResultValue::Key),
+                    Command::AddRefs(x) => self.add_refs((*x).as_ref()).map(ResultValue::Key),
+                };
+                // TODO to panic or not to?
+                res_tx
+                    .send((res, user_data))
+                    .expect("cmd_rx prematurely dropped")
+            }
+        });
 
-            (f)(scope, cmd, res)
-        })
+        (cmd, res)
     }
 }
 

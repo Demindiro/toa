@@ -134,7 +134,8 @@ where
     let mut dev = Toa::init(dev)?;
     let mut stat = Stat::default();
     println!("d {root}");
-    let root_key = dev.dataflow(128, 128, |scope, mut cmd, res| -> Result<Hash> {
+    let root_key = std::thread::scope(|scope| -> Result<Hash> {
+        let (mut cmd, res) = dev.dataflow(scope, 128, 128);
         let stub_entry = DirEntry {
             type_perms: 0,
             name: Default::default(),
