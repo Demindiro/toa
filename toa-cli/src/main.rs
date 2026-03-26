@@ -4,8 +4,7 @@ mod unix;
 
 use std::{
     collections::BTreeMap,
-    error::Error,
-    fs, io,
+    fmt, fs, io,
     io::{Read, Write},
     ops,
     path::{Path, PathBuf},
@@ -14,7 +13,7 @@ use toa::Hash;
 use toa_blob::{BlobStore, FileBlocks};
 use toa_blob_compress::{BlobStoreCompress, Compression, PageSize};
 
-type Result<T> = core::result::Result<T, Box<dyn Error>>;
+type Result<T> = core::result::Result<T, Error>;
 type Store = toa::BlobStoreCompress<BlobStore<FileBlocks>>;
 type InnerToa = toa::Toa<Store>;
 type Object<'a> = toa::Object<'a, Store>;
@@ -27,6 +26,11 @@ struct Toa {
 #[derive(Default)]
 struct Stat {
     size_sum: u64,
+    num_directories: u64,
+}
+
+struct Error {
+    msg: String,
 }
 
 impl Toa {
@@ -166,13 +170,43 @@ impl ops::DerefMut for Toa {
 impl Stat {
     fn summarize(self, toa: &Toa) {
         let toa_size = toa.inner.size_on_disk().unwrap();
-        let Self { size_sum } = self;
+        let Self {
+            size_sum,
+            num_directories,
+        } = self;
         let ratio = size_sum as f64 / toa_size as f64;
         println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
+        println!("directories: {num_directories}");
     }
 }
 
-fn usage(procname: &str) -> Box<dyn Error> {
+impl<T> From<T> for Error
+where
+    T: fmt::Display,
+{
+    fn from(x: T) -> Self {
+        Self { msg: x.to_string() }
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.msg)?;
+        f.write_str("\n")
+    }
+}
+
+// conflicts with From<T> for Error...
+/*
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.msg)?;
+        f.write_str("\n")
+    }
+}
+*/
+
+fn usage(procname: &str) -> Error {
     let s = format!(
         "\
 usage: {procname} <add|get|list>
@@ -219,26 +253,6 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N]> {
         *w = f(x)? << 4 | f(y)?;
     }
     Ok(k)
-}
-
-fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
-    let data = fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|e| format!("failed to open {path:?}: {e}"))?;
-    // FIXME other processes *can* modify "CoW" mappings,
-    // so that's a very big problem...
-    let data = unsafe {
-        memmap2::MmapOptions::new()
-            .populate()
-            .map_copy_read_only(&data)
-            .map_err(|e| format!("failed to memory-map {path:?}: {e}"))?
-    };
-    stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
-    let key = dev
-        .add_data(&data)
-        .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
-    Ok(key)
 }
 
 fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
@@ -332,7 +346,7 @@ fn main() {
     match start() {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e:?}");
             std::process::exit(1);
         }
     }

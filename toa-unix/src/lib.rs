@@ -48,8 +48,12 @@ where
     T: BlobStore,
 {
     pub fn new(toa: &'a Toa<T>, refs: &Hash) -> Result<Self, io::Error> {
-        let Some(refs) = toa.get(refs)? else { todo!() };
-        let Object::Refs(refs) = refs else { todo!() };
+        let Some(refs) = toa.get(refs)? else {
+            todo!("no object with key {refs}")
+        };
+        let Object::Refs(refs) = refs else {
+            todo!("expected refs, got data")
+        };
         let [data] = refs.read_array(0).unwrap_or_else(|e| todo!("{e:?}"));
         let Some(data) = toa.get(&data)? else { todo!() };
         let Object::Data(data) = data else { todo!() };

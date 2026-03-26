@@ -1,5 +1,5 @@
 use super::Object;
-use crate::{InnerToa, Result, Stat, Toa, add_file, args_end, usage};
+use crate::{InnerToa, Result, Stat, Toa, args_end, usage};
 use chrono::prelude::*;
 use std::{
     fs,
@@ -10,6 +10,47 @@ use toa::Hash;
 use toa_unix::{DirItem, DirItemType};
 
 type Dir<'a> = toa_unix::Dir<'a, super::Store>;
+type Sink = toa::Sink<Result<Action>>;
+
+struct DirEntry {
+    type_perms: u16,
+    name: Box<str>,
+    uid: u32,
+    gid: u32,
+    modified: i64,
+}
+
+struct DirBuilder {
+    parent: u64,
+    entries: Vec<DirEntry>,
+    /// # Note
+    ///
+    /// refs[0] is reserved for this directory
+    refs: Vec<Hash>,
+    count: u64,
+    entry: DirEntry,
+}
+
+enum Action {
+    DirBegin {
+        dir: u64,
+        parent: u64,
+        entry: DirEntry,
+    },
+    DirAdd {
+        dir: u64,
+        entry: DirEntry,
+    },
+    DirEnd {
+        dir: u64,
+        count: u64,
+    },
+    DirEndData {
+        parent: u64,
+        entry: DirEntry,
+        refs: Vec<Hash>,
+    },
+}
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
 where
@@ -94,8 +135,85 @@ where
 
     let mut dev = Toa::init(dev)?;
     let mut stat = Stat::default();
-    let root_key = add_dir(&mut dev, &root, &mut stat)?;
-    println!("d {root_key:?} {root}");
+    println!("d {root}");
+    let root_key = dev.dataflow(128, 128, |scope, mut cmd, res| -> Result<Hash> {
+        let stub_entry = DirEntry {
+            type_perms: 0,
+            name: Default::default(),
+            uid: meta.uid(),
+            gid: meta.gid(),
+            modified: 0,
+        };
+        let stat = &mut stat;
+        let mut cmd2 = cmd.clone();
+
+        const ROOT_PARENT: u64 = u64::MAX;
+
+        scope.spawn(move || add_dir(&mut cmd2, &root, stat, ROOT_PARENT, stub_entry));
+
+        use std::collections::hash_map::{Entry as MapEntry, HashMap};
+
+        let mut dirs = HashMap::<u64, DirBuilder>::default();
+        for (res, action) in res {
+            let res = res?;
+            match action? {
+                Action::DirBegin { dir, parent, entry } => {
+                    let prev = dirs.insert(
+                        dir,
+                        DirBuilder {
+                            parent,
+                            entries: Default::default(),
+                            refs: vec![Hash::default()],
+                            count: u64::MAX,
+                            entry,
+                        },
+                    );
+                    assert!(prev.is_none(), "duplicate dir ID: {dir}");
+                }
+                Action::DirAdd { dir, entry } => {
+                    let toa::ResultValue::Key(key) = res else {
+                        unreachable!("expect key for DirAdd")
+                    };
+                    if dir == ROOT_PARENT {
+                        return Ok(key);
+                    }
+                    let MapEntry::Occupied(mut x) = dirs.entry(dir) else {
+                        unreachable!("invalid dir ID: {dir}")
+                    };
+                    let nx = x.get_mut();
+                    nx.entries.push(entry);
+                    nx.refs.push(key);
+                    if nx.count == nx.entries.len() as u64 {
+                        x.remove().finalize(&mut cmd);
+                    }
+                }
+                Action::DirEnd { dir, count } => {
+                    let MapEntry::Occupied(mut x) = dirs.entry(dir) else {
+                        unreachable!("invalid dir ID: {dir}")
+                    };
+                    let nx = x.get_mut();
+                    nx.count = count;
+                    if nx.count == nx.entries.len() as u64 {
+                        x.remove().finalize(&mut cmd);
+                    }
+                }
+                Action::DirEndData {
+                    parent,
+                    entry,
+                    mut refs,
+                } => {
+                    let toa::ResultValue::Key(key) = res else {
+                        unreachable!("expect key for DirEndData")
+                    };
+                    refs[0] = key;
+                    cmd.add_refs(Ok(Action::DirAdd { dir: parent, entry }), refs)
+                        .unwrap_or_else(|_| unreachable!());
+                }
+            }
+        }
+
+        unreachable!("no root key")
+    })?;
     dev.set_meta("unix.root", &root_key);
     dev.save_root()?;
 
@@ -148,111 +266,208 @@ where
     Ok(())
 }
 
-fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_file(
+    cmd: &mut Sink,
+    path: &str,
+    stat: &mut Stat,
+    parent: u64,
+    entry: DirEntry,
+) -> Result<()> {
+    let data = fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| format!("failed to open {path:?}: {e}"))?;
+    // FIXME other processes *can* modify "CoW" mappings,
+    // so that's a very big problem...
+    let data = unsafe {
+        memmap2::MmapOptions::new()
+            .populate()
+            .map_copy_read_only(&data)
+            .map_err(|e| format!("failed to memory-map {path:?}: {e}"))?
+    };
+    stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
+    cmd.add_data(Ok(Action::DirAdd { dir: parent, entry }), data)
+        .unwrap_or_else(|_| unreachable!());
+    Ok(())
+}
+
+fn add_sym(
+    cmd: &mut Sink,
+    path: &str,
+    stat: &mut Stat,
+    parent: u64,
+    entry: DirEntry,
+) -> Result<()> {
+    let link =
+        fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
+    let link = path_to_utf8(link)?;
+    stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
+    cmd.add_data(Ok(Action::DirAdd { dir: parent, entry }), link.into_bytes())
+        .unwrap_or_else(|_| unreachable!());
+    Ok(())
+}
+
+fn add_dir(
+    cmd: &mut Sink,
+    path: &str,
+    stat: &mut Stat,
+    parent: u64,
+    entry: DirEntry,
+) -> Result<()> {
+    let e = |e| format!("failed to traverse {path:?}: {e}").into();
+
+    let id = stat.num_directories;
+    stat.num_directories += 1;
+
+    let dir = fs::read_dir(path).map_err(e)?;
+    cmd.passthrough(Ok(Action::DirBegin {
+        dir: id,
+        parent,
+        entry,
+    }))
+    .unwrap_or_else(|_| unreachable!());
+
+    let mut count = 0;
+    for x in dir {
+        match x.map_err(e).and_then(|x| add_dir_entry(cmd, x, stat, id)) {
+            Ok(false) => {}
+            Ok(true) => count += 1,
+            Err(x) => return Err(x),
+        }
+    }
+
+    cmd.passthrough(Ok(Action::DirEnd { dir: id, count }))
+        .unwrap_or_else(|_| unreachable!());
+    Ok(())
+}
+
+fn add_dir_entry(
+    cmd: &mut Sink,
+    entry: fs::DirEntry,
+    stat: &mut Stat,
+    parent: u64,
+) -> Result<bool> {
     // TODO support other platforms
     use std::os::unix::fs::MetadataExt;
 
-    struct Entry {
-        type_perms: u16,
-        name: Box<str>,
-        uid: u32,
-        gid: u32,
-        modified: i64,
-        key: Hash,
+    enum Type {
+        File,
+        Dir,
+        Sym,
     }
 
-    let mut entries = Vec::new();
-
-    let e = |e| format!("failed to traverse {path:?}: {e}");
-    for entry in fs::read_dir(path).map_err(e)? {
-        let entry = entry.map_err(e)?;
-        let path = entry.path();
-        let path = path_to_utf8(&path)?;
-        let ty = entry
-            .file_type()
-            .map_err(|e| format!("failed to get file type of {path:?}: {e}"))?;
-        let (ty_s, ty_n, key) = if ty.is_file() {
-            ("f", 0, add_file(dev, path, stat)?)
-        } else if ty.is_dir() {
-            ("d", 1, add_dir(dev, path, stat)?)
-        } else if ty.is_symlink() {
-            ("s", 2, add_symlink(dev, path, stat)?)
-        } else {
+    let path = entry.path();
+    let path = path_to_utf8(path)?;
+    let ty = entry
+        .file_type()
+        .map_err(|e| format!("failed to get file type of {path:?}: {e}"))?;
+    let ty = match (ty.is_file(), ty.is_dir(), ty.is_symlink()) {
+        (true, _, _) => Type::File,
+        (_, true, _) => Type::Dir,
+        (_, _, true) => Type::Sym,
+        _ => {
             eprintln!("skipping {path} (unknown format)");
-            continue;
-        };
-        println!("{ty_s} {key:?} {path}");
-        let name = entry
-            .file_name()
-            .to_str()
-            .expect("already validated before")
-            .to_string()
-            .into_boxed_str();
-        if name.len() > usize::from(u8::MAX) {
-            return Err(format!("entry name {name:?} too long").into());
+            return Ok(false);
         }
-        // rough estimate
-        stat.size_sum += u64::from(2 + 2 * 4 + 8 + name.len() as u8);
-        let meta = entry
-            .metadata()
-            .map_err(|e| format!("failed to get metadata of {path:?}: {e}"))?;
-        let modified = i128::from(meta.mtime()) * 1_000_000 + i128::from(meta.mtime_nsec() / 1000);
-        // not my problem
-        let modified = i64::try_from(modified)
-            .expect("You have permission to dig up my grave and slap me (if you can find it)");
-        entries.push(Entry {
-            type_perms: (meta.mode() as u16 & 0o777) | ty_n << 9,
-            name,
-            uid: meta.uid(),
-            gid: meta.gid(),
-            modified,
-            key,
-        });
+    };
+    let (ty_s, ty_n) = match ty {
+        Type::File => ('f', 0),
+        Type::Dir => ('d', 1),
+        Type::Sym => ('s', 2),
+    };
+
+    println!("{ty_s} {path}");
+
+    let name = entry
+        .file_name()
+        .to_str()
+        .expect("already validated before")
+        .to_string()
+        .into_boxed_str();
+    if name.len() > usize::from(u8::MAX) {
+        return Err(format!("entry name {name:?} too long").into());
+    }
+    // rough estimate
+    stat.size_sum += u64::from(2 + 2 * 4 + 8 + name.len() as u8);
+    let meta = entry
+        .metadata()
+        .map_err(|e| format!("failed to get metadata of {path:?}: {e}"))?;
+    let modified = i128::from(meta.mtime()) * 1_000_000 + i128::from(meta.mtime_nsec() / 1000);
+    // not my problem
+    let modified = i64::try_from(modified)
+        .expect("You have permission to dig up my grave and slap me (if you can find it)");
+
+    let entry = DirEntry {
+        type_perms: (meta.mode() as u16 & 0o777) | ty_n << 9,
+        name,
+        uid: meta.uid(),
+        gid: meta.gid(),
+        modified,
+    };
+
+    match ty {
+        Type::File => add_file(cmd, &path, stat, parent, entry)?,
+        Type::Dir => add_dir(cmd, &path, stat, parent, entry)?,
+        Type::Sym => add_sym(cmd, &path, stat, parent, entry)?,
     }
 
-    entries.sort_by(|x, y| x.name.cmp(&y.name));
-
-    let names_offset = 32 * entries.len();
-    let data = entries.iter().fold(names_offset, |s, x| s + x.name.len());
-    let mut data = Vec::with_capacity(data);
-    let mut names_offset = u64::try_from(names_offset).expect("usize <= u64");
-    for e in &entries {
-        let prev_len = data.len();
-        data.extend(e.type_perms.to_le_bytes());
-        data.push(e.name.len() as u8);
-        data.extend([0; 5]);
-        data.extend(e.uid.to_le_bytes());
-        data.extend(e.gid.to_le_bytes());
-        data.extend(names_offset.to_le_bytes());
-        data.extend(e.modified.to_le_bytes());
-        assert_eq!(prev_len, data.len() - 32);
-        names_offset += e.name.len() as u64;
-    }
-    for e in &entries {
-        data.extend(e.name.as_bytes());
-    }
-    let data = dev
-        .add_data(&data)
-        .map_err(|e| format!("failed to add : {e:?}"))?;
-
-    let mut refs = Vec::with_capacity(1 + entries.len());
-    refs.push(data);
-    refs.extend(entries.iter().map(|e| e.key));
-    let refs = dev
-        .add_refs(&refs)
-        .map_err(|e| format!("failed to add : {e:?}"))?;
-    Ok(refs)
+    Ok(true)
 }
 
-fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
-    let link =
-        fs::read_link(path).map_err(|e| format!("failed to read target of {path:?}: {e}"))?;
-    let link = path_to_utf8(&link)?;
-    stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
-    let key = dev
-        .add_data(link.as_bytes())
-        .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
-    Ok(key)
+impl DirBuilder {
+    fn finalize(mut self, cmd: &mut Sink) {
+        // RUUUUUUUUUUUUUUST
+        // WHY DO YOU STILL HAVE NO CO-SORT IN THE STANDARD LIBRARY
+        // AAAAAAAAAAAAAAAAAAAAAAAAAA
+
+        // fuck it lotsofalloc
+        {
+            let mut both = self
+                .entries
+                .into_iter()
+                .zip(self.refs.into_iter().skip(1))
+                .collect::<Vec<_>>();
+            both.sort_by(|x, y| x.0.name.cmp(&y.0.name));
+            self.refs = [Hash::default()]
+                .into_iter()
+                .chain(both.iter().map(|x| x.1))
+                .collect();
+            self.entries = both.into_iter().map(|x| x.0).collect();
+        }
+
+        let names_offset = 32 * self.entries.len();
+        let data = self
+            .entries
+            .iter()
+            .fold(names_offset, |s, x| s + x.name.len());
+        let mut data = Vec::with_capacity(data);
+        let mut names_offset = u64::try_from(names_offset).expect("usize <= u64");
+        for e in &self.entries {
+            let prev_len = data.len();
+            data.extend(e.type_perms.to_le_bytes());
+            data.push(e.name.len() as u8);
+            data.extend([0; 5]);
+            data.extend(e.uid.to_le_bytes());
+            data.extend(e.gid.to_le_bytes());
+            data.extend(names_offset.to_le_bytes());
+            data.extend(e.modified.to_le_bytes());
+            assert_eq!(prev_len, data.len() - 32);
+            names_offset += e.name.len() as u64;
+        }
+        for e in &self.entries {
+            data.extend(e.name.as_bytes());
+        }
+
+        cmd.add_data(
+            Ok(Action::DirEndData {
+                parent: self.parent,
+                entry: self.entry,
+                refs: self.refs,
+            }),
+            data,
+        )
+        .unwrap_or_else(|_| unreachable!());
+    }
 }
 
 fn open(store: &Path, write: bool) -> Result<(Toa, Hash)> {
@@ -288,9 +503,10 @@ fn traverse_path(dev: &Toa, path: &str, mut start: Hash) -> Result<Hash> {
     Ok(start)
 }
 
-fn path_to_utf8(path: &Path) -> Result<&str> {
-    path.to_str()
-        .ok_or_else(|| format!("{path:?} is invalid UTF-8").into())
+fn path_to_utf8(path: PathBuf) -> Result<String> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|x| format!("{x:?} is invalid UTF-8").into())
 }
 
 fn fmt_item(dev: &InnerToa, dir: &Dir<'_>, item: &DirItem, key: &Hash) -> Result<String> {

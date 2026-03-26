@@ -125,6 +125,7 @@ pub struct SourceIntoIter<U> {
 }
 
 pub enum ResultValue {
+    None,
     Key(Hash),
 }
 
@@ -133,6 +134,7 @@ pub enum ResultValue {
 // even if it should theoretically be a bit more efficient.
 // The question is: how much is the overhead?
 enum Command {
+    Passthrough,
     AddData(Box<dyn AsRef<[u8]> + Send>),
     AddRefs(Box<dyn AsRef<[Hash]> + Send>),
 }
@@ -290,6 +292,7 @@ where
             scope.spawn(move || {
                 for (cmd, user_data) in cmd_rx {
                     let res = match cmd {
+                        Command::Passthrough => Ok(ResultValue::None),
                         Command::AddData(x) => self.add_data((*x).as_ref()).map(ResultValue::Key),
                         Command::AddRefs(x) => self.add_refs((*x).as_ref()).map(ResultValue::Key),
                     };
@@ -306,6 +309,10 @@ where
 }
 
 impl<U> Sink<U> {
+    pub fn passthrough(&mut self, user_data: U) -> Result<(), SinkDropped<U>> {
+        self.send(user_data, Command::Passthrough)
+    }
+
     pub fn add_data<T>(&mut self, user_data: U, data: T) -> Result<(), SinkDropped<U>>
     where
         T: AsRef<[u8]> + Send + 'static,
@@ -324,6 +331,14 @@ impl<U> Sink<U> {
         self.channel
             .send((cmd, user_data))
             .map_err(|x| SinkDropped(x.0.1))
+    }
+}
+
+impl<U> Clone for Sink<U> {
+    fn clone(&self) -> Self {
+        Self {
+            channel: self.channel.clone(),
+        }
     }
 }
 
