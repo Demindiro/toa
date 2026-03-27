@@ -889,13 +889,13 @@ where
             .rename(new_name.as_bytes())
     }
     fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.store.blob(*blob)?.append(data)
+        self.store.blob(*blob).append(data)
     }
     fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.store.blob(*blob)?.append_many(data)
+        self.store.blob(*blob).append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.store.blob(*blob)?.read_at(offset, buf)
+        self.store.blob(*blob).read_at(offset, buf)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.store.flush()

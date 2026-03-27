@@ -119,23 +119,22 @@ where
                 };
                 table.append(bytemuck::bytes_of(&hdr))?;
                 let [table, pages, tail] = [table, pages, tail].map(|x| x.id());
-                self.blob(BlobSet {
+                Ok(Ok(self.blob(BlobSet {
                     page_size,
                     compression,
                     compression_level,
                     table,
                     pages,
                     tail,
-                })
-                .map(Ok)
+                })))
             }
             (Err(e), Err(_), Err(_)) => Ok(Err(e)),
             _ => todo!("blob missing"),
         }
     }
 
-    pub fn blob<'a>(&'a self, blobs: BlobSet) -> io::Result<BlobRef<&'a Self>> {
-        Ok(BlobRef { store: self, blobs })
+    pub fn blob<'a>(&'a self, blobs: BlobSet) -> BlobRef<&'a Self> {
+        BlobRef { store: self, blobs }
     }
 
     pub fn find<'a>(&'a self, name: &[u8]) -> io::Result<Option<BlobRef<&'a Self>>> {
@@ -161,15 +160,14 @@ where
                 let compression = Compression::try_from(hdr.compression).unwrap();
                 let compression_level = hdr.compression_level.into();
                 let [table, pages, tail] = [table, pages, tail].map(|x| x.id());
-                self.blob(BlobSet {
+                Ok(Some(self.blob(BlobSet {
                     page_size,
                     compression,
                     compression_level,
                     table,
                     pages,
                     tail,
-                })
-                .map(Some)
+                })))
             }
             (None, None, None) => Ok(None),
             _ => todo!("blob missing"),
@@ -197,9 +195,9 @@ where
 {
     pub fn clear(&self) -> io::Result<()> {
         // TODO transactions!
-        self.table()?.clear()?;
-        self.pages()?.clear()?;
-        self.tail()?.clear()?;
+        self.table().clear()?;
+        self.pages().clear()?;
+        self.tail().clear()?;
         Ok(())
     }
 
@@ -207,7 +205,7 @@ where
         let clen = self.compressed_len()?;
         if let Some(x) = offset.checked_sub(clen) {
             // read from tail only
-            return self.tail()?.read_at(x, buf);
+            return self.tail().read_at(x, buf);
         }
         // split into chunks and start reading
         let og_len = buf.len();
@@ -221,7 +219,7 @@ where
         let n = if offset < self.compressed_len()? {
             self.read_compressed_partial(offset, buf)?
         } else {
-            self.tail()?.read_at(0, buf)?
+            self.tail().read_at(0, buf)?
         };
         Ok(og_len - (buf.len() - n))
     }
@@ -237,7 +235,7 @@ where
         let page_size = self.blobs.page_size as u64;
         let page_mask = page_size - 1;
 
-        let tail = self.tail()?;
+        let tail = self.tail();
         let n = tail.len()?.wrapping_neg() & page_mask;
         let n = usize::try_from(n).expect("u32 <= usize");
         let n = n.min(data.len());
@@ -273,17 +271,17 @@ where
     }
 
     pub fn delete(self) -> io::Result<()> {
-        self.table()?.delete()?;
-        self.pages()?.delete()?;
-        self.tail()?.delete()?;
+        self.table().delete()?;
+        self.pages().delete()?;
+        self.tail().delete()?;
         Ok(())
     }
 
     pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
         // FIXME we need atomic renames
-        self.table()?.rename(&concat(new_name, TABLE_SUFFIX))?;
-        self.pages()?.rename(&concat(new_name, PAGES_SUFFIX))?;
-        self.tail()?.rename(&concat(new_name, TAIL_SUFFIX))?;
+        self.table().rename(&concat(new_name, TABLE_SUFFIX))?;
+        self.pages().rename(&concat(new_name, PAGES_SUFFIX))?;
+        self.tail().rename(&concat(new_name, TAIL_SUFFIX))?;
         Ok(())
     }
 
@@ -314,7 +312,7 @@ where
             let entry_offt =
                 entry_offt + (offset / page_size) * core::mem::size_of_val(entry) as u64;
             let n = self
-                .table()?
+                .table()
                 .read_at(entry_offt, bytemuck::bytes_of_mut(entry))?;
             if n == 0 {
                 break;
@@ -325,7 +323,7 @@ where
             let cbuf = &mut vec![0; clen];
             let part;
             (part, buf) = buf.split_at_mut(page_size as usize);
-            self.pages()?.read_at(entry.offset.into(), cbuf)?;
+            self.pages().read_at(entry.offset.into(), cbuf)?;
             decompress(compression, part, cbuf);
             offset += page_size;
         }
@@ -337,14 +335,14 @@ where
         let buf = &mut Vec::new();
         let (algorithm, clen) = self.blobs.compress(page, buf);
         let clen32 = u32::try_from(clen).expect("compressed len exceeds page size");
-        let offset = self.pages()?.append(&buf[..clen])?;
+        let offset = self.pages().append(&buf[..clen])?;
         let entry = TableEntry {
             offset: offset.into(),
             algorithm: algorithm as u8,
             _pad_0: [0; 3],
             compressed_len: clen32.into(),
         };
-        self.table()?.append(bytemuck::bytes_of(&entry))?;
+        self.table().append(bytemuck::bytes_of(&entry))?;
         Ok(())
     }
 
@@ -352,7 +350,7 @@ where
     ///
     /// The total amount of compressed data in bytes.
     fn compressed_len(&self) -> io::Result<u64> {
-        let n = self.table()?.len()?;
+        let n = self.table().len()?;
         let n = n - core::mem::size_of::<TableHeader>() as u64;
         let n = n / 16;
         let n = n * (self.blobs.page_size as u64);
@@ -360,18 +358,18 @@ where
     }
 
     fn len(&self) -> io::Result<u64> {
-        Ok(self.compressed_len()? + self.tail()?.len()?)
+        Ok(self.compressed_len()? + self.tail().len()?)
     }
 
-    fn table(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
+    fn table(&self) -> toa_blob::BlobRef<'_, toa_blob::BlobStore<U>> {
         self.store.store.blob(self.blobs.table)
     }
 
-    fn pages(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
+    fn pages(&self) -> toa_blob::BlobRef<'_, toa_blob::BlobStore<U>> {
         self.store.store.blob(self.blobs.pages)
     }
 
-    fn tail(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
+    fn tail(&self) -> toa_blob::BlobRef<'_, toa_blob::BlobStore<U>> {
         self.store.store.blob(self.blobs.tail)
     }
 }
