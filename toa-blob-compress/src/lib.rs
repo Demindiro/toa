@@ -4,6 +4,7 @@ pub use toa_blob::DuplicateBlob;
 
 use nora_endian::{u32le, u64le};
 use std::io;
+use std::{thread::Scope, sync::mpsc};
 
 const TABLE_SUFFIX: &[u8] = b".table.compr";
 const PAGES_SUFFIX: &[u8] = b".pages.compr";
@@ -52,6 +53,18 @@ pub enum Compression {
     Lz4 = 1,
     #[cfg(feature = "zstd")]
     Zstd = 2,
+}
+
+pub struct Sink<U> {
+    channel: mpsc::SyncSender<(Command, U)>,
+}
+
+pub struct Source<U> {
+    channel: mpsc::Receiver<(io::Result<u64>, U)>,
+}
+
+enum Command {
+    Append { blob: BlobSet, data: Box<[u8]> },
 }
 
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -182,6 +195,43 @@ where
 
     pub fn size_on_disk(&self) -> io::Result<u64> {
         self.store.size_on_disk()
+    }
+}
+
+impl<T> BlobStoreCompress<toa_blob::BlobStore<T>>
+where
+    T: toa_blob::ZoneDev + Sync,
+{
+    pub fn dataflow<'scope, 'env: 'scope, U>(
+        &'env self,
+        scope: &'scope Scope<'scope, 'env>,
+        queue_depth: usize,
+    ) -> (
+        Sink<U>, Source<U>
+    )
+    where
+        U: Send + 'env,
+    {
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(queue_depth);
+        let (res_tx, res_rx) = mpsc::sync_channel(queue_depth);
+        let cmd_tx = Sink { channel: cmd_tx };
+        let res_rx = Source { channel: res_rx };
+
+        scope.spawn(move || {
+            for (cmd, user_data) in cmd_rx {
+                match cmd {
+                    Command::Append { blob, data } => {
+                        let offset = self
+                            .blob(blob)
+                            .and_then(|x| x.append((*data).as_ref()));
+                        res_tx.send((offset, user_data))
+                            .unwrap_or_else(|_| panic!("res_rx dropped prematurely"));
+                    }
+                }
+            }
+        });
+
+        (cmd_tx, res_rx)
     }
 }
 
@@ -458,6 +508,22 @@ impl TryFrom<u8> for Compression {
 impl TableHeader {
     pub const MAGIC: [u8; 8] = *b"Compress";
     pub const VERSION: u32 = 0x20260317;
+}
+
+impl<U> Sink<U> {
+    pub fn append(&self, blob: BlobSet, data: Box<[u8]>, user_data: U) {
+        self.channel.send((Command::Append { data, blob }, user_data))
+            .unwrap_or_else(|_| todo!("sink_rx dropped"));
+    }
+}
+
+impl<U> IntoIterator for Source<U> {
+    type Item = (io::Result<u64>, U);
+    type IntoIter = mpsc::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.channel.into_iter()
+    }
 }
 
 fn concat(a: &[u8], b: &[u8]) -> Vec<u8> {

@@ -12,6 +12,7 @@ use toa_hash::Domain;
 use std::{
     sync::{RwLock, mpsc},
     thread::Scope,
+    collections::BinaryHeap,
 };
 
 const CHUNK_SIZE: u128 = 1 << 13;
@@ -27,6 +28,17 @@ pub trait BlobStore {
     fn read_at(&self, blob: Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
     fn flush(&self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
+}
+
+pub trait BlobStoreDataflow: BlobStore {
+    type Sink: Send + BlobStoreDataflowSink<Self::BlobHandle>;
+    type Source: Send + IntoIterator<Item = (io::Result<u64>, ActionId)>;
+
+    fn dataflow<'scope, 'env: 'scope>(&'env self, scope: &'scope Scope<'scope, 'env>, queue_depth: usize) -> (Self::Sink, Self::Source);
+}
+
+pub trait BlobStoreDataflowSink<T> {
+    fn append(&self, blob: T, data: Box<[u8]>, track: ActionId);
 }
 
 trait BlobStoreExt: BlobStore {
@@ -67,10 +79,6 @@ trait BlobStoreExt: BlobStore {
 }
 
 impl<T: BlobStore> BlobStoreExt for T {}
-
-trait AsBytes {
-    fn as_bytes(&self) -> &[u8];
-}
 
 pub struct Toa<T>
 where
@@ -139,8 +147,8 @@ pub enum ResultValue {
 // The question is: how much is the overhead?
 enum Command {
     Passthrough,
-    AddData(Box<dyn AsBytes + Send>),
-    AddRefs(Box<dyn AsBytes + Send>),
+    AddData(Bytes<Box<dyn AsRef<[u8]> + Send>>),
+    AddRefs(Bytes<Box<dyn AsRef<[Hash]> + Send>>),
 }
 
 struct Typed<'a, T>
@@ -182,8 +190,29 @@ pub struct SinkDropped<U>(pub U);
 #[derive(Debug)]
 pub struct SourceDropped;
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ActionId(u64);
+
+struct ReorderBuffer<T> {
+    head: ActionId,
+    queue: BinaryHeap<(ActionId, IgnoreOrd<T>)>,
+}
+
+struct ActionIdCounter(u64);
+
 // can't be arsed with this poison nonsense
 struct NonPoisonRwLock<T>(RwLock<T>);
+
+struct Bytes<T> {
+    bytes: T,
+}
+
+struct BytesRange<T> {
+    bytes: T,
+    range: core::ops::RangeInclusive<usize>,
+}
+
+struct IgnoreOrd<T>(T);
 
 impl<T> Toa<T>
 where
@@ -274,7 +303,7 @@ where
 
 impl<T> Toa<T>
 where
-    T: BlobStore + Sync,
+    T: BlobStoreDataflow + Sync,
     T::BlobHandle: Send + Sync,
 {
     pub fn dataflow<'scope, 'env: 'scope, U>(
@@ -293,10 +322,10 @@ where
 
         let (data_tx, data_rx) = self
             .data
-            .dataflow::<U, _>(scope, queue_depth, self, Domain::Data);
+            .dataflow::<U, _, _>(scope, queue_depth, self, Domain::Data);
         let (refs_tx, refs_rx) = self
             .refs
-            .dataflow::<U, _>(scope, queue_depth, self, Domain::Refs);
+            .dataflow::<U, _, _>(scope, queue_depth, self, Domain::Refs);
 
         // commands
         scope.spawn(move || {
@@ -349,9 +378,8 @@ impl<U> Sink<U> {
     where
         T: AsRef<[u8]> + Send + 'static,
     {
-        // FIXME double box is silly
-        let data: Box<dyn AsRef<[u8]> + Send> = Box::new(data);
-        self.send(user_data, Command::AddData(Box::new(data)))
+        let data = Bytes { bytes: Box::new(data) as Box<dyn AsRef<[_]> + Send> };
+        self.send(user_data, Command::AddData(data))
     }
 
     pub fn add_refs<T>(&mut self, user_data: U, refs: T) -> Result<(), SinkDropped<U>>
@@ -359,8 +387,8 @@ impl<U> Sink<U> {
         T: AsRef<[Hash]> + Send + 'static,
     {
         // FIXME double box is silly
-        let refs: Box<dyn AsRef<[Hash]> + Send> = Box::new(refs);
-        self.send(user_data, Command::AddRefs(Box::new(refs)))
+        let refs = Bytes { bytes: Box::new(refs) as Box<dyn AsRef<[_]> + Send> };
+        self.send(user_data, Command::AddRefs(refs))
     }
 
     fn send(&mut self, user_data: U, cmd: Command) -> Result<(), SinkDropped<U>> {
@@ -614,67 +642,140 @@ impl<T> BlobsTyped<T>
 where
     T: Copy + Sync + Send,
 {
-    pub fn dataflow<'scope, 'env: 'scope, U, S>(
+    pub fn dataflow<'scope, 'env: 'scope, U, S, D>(
         &'env self,
         scope: &'scope Scope<'scope, 'env>,
         queue_depth: usize,
-        toa: &'scope Toa<S>,
+        toa: &'env Toa<S>,
         domain: Domain,
     ) -> (
-        mpsc::SyncSender<(Box<dyn AsBytes + Send>, U)>,
+        mpsc::SyncSender<(D, U)>,
         mpsc::Receiver<(io::Result<Hash>, U)>,
     )
     where
-        S: BlobStore<BlobHandle = T> + Sync + 'scope,
+        S: BlobStoreDataflow<BlobHandle = T> + Sync + 'scope,
         U: Send + 'env,
+        D: AsRef<[u8]> + Send + 'scope,
     {
-        let (in_tx, in_rx) = mpsc::sync_channel::<(Box<dyn AsBytes + Send>, U)>(queue_depth);
+        // TODO this is very ugly
+
+        let (in_tx, in_rx) = mpsc::sync_channel::<(D, U)>(queue_depth);
         let (out_tx, out_rx) = mpsc::sync_channel(queue_depth);
 
+        let (store_tx, store_rx) = toa.store.dataflow(scope, queue_depth);
+
+        let (hash_tx, hash_rx) = mpsc::sync_channel(queue_depth);
+
+        enum HashAction<U> {
+            Chunk(Hash),
+            End(U),
+        }
+
+        let action_counter = core::cell::RefCell::new(ActionIdCounter(0));
+        let next_action = || action_counter.borrow_mut().next().unwrap();
+        let append = |blob, bytes| store_tx.append(self.chunks_full, bytes, next_action());
+
+        let store_chunk_full = |bytes: &[u8]| append(self.chunks_full, bytes.into());
+
+        let store_chunk_partial = |bytes: &[u8]| {
+            assert!(bytes.len() < CHUNK_SIZE as usize, "partial chunk too large");
+            let hdr = u16::try_from(bytes.len() << 3)
+                .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
+            let pad = (!(2 + bytes.len()) + 1) & 7;
+            let pad = &[0; 8][..pad];
+            let data = [&hdr.to_le_bytes(), bytes, pad].into_iter().flatten().copied().collect();
+            append(self.chunks_partial, data);
+        };
+
+        let store_chunk = |bytes: &[u8]| {
+            if bytes.len() == CHUNK_SIZE as usize {
+                store_chunk_full(bytes)
+            } else {
+                store_chunk_partial(bytes)
+            }
+        };
+
+        let add_chunk = move |toa: &mut ToaData, chunk| {
+            let key = toa_hash::hash_chunk(domain, chunk);
+            if let Entry::Vacant(e) = toa.map.entry(key) {
+                e.insert(FileRef::INVALID); // stub to avoid adding chunk multiple times.
+                store_chunk(chunk);
+            } else {
+                todo!("passthrough");
+            }
+            key
+        };
+
+        // feed data
         scope.spawn(move || {
             for (data, user_data) in in_rx {
-                let data = data.as_bytes();
+                let data = data.as_ref();
+                for chunk in data.chunks.iter_mut() {
+                }
                 let store = &toa.store;
                 let toa = &mut *toa.toa.write();
-                let res = (|| {
-                    if data.len() <= CHUNK_SIZE as usize {
-                        self.add_chunk(store, domain, data, toa)
-                    } else {
-                        let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
-                        let split_n = ((data.len() - 1) & 0x1fff) + 1;
-                        let (perfect, tail) = data.split_at(data.len() - split_n);
-                        for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
-                            let mut y = self.add_chunk(store, domain, y, toa)?;
-                            let mut len = 1 << 16;
-                            while stack.len() >= (i + 1).count_ones() as usize {
-                                let x = stack.pop().expect("at least one element");
-                                len <<= 1;
-                                y = self.add_pair(store, domain, &x, &y, len, toa)?;
-                            }
-                            stack.push(y);
-                        }
+            }
+        });
 
-                        let len = (data.len() as u128) << 3;
-                        let mut y = self.add_chunk(store, domain, tail, toa)?;
-                        let mut mask = 0xffff;
-                        let top_i = len.wrapping_sub(1); // special-case for len=0
-                        while let Some(x) = stack.pop() {
-                            debug_assert_eq!(
-                                (top_i & !mask).count_ones(),
-                                1 + stack.len() as u32,
-                                "length bits should correlate to stack depth"
-                            );
-                            let bits = (top_i & !mask).trailing_zeros();
-                            mask = (1 << (bits + 1)) - 1;
-                            let pair_len = (top_i & mask) + 1;
-                            y = self.add_pair(store, domain, &x, &y, pair_len, toa)?;
+        // collect hashes
+        scope.spawn(move || {
+            let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
+            let mut reorder = ReorderBuffer::default();
+
+            for (data, action_id) in hash_rx {
+                reorder.push(action_id, data);
+
+                for data in &mut reorder {
+                    match data {
+                        HashAction::Chunk(key) => {
+                            let split_n = ((data.len() - 1) & 0x1fff) + 1;
+                            let (perfect, tail) = data.split_at(data.len() - split_n);
+                            for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
+                                let mut y = self.add_chunk(store, domain, y, toa)?;
+                                let mut len = 1 << 16;
+                                while stack.len() >= (i + 1).count_ones() as usize {
+                                    let x = stack.pop().expect("at least one element");
+                                    len <<= 1;
+                                    y = self.add_pair(store, domain, &x, &y, len, toa)?;
+                                }
+                                stack.push(y);
+                            }
                         }
-                        Ok(y)
+                        HashAction::End(user_data) => {
+                            let len = (data.len() as u128) << 3;
+                            let mut y = self.add_chunk(store, domain, tail, toa)?;
+                            let mut mask = 0xffff;
+                            let top_i = len.wrapping_sub(1); // special-case for len=0
+                            while let Some(x) = stack.pop() {
+                                debug_assert_eq!(
+                                    (top_i & !mask).count_ones(),
+                                    1 + stack.len() as u32,
+                                    "length bits should correlate to stack depth"
+                                );
+                                let bits = (top_i & !mask).trailing_zeros();
+                                mask = (1 << (bits + 1)) - 1;
+                                let pair_len = (top_i & mask) + 1;
+                                y = self.add_pair(store, domain, &x, &y, pair_len, toa)?;
+                            }
+                            out_tx
+                                .send((res, user_data))
+                                .unwrap_or_else(|_| panic!("out_rx dropped"));
+                            Ok(y)
+                        }
                     }
-                })();
-                out_tx
-                    .send((res, user_data))
-                    .unwrap_or_else(|_| panic!("out_rx dropped"));
+                }
+            }
+
+            assert!(reorder.is_empty(), "in_tx dropped before completing reorder buffer");
+            assert!(stack.is_empty(), "in_tx dropped before completing hash tree");
+        });
+
+        scope.spawn(move || {
+            for (res, ()) in store_rx {
+                match res {
+                    Ok(_) => {}
+                    Err(e) => todo!("{e:?}"),
+                }
             }
         });
 
@@ -686,6 +787,8 @@ impl FileRef {
     const TY_CHUNK_FULL: u64 = 2;
     const TY_CHUNK_PARTIAL: u64 = 4;
     const TY_PAIR: u64 = 6;
+
+    const INVALID: Self = Self(u64::MAX << 3);
 
     fn new(offset: u64, ty: u64, domain: Domain) -> Self {
         assert!(ty < 8);
@@ -1158,6 +1261,26 @@ where
     }
 }
 
+#[cfg(feature = "blob-compress")]
+impl<T> BlobStoreDataflow for BlobStoreCompress<toa_blob::BlobStore<T>>
+where
+    T: toa_blob::ZoneDev + Sync,
+{
+    type Sink = toa_blob_compress::Sink<ActionId>;
+    type Source = toa_blob_compress::Source<ActionId>;
+
+    fn dataflow<'scope, 'env: 'scope>(&'env self, scope: &'scope Scope<'scope, 'env>, queue_depth: usize) -> (Self::Sink, Self::Source) {
+        self.store.dataflow(scope, queue_depth)
+    }
+}
+
+#[cfg(feature = "blob-compress")]
+impl BlobStoreDataflowSink<toa_blob_compress::BlobSet> for toa_blob_compress::Sink<ActionId> {
+    fn append(&self, blob: toa_blob_compress::BlobSet, data: Box<[u8]>, id: ActionId) {
+        (*self).append(blob, data, id)
+    }
+}
+
 impl<T> BlobStore for &mut T
 where
     T: BlobStore,
@@ -1190,15 +1313,78 @@ where
     }
 }
 
-impl AsBytes for Box<dyn AsRef<[u8]> + Send> {
-    fn as_bytes(&self) -> &[u8] {
-        (**self).as_ref()
+impl AsRef<[u8]> for Bytes<Box<dyn AsRef<[u8]> + Send>> {
+    fn as_ref(&self) -> &[u8] {
+        (*self.bytes).as_ref()
     }
 }
 
-impl AsBytes for Box<dyn AsRef<[Hash]> + Send> {
-    fn as_bytes(&self) -> &[u8] {
-        bytemuck::cast_slice((**self).as_ref())
+impl AsRef<[u8]> for Bytes<Box<dyn AsRef<[Hash]> + Send>> {
+    fn as_ref(&self) -> &[u8] {
+        bytemuck::cast_slice((*self.bytes).as_ref())
+    }
+}
+
+impl Iterator for ActionIdCounter {
+    type Item = ActionId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let x = self.0;
+        self.0 += 1;
+        Some(ActionId(x))
+    }
+}
+
+impl<T> ReorderBuffer<T> {
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn push(&mut self, id: ActionId, value: T) {
+        self.queue.push((id, IgnoreOrd(value)))
+    }
+}
+
+impl<T> Default for ReorderBuffer<T> {
+    fn default() -> Self {
+        Self {
+            head: ActionId(0),
+            queue: Default::default(),
+        }
+    }
+}
+
+impl<T> Iterator for ReorderBuffer<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.queue
+            .peek()
+            .is_some_and(|x| x.0 == self.head)
+            .then(|| {
+                self.head.0 += 1;
+                self.queue.pop().expect("peek is Some").1.0
+            })
+    }
+}
+
+impl<T> PartialEq for IgnoreOrd<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for IgnoreOrd<T> {}
+
+impl<T> PartialOrd for IgnoreOrd<T> {
+    fn partial_cmp(&self, rhs: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(rhs))
+    }
+}
+
+impl<T> Ord for IgnoreOrd<T> {
+    fn cmp(&self, _: &Self) -> core::cmp::Ordering {
+        core::cmp::Ordering::Equal
     }
 }
 
