@@ -8,6 +8,7 @@ blob-compress = ["dep:toa-blob-compress"]
 
 [dependencies]
 toa-blob = { path = "../toa-blob" }
+toa-blob-store = { path = "../toa-blob-store" }
 toa-blob-compress = { path = "../toa-blob-compress", optional = true }
 toa-hash = { path = "../toa-hash" }
 arrayvec = { version = "0.7.6", default-features = false }

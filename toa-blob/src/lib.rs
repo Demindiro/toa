@@ -1,3 +1,5 @@
+pub use toa_blob_store::DuplicateBlob;
+
 use bitvec::boxed::BitBox;
 #[cfg(feature = "std")]
 use std::os::unix::fs::FileExt;
@@ -241,9 +243,6 @@ pub struct Header {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlobId(u32);
-
-#[derive(Debug)]
-pub struct DuplicateBlob;
 
 #[derive(Debug)]
 pub struct OutOfZones;
@@ -1467,6 +1466,48 @@ impl Blob {
 
 impl Header {
     pub const SIZE: usize = 32;
+}
+
+impl<U> toa_blob_store::BlobStore for BlobStore<U>
+where
+    U: ZoneDev,
+{
+    type BlobHandle = BlobId;
+
+    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = name.as_bytes();
+        match self.create_blob(&name)? {
+            Ok(x) => Ok(x.id()),
+            Err(_) => Ok(self.find(&name)?.unwrap().id()),
+        }
+    }
+    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = name.as_bytes();
+        if let Some(x) = self.find(&name)? {
+            x.delete()?;
+        }
+        Ok(self.create_blob(&name)?.unwrap().id())
+    }
+    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+        self.find(old_name.as_bytes())?
+            .unwrap()
+            .rename(new_name.as_bytes())
+    }
+    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        self.blob(*blob)?.append(data)
+    }
+    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        self.blob(*blob)?.append_many(data)
+    }
+    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.blob(*blob)?.read_at(offset, buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self).flush()
+    }
+    fn size_on_disk(&self) -> io::Result<u64> {
+        self.size_on_disk()
+    }
 }
 
 impl fmt::Debug for BlobId {
