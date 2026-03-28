@@ -1,31 +1,31 @@
 #![forbid(unused_must_use)]
 
-pub use toa_blob::DuplicateBlob;
+pub use toa_blob_store::DuplicateBlob;
 
 use nora_endian::{u32le, u64le};
 use std::io;
+use toa_blob_store::BlobStore;
 
-const TABLE_SUFFIX: &[u8] = b".table.compr";
-const PAGES_SUFFIX: &[u8] = b".pages.compr";
-const TAIL_SUFFIX: &[u8] = b".tail.compr";
+const TABLE_SUFFIX: &str = ".table.compr";
+const PAGES_SUFFIX: &str = ".pages.compr";
+const TAIL_SUFFIX: &str = ".tail.compr";
 
-pub struct BlobStoreCompress<T> {
-    store: T,
-}
-
-pub struct BlobRef<T> {
-    store: T,
-    blobs: BlobSet,
+pub struct BlobRef<'a, T>
+where
+    T: BlobStore,
+{
+    store: &'a T,
+    blobs: BlobSet<T::BlobHandle>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct BlobSet {
+pub struct BlobSet<T> {
     page_size: PageSize,
     compression: Compression,
     compression_level: u8,
-    table: toa_blob::BlobId,
-    pages: toa_blob::BlobId,
-    tail: toa_blob::BlobId,
+    table: T,
+    pages: T,
+    tail: T,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -74,39 +74,33 @@ struct TableEntry {
     compressed_len: u32le,
 }
 
-impl<T> BlobStoreCompress<T> {
-    pub fn new(store: T) -> Self {
-        Self { store }
-    }
-
-    pub fn inner(&self) -> &T {
-        &self.store
-    }
-
-    pub fn into_inner(self) -> T {
-        self.store
-    }
-}
-
-impl<U> BlobStoreCompress<toa_blob::BlobStore<U>>
+impl<'a, T> BlobRef<'a, T>
 where
-    U: toa_blob::ZoneDev,
+    T: BlobStore,
 {
-    pub fn create_blob<'a>(
-        &'a self,
-        name: &[u8],
+    pub fn blob(store: &'a T, blobs: BlobSet<T::BlobHandle>) -> Self {
+        Self { store, blobs }
+    }
+
+    pub fn blob_set(&self) -> &BlobSet<T::BlobHandle> {
+        &self.blobs
+    }
+
+    pub fn create(
+        store: &'a T,
+        name: &str,
         page_size: PageSize,
         compression: Compression,
         compression_level: u8,
-    ) -> io::Result<Result<BlobRef<&'a Self>, DuplicateBlob>> {
+    ) -> io::Result<Result<Self, DuplicateBlob>> {
         // TODO transactions (rollbacks!)
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
         match (
-            self.store.create_blob(&table)?,
-            self.store.create_blob(&pages)?,
-            self.store.create_unzoned_blob(&tail)?,
+            store.create(&table)?,
+            store.create(&pages)?,
+            store.create_unzoned(&tail)?,
         ) {
             (Ok(table), Ok(pages), Ok(tail)) => {
                 let hdr = TableHeader {
@@ -117,39 +111,36 @@ where
                     compression_level,
                     _pad_0: Default::default(),
                 };
-                table.append(bytemuck::bytes_of(&hdr))?;
-                let [table, pages, tail] = [table, pages, tail].map(|x| x.id());
-                self.blob(BlobSet {
-                    page_size,
-                    compression,
-                    compression_level,
-                    table,
-                    pages,
-                    tail,
-                })
-                .map(Ok)
+                store.append(&table, bytemuck::bytes_of(&hdr))?;
+                Ok(Ok(Self::blob(
+                    store,
+                    BlobSet {
+                        page_size,
+                        compression,
+                        compression_level,
+                        table,
+                        pages,
+                        tail,
+                    },
+                )))
             }
             (Err(e), Err(_), Err(_)) => Ok(Err(e)),
             _ => todo!("blob missing"),
         }
     }
 
-    pub fn blob<'a>(&'a self, blobs: BlobSet) -> io::Result<BlobRef<&'a Self>> {
-        Ok(BlobRef { store: self, blobs })
-    }
-
-    pub fn find<'a>(&'a self, name: &[u8]) -> io::Result<Option<BlobRef<&'a Self>>> {
+    pub fn find(store: &'a T, name: &str) -> io::Result<Option<Self>> {
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
-        let f = |x| self.store.find(x);
+        let f = |x| store.find(x);
         match (f(&table)?, f(&pages)?, f(&tail)?) {
             (Some(table), Some(pages), Some(tail)) => {
-                if table.len()? < 32 {
+                if store.len(&table)? < 32 {
                     todo!("table too short");
                 }
                 let hdr = &mut [0; 32];
-                table.read_at(0, hdr)?;
+                store.read_at(&table, 0, hdr)?;
                 let hdr = bytemuck::cast_ref::<_, TableHeader>(hdr);
                 if hdr.magic != TableHeader::MAGIC {
                     todo!("bad table magic");
@@ -160,54 +151,40 @@ where
                 let page_size = PageSize::try_from(u32::from(hdr.page_size)).unwrap();
                 let compression = Compression::try_from(hdr.compression).unwrap();
                 let compression_level = hdr.compression_level.into();
-                let [table, pages, tail] = [table, pages, tail].map(|x| x.id());
-                self.blob(BlobSet {
-                    page_size,
-                    compression,
-                    compression_level,
-                    table,
-                    pages,
-                    tail,
-                })
-                .map(Some)
+                Ok(Some(Self::blob(
+                    store,
+                    BlobSet {
+                        page_size,
+                        compression,
+                        compression_level,
+                        table,
+                        pages,
+                        tail,
+                    },
+                )))
             }
             (None, None, None) => Ok(None),
             _ => todo!("blob missing"),
         }
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&self) -> io::Result<()> {
         self.store.flush()
     }
 
     pub fn size_on_disk(&self) -> io::Result<u64> {
         self.store.size_on_disk()
     }
-}
 
-impl<T> BlobRef<T> {
-    pub fn blob_set(&self) -> BlobSet {
-        self.blobs
-    }
-}
-
-impl<'a, U> BlobRef<&'a BlobStoreCompress<toa_blob::BlobStore<U>>>
-where
-    U: toa_blob::ZoneDev,
-{
     pub fn clear(&self) -> io::Result<()> {
-        // TODO transactions!
-        self.table()?.clear()?;
-        self.pages()?.clear()?;
-        self.tail()?.clear()?;
-        Ok(())
+        self.apply_all(|x| self.store.clear(x))
     }
 
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let clen = self.compressed_len()?;
         if let Some(x) = offset.checked_sub(clen) {
             // read from tail only
-            return self.tail()?.read_at(x, buf);
+            return self.store.read_at(&self.blobs.tail, x, buf);
         }
         // split into chunks and start reading
         let og_len = buf.len();
@@ -221,9 +198,32 @@ where
         let n = if offset < self.compressed_len()? {
             self.read_compressed_partial(offset, buf)?
         } else {
-            self.tail()?.read_at(0, buf)?
+            self.store.read_at(&self.blobs.tail, 0, buf)?
         };
         Ok(og_len - (buf.len() - n))
+    }
+
+    pub fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+        match self.read_at(offset, buf) {
+            Ok(n) if n == buf.len() => Ok(true),
+            Ok(n) => todo!("want {}, got {n}", buf.len()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn read_at_exact_or_none(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+        match self.read_at(offset, buf) {
+            Ok(n) if n == buf.len() => Ok(true),
+            Ok(0) => Ok(false),
+            Ok(_) => todo!(),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn read_at_array<const N: usize>(&self, offset: u64) -> io::Result<[u8; N]> {
+        let mut buf = [0; N];
+        self.read_at_exact(offset, &mut buf)?;
+        Ok(buf)
     }
 
     pub fn append(&self, data: &[u8]) -> io::Result<u64> {
@@ -237,20 +237,20 @@ where
         let page_size = self.blobs.page_size as u64;
         let page_mask = page_size - 1;
 
-        let tail = self.tail()?;
-        let n = tail.len()?.wrapping_neg() & page_mask;
+        let tail = &self.blobs.tail;
+        let n = self.store.len(tail)?.wrapping_neg() & page_mask;
         let n = usize::try_from(n).expect("u32 <= usize");
         let n = n.min(data.len());
         let (start, data) = data.split_at(n);
-        tail.append(start)?;
+        self.store.append(tail, start)?;
 
-        if tail.len()? >= page_size {
-            assert!(tail.len()? == page_size, "tail too large");
+        if self.store.len(tail)? >= page_size {
+            assert!(self.store.len(tail)? == page_size, "tail too large");
             let buf = &mut vec![0; page_size as usize];
-            let n = tail.read_at(0, buf)?;
+            let n = self.store.read_at(tail, 0, buf)?;
             assert_eq!(n, buf.len());
             self.append_page(buf)?;
-            tail.clear()?;
+            self.store.clear(tail)?;
         }
 
         let mut it = data.chunks_exact(page_size as usize);
@@ -258,8 +258,8 @@ where
             self.append_page(page)?;
         }
 
-        tail.append(it.remainder())?;
-        assert!(tail.len()? < page_size, "tail is full");
+        self.store.append(tail, it.remainder())?;
+        assert!(self.store.len(tail)? < page_size, "tail is full");
 
         Ok(offset)
     }
@@ -273,18 +273,9 @@ where
     }
 
     pub fn delete(self) -> io::Result<()> {
-        self.table()?.delete()?;
-        self.pages()?.delete()?;
-        self.tail()?.delete()?;
-        Ok(())
-    }
-
-    pub fn rename(&mut self, new_name: &[u8]) -> io::Result<()> {
-        // FIXME we need atomic renames
-        self.table()?.rename(&concat(new_name, TABLE_SUFFIX))?;
-        self.pages()?.rename(&concat(new_name, PAGES_SUFFIX))?;
-        self.tail()?.rename(&concat(new_name, TAIL_SUFFIX))?;
-        Ok(())
+        [self.blobs.table, self.blobs.pages, self.blobs.tail]
+            .into_iter()
+            .try_for_each(|x| self.store.delete(x))
     }
 
     fn read_compressed_partial(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
@@ -313,9 +304,9 @@ where
             let entry_offt = core::mem::size_of::<TableHeader>() as u64;
             let entry_offt =
                 entry_offt + (offset / page_size) * core::mem::size_of_val(entry) as u64;
-            let n = self
-                .table()?
-                .read_at(entry_offt, bytemuck::bytes_of_mut(entry))?;
+            let n =
+                self.store
+                    .read_at(&self.blobs.table, entry_offt, bytemuck::bytes_of_mut(entry))?;
             if n == 0 {
                 break;
             }
@@ -325,7 +316,8 @@ where
             let cbuf = &mut vec![0; clen];
             let part;
             (part, buf) = buf.split_at_mut(page_size as usize);
-            self.pages()?.read_at(entry.offset.into(), cbuf)?;
+            self.store
+                .read_at(&self.blobs.pages, entry.offset.into(), cbuf)?;
             decompress(compression, part, cbuf);
             offset += page_size;
         }
@@ -337,14 +329,15 @@ where
         let buf = &mut Vec::new();
         let (algorithm, clen) = self.blobs.compress(page, buf);
         let clen32 = u32::try_from(clen).expect("compressed len exceeds page size");
-        let offset = self.pages()?.append(&buf[..clen])?;
+        let offset = self.store.append(&self.blobs.pages, &buf[..clen])?;
         let entry = TableEntry {
             offset: offset.into(),
             algorithm: algorithm as u8,
             _pad_0: [0; 3],
             compressed_len: clen32.into(),
         };
-        self.table()?.append(bytemuck::bytes_of(&entry))?;
+        self.store
+            .append(&self.blobs.table, bytemuck::bytes_of(&entry))?;
         Ok(())
     }
 
@@ -352,7 +345,7 @@ where
     ///
     /// The total amount of compressed data in bytes.
     fn compressed_len(&self) -> io::Result<u64> {
-        let n = self.table()?.len()?;
+        let n = self.store.len(&self.blobs.table)?;
         let n = n - core::mem::size_of::<TableHeader>() as u64;
         let n = n / 16;
         let n = n * (self.blobs.page_size as u64);
@@ -360,23 +353,22 @@ where
     }
 
     fn len(&self) -> io::Result<u64> {
-        Ok(self.compressed_len()? + self.tail()?.len()?)
+        Ok(self.compressed_len()? + self.store.len(&self.blobs.tail)?)
     }
 
-    fn table(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
-        self.store.store.blob(self.blobs.table)
-    }
-
-    fn pages(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
-        self.store.store.blob(self.blobs.pages)
-    }
-
-    fn tail(&self) -> io::Result<toa_blob::BlobRef<'_, toa_blob::BlobStore<U>>> {
-        self.store.store.blob(self.blobs.tail)
+    fn apply_all<F, R>(&self, f: F) -> io::Result<()>
+    where
+        F: Fn(&T::BlobHandle) -> io::Result<R>,
+    {
+        // TODO transactions!
+        for x in [&self.blobs.table, &self.blobs.pages, &self.blobs.tail] {
+            (f)(x)?;
+        }
+        Ok(())
     }
 }
 
-impl BlobSet {
+impl<T> BlobSet<T> {
     fn compress(&self, page: &[u8], out: &mut Vec<u8>) -> (Compression, usize) {
         let f = |out: &mut Vec<u8>| {
             let n = page.len().max(out.len());
@@ -384,15 +376,16 @@ impl BlobSet {
             out[..page.len()].copy_from_slice(page);
             (Compression::None, page.len())
         };
-        let n = match self.compression {
+        let _n = match self.compression {
             Compression::None => return f(out),
             #[cfg(feature = "lz4")]
             Compression::Lz4 => self.compress_lz4(page, out),
             #[cfg(feature = "zstd")]
             Compression::Zstd => self.compress_zstd(page, out),
         };
-        if n < page.len() {
-            (self.compression, n)
+        #[allow(unreachable_code)] // if all features are disabled
+        if _n < page.len() {
+            (self.compression, _n)
         } else {
             f(out)
         }
@@ -460,8 +453,8 @@ impl TableHeader {
     pub const VERSION: u32 = 0x20260317;
 }
 
-fn concat(a: &[u8], b: &[u8]) -> Vec<u8> {
-    a.iter().chain(b).copied().collect::<Vec<u8>>()
+fn concat(a: &str, b: &str) -> String {
+    a.to_string() + b
 }
 
 fn decompress(compression: Compression, out: &mut [u8], data: &[u8]) {
@@ -485,15 +478,14 @@ mod test {
     use super::*;
     use toa_blob::{BlobStore, BlockShift, MemBlocks};
 
-    fn init() -> BlobStoreCompress<BlobStore<MemBlocks>> {
-        BlobStoreCompress::new(BlobStore::init(MemBlocks::new(BlockShift::N9, 42, 10)).unwrap())
+    fn init() -> BlobStore<MemBlocks> {
+        BlobStore::init(MemBlocks::new(BlockShift::N9, 42, 10)).unwrap()
     }
 
     #[test]
     fn read_large() {
         let s = init();
-        let b = s
-            .create_blob(b"", PageSize::K4, Compression::None, 0)
+        let b = BlobRef::create(&s, "", PageSize::K4, Compression::None, 0)
             .unwrap()
             .unwrap();
         let x = &[1; 20000];
@@ -507,8 +499,7 @@ mod test {
     #[test]
     fn read_small() {
         let s = init();
-        let b = s
-            .create_blob(b"", PageSize::K4, Compression::None, 0)
+        let b = BlobRef::create(&s, "", PageSize::K4, Compression::None, 0)
             .unwrap()
             .unwrap();
         let x = &[1; 20000];

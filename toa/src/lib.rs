@@ -1,69 +1,21 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
+pub use toa_blob_compress::{BlobRef, Compression, PageSize};
+pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
 use std::{
+    cell::Cell,
     collections::btree_map::{BTreeMap, Entry},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
+use toa_blob_compress::BlobSet;
 use toa_hash::Domain;
 
 const CHUNK_SIZE: u128 = 1 << 13;
-
-pub trait BlobStore {
-    type BlobHandle;
-
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle>;
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle>;
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()>;
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
-    fn flush(&mut self) -> io::Result<()>;
-    fn size_on_disk(&self) -> io::Result<u64>;
-}
-
-trait BlobStoreExt: BlobStore {
-    fn read_at_exact(
-        &self,
-        blob: &Self::BlobHandle,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<bool> {
-        match self.read_at(blob, offset, buf) {
-            Ok(n) if n == buf.len() => Ok(true),
-            Ok(n) => todo!("want {}, got {n}", buf.len()),
-            Err(e) => Err(e),
-        }
-    }
-    fn read_at_exact_or_none(
-        &self,
-        blob: &Self::BlobHandle,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<bool> {
-        match self.read_at(blob, offset, buf) {
-            Ok(n) if n == buf.len() => Ok(true),
-            Ok(0) => Ok(false),
-            Ok(_) => todo!(),
-            Err(e) => Err(e),
-        }
-    }
-    fn read_at_array<const N: usize>(
-        &self,
-        blob: &Self::BlobHandle,
-        offset: u64,
-    ) -> io::Result<[u8; N]> {
-        let mut buf = [0; N];
-        self.read_at_exact(blob, offset, &mut buf)?;
-        Ok(buf)
-    }
-}
-
-impl<T: BlobStore> BlobStoreExt for T {}
 
 pub struct Dir(pub Box<Path>);
 
@@ -80,7 +32,7 @@ where
 
 pub struct Blob<T> {
     file: T,
-    len: u64,
+    len: Cell<u64>,
 }
 
 pub enum Object<'a, T>
@@ -98,14 +50,6 @@ pub struct Refs<'a, T>(Typed<'a, T>)
 where
     T: BlobStore;
 
-#[cfg(feature = "blob-compress")]
-pub struct BlobStoreCompress<T> {
-    pub store: toa_blob_compress::BlobStoreCompress<T>,
-    pub page_size: toa_blob_compress::PageSize,
-    pub compression: toa_blob_compress::Compression,
-    pub compression_level: u8,
-}
-
 type Map = BTreeMap<Hash, FileRef>;
 
 struct Typed<'a, T>
@@ -119,8 +63,8 @@ where
 }
 
 struct BlobsTyped<T> {
-    chunks_full: T,
-    chunks_partial: T,
+    chunks_full: BlobSet<T>,
+    chunks_partial: BlobSet<T>,
     pairs: T,
 }
 
@@ -145,25 +89,50 @@ pub enum ReadExactError<S> {
 impl<T> Toa<T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
-    pub fn open(mut store: T) -> io::Result<Self> {
-        let mut map = Map::default();
-        let data = BlobsTyped::open_at(&mut store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::open_at(&mut store, "refs", &mut map, Domain::Refs)?;
-        let mut root = [0; 32];
-        let x = store.open("root.bin")?;
-        let n = store.read_at(&x, 0, &mut root)?;
-        if n != 32 && n != 0 {
-            todo!()
+    pub fn init(
+        store: T,
+        page_size: PageSize,
+        compression: Compression,
+        compression_level: u8,
+    ) -> io::Result<Result<Self, DuplicateBlob>> {
+        let data = BlobsTyped::init_at(&store, "data", page_size, compression, compression_level)?;
+        let refs = BlobsTyped::init_at(&store, "refs", page_size, compression, compression_level)?;
+        let [Ok(data), Ok(refs)] = [data, refs] else {
+            return Ok(Err(DuplicateBlob));
         };
+        Ok(Ok(Self {
+            store,
+            data,
+            refs,
+            map: Default::default(),
+            root: Default::default(),
+        }))
+    }
+
+    pub fn load(store: T) -> io::Result<Option<Self>> {
+        let mut map = Map::default();
+        let data = BlobsTyped::load_at(&store, "data", &mut map, Domain::Data)?;
+        let refs = BlobsTyped::load_at(&store, "refs", &mut map, Domain::Refs)?;
+        let [Some(data), Some(refs)] = [data, refs] else {
+            return Ok(None);
+        };
+        let mut root = [0; 32];
+        if let Some(x) = store.find("root.bin")? {
+            let n = store.read_at(&x, 0, &mut root)?;
+            if n != 32 && n != 0 {
+                todo!()
+            }
+        }
         let root = Hash::from_bytes(root);
-        Ok(Self {
+        Ok(Some(Self {
             store,
             data,
             refs,
             map,
             root,
-        })
+        }))
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
@@ -234,18 +203,18 @@ impl Blob<fs::File> {
     /// # Returns
     ///
     /// Offset.
-    fn append(&mut self, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, data: &[u8]) -> io::Result<u64> {
         self.append_many(&[data])
     }
 
     /// # Returns
     ///
     /// Offset.
-    fn append_many(&mut self, data: &[&[u8]]) -> io::Result<u64> {
-        let o = self.len;
+    fn append_many(&self, data: &[&[u8]]) -> io::Result<u64> {
+        let o = self.len.get();
         for x in data {
-            self.file.write_all(x)?;
-            self.len += x.len() as u64;
+            (&self.file).write_all(x)?;
+            self.len.update(|y| y + x.len() as u64);
         }
         Ok(o)
     }
@@ -264,19 +233,66 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T> {
-    fn open_at<S>(store: &mut S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self>
+impl<T> BlobsTyped<T>
+where
+    T: Copy, // TODO do this properly
+{
+    fn init_at<S>(
+        store: &S,
+        dir: &str,
+        page_size: PageSize,
+        compression: Compression,
+        compression_level: u8,
+    ) -> io::Result<Result<Self, DuplicateBlob>>
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let mut f = |name: &str| store.open(&format!("{dir}_{name}"));
-        let mut s = Self {
-            chunks_full: f("chunks_full.bin")?,
-            chunks_partial: f("chunks_partial.bin")?,
-            pairs: f("pairs.bin")?,
+        let g = |name: &str| store.create(&format!("{dir}_{name}"));
+        let f = |name: &str| {
+            BlobRef::create(
+                store,
+                &format!("{dir}_{name}"),
+                page_size,
+                compression,
+                compression_level,
+            )
         };
-        s.load(store, map, domain)?;
-        Ok(s)
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            g("pairs.bin")?,
+        ) {
+            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
+                chunks_full: *chunks_full.blob_set(),
+                chunks_partial: *chunks_partial.blob_set(),
+                pairs,
+            })),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
+        }
+    }
+
+    fn load_at<S>(store: &S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Option<Self>>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let g = |name: &str| store.find(&format!("{dir}_{name}"));
+        let f = |name: &str| BlobRef::find(store, &format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            g("pairs.bin")?,
+        ) {
+            (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
+                let mut s = Self {
+                    chunks_full: *chunks_full.blob_set(),
+                    chunks_partial: *chunks_partial.blob_set(),
+                    pairs,
+                };
+                s.load(store, map, domain)?;
+                Ok(Some(s))
+            }
+            (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
+        }
     }
 
     fn add<S>(
@@ -381,7 +397,7 @@ impl<T> BlobsTyped<T> {
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let offt = store.append(&mut self.chunks_full, bytes)?;
+        let offt = BlobRef::blob(store, self.chunks_full).append(bytes)?;
         Ok(FileRef::new_chunk_full(domain, offt))
     }
 
@@ -399,8 +415,11 @@ impl<T> BlobsTyped<T> {
             .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
         let pad = (!(2 + bytes.len()) + 1) & 7;
         let pad = &[0; 8][..pad];
-        let offt =
-            store.append_many(&mut self.chunks_partial, &[&hdr.to_le_bytes(), bytes, pad])?;
+        let offt = BlobRef::blob(store, self.chunks_partial).append_many(&[
+            &hdr.to_le_bytes(),
+            bytes,
+            pad,
+        ])?;
         Ok(FileRef::new_chunk_partial(domain, offt))
     }
 
@@ -439,7 +458,7 @@ impl<T> BlobsTyped<T> {
     {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.chunks_full, offt, &mut buf)? {
+        while BlobRef::blob(store, self.chunks_full).read_at_exact_or_none(offt, &mut buf)? {
             let key = toa_hash::hash_chunk(domain, &buf);
             map.insert(key, FileRef::new_chunk_full(domain, offt));
             offt += buf.len() as u64;
@@ -454,10 +473,10 @@ impl<T> BlobsTyped<T> {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.chunks_partial, offt, len)? {
+        while BlobRef::blob(store, self.chunks_partial).read_at_exact_or_none(offt, len)? {
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
-            store.read_at_exact(&self.chunks_partial, offt + 2, buf)?;
+            BlobRef::blob(store, self.chunks_partial).read_at_exact(offt + 2, buf)?;
             let key = toa_hash::hash_chunk(domain, buf);
             map.insert(key, FileRef::new_chunk_partial(domain, offt));
             offt += align8(2 + u64::from(len));
@@ -562,6 +581,7 @@ where
 impl<'a, T> Data<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     /// # Note
     ///
@@ -599,6 +619,7 @@ where
 impl<'a, T> Refs<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     /// # Note
     ///
@@ -641,6 +662,7 @@ where
 impl<'a, T> Typed<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
         match self.location.ty().0 {
@@ -675,9 +697,8 @@ where
     pub fn len_bits(&self) -> io::Result<u128> {
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
-            FileRef::TY_CHUNK_PARTIAL => self
-                .store
-                .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+            FileRef::TY_CHUNK_PARTIAL => BlobRef::blob(self.store, self.blobs.chunks_partial)
+                .read_at_array(self.location.offset())
                 .map(u16::from_le_bytes)
                 .map(u128::from),
             FileRef::TY_PAIR => self
@@ -718,12 +739,8 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        self.store
-            .read_at(
-                &self.blobs.chunks_full,
-                self.location.offset() + offset as u64,
-                buf,
-            )
+        BlobRef::blob(self.store, self.blobs.chunks_full)
+            .read_at(self.location.offset() + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(len)
     }
@@ -733,9 +750,8 @@ where
         offset: u128,
         buf: &mut [u8],
     ) -> Result<usize, ReadError<io::Error>> {
-        let nb = self
-            .store
-            .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+        let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
+            .read_at_array(self.location.offset())
             .map(u16::from_le_bytes)
             .map_err(ReadError::Io)?;
         let n = align8(nb) >> 3;
@@ -744,12 +760,8 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        self.store
-            .read_at(
-                &self.blobs.chunks_partial,
-                self.location.offset() + 2 + offset as u64,
-                buf,
-            )
+        BlobRef::blob(self.store, self.blobs.chunks_partial)
+            .read_at(self.location.offset() + 2 + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(n)
     }
@@ -760,9 +772,8 @@ where
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => println!("F"),
             FileRef::TY_CHUNK_PARTIAL => {
-                let nb = self
-                    .store
-                    .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+                let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
+                    .read_at_array(self.location.offset())
                     .map(u16::from_le_bytes)
                     .unwrap();
                 println!("{}", nb);
@@ -854,7 +865,7 @@ impl Dir {
             .truncate(truncate)
             .open(path)
             .and_then(|file| {
-                let len = file.metadata()?.len();
+                let len = file.metadata()?.len().into();
                 Ok(Blob { file, len })
             })
     }
@@ -869,164 +880,48 @@ impl Dir {
 impl BlobStore for Dir {
     type BlobHandle = Blob<fs::File>;
 
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        self.open_or_create(name, true, false)
-    }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         self.open_or_create(name, true, true)
     }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         fs::rename(self.path(old_name), self.path(new_name))
     }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         blob.append(data)
     }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         blob.append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         blob.read_at(offset, buf)
     }
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         todo!("Dir flush")
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         std::fs::read_dir(&self.0)?.try_fold(0, |s, x| Ok(s + x?.metadata()?.len()))
     }
-}
 
-impl<U> BlobStore for toa_blob::BlobStore<U>
-where
-    U: toa_blob::ZoneDev,
-{
-    type BlobHandle = toa_blob::BlobId;
-
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
-        match self.create_blob(&name)? {
-            Ok(x) => Ok(x.id()),
-            Err(_) => Ok(self.find(&name)?.unwrap().id()),
-        }
+    fn find(&self, _name: &str) -> io::Result<Option<Self::BlobHandle>> {
+        todo!()
     }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
-        if let Some(x) = self.find(&name)? {
-            x.delete()?;
-        }
-        Ok(self.create_blob(&name)?.unwrap().id())
+    fn create(&self, _name: &str) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
+        todo!()
     }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
-        self.find(old_name.as_bytes())?
-            .unwrap()
-            .rename(new_name.as_bytes())
+    fn create_unzoned(
+        &self,
+        _name: &str,
+    ) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
+        todo!()
     }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.blob(*blob)?.append(data)
+    fn len(&self, _blob: &Self::BlobHandle) -> io::Result<u64> {
+        todo!()
     }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.blob(*blob)?.append_many(data)
+    fn clear(&self, _blob: &Self::BlobHandle) -> io::Result<()> {
+        todo!()
     }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.blob(*blob)?.read_at(offset, buf)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        (&*self).flush()
-    }
-    fn size_on_disk(&self) -> io::Result<u64> {
-        self.size_on_disk()
-    }
-}
-
-#[cfg(feature = "blob-compress")]
-impl<U> BlobStore for BlobStoreCompress<toa_blob::BlobStore<U>>
-where
-    U: toa_blob::ZoneDev,
-{
-    type BlobHandle = toa_blob_compress::BlobSet;
-
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
-        match self.store.create_blob(
-            name,
-            self.page_size,
-            self.compression,
-            self.compression_level,
-        )? {
-            Ok(x) => Ok(x.blob_set()),
-            Err(_) => Ok(self.store.find(&name)?.unwrap().blob_set()),
-        }
-    }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
-        match self.store.find(name)? {
-            Some(x) => {
-                x.clear()?;
-                Ok(x.blob_set())
-            }
-            None => Ok(self
-                .store
-                .create_blob(
-                    name,
-                    self.page_size,
-                    self.compression,
-                    self.compression_level,
-                )?
-                .unwrap()
-                .blob_set()),
-        }
-    }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
-        self.store
-            .find(old_name.as_bytes())?
-            .unwrap()
-            .rename(new_name.as_bytes())
-    }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.store.blob(*blob)?.append(data)
-    }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.store.blob(*blob)?.append_many(data)
-    }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.store.blob(*blob)?.read_at(offset, buf)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.store.flush()
-    }
-    fn size_on_disk(&self) -> io::Result<u64> {
-        self.store.size_on_disk()
-    }
-}
-
-impl<T> BlobStore for &mut T
-where
-    T: BlobStore,
-{
-    type BlobHandle = T::BlobHandle;
-
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        (**self).open(name)
-    }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
-        (**self).open_clear(name)
-    }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
-        (**self).rename(old_name, new_name)
-    }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        (**self).append(blob, data)
-    }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        (**self).append_many(blob, data)
-    }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        (**self).read_at(blob, offset, buf)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        (**self).flush()
-    }
-    fn size_on_disk(&self) -> io::Result<u64> {
-        (**self).size_on_disk()
+    fn delete(&self, _blob: Self::BlobHandle) -> io::Result<()> {
+        todo!()
     }
 }
 
@@ -1088,7 +983,9 @@ mod test {
 
     fn init() -> Test {
         let store = BlobStore::init(MemZones::new(1 << 20, 20)).unwrap();
-        let toa = Toa::open(store).expect("toa init failed");
+        let toa = Toa::init(store, PageSize::K4, Compression::None, 0)
+            .expect("toa init failed")
+            .expect("duplicate toa store");
         Test { toa }
     }
 
@@ -1182,7 +1079,9 @@ mod test {
         let Test { toa } = s;
         let (store, res) = toa.unmount();
         res.unwrap();
-        let toa = Toa::open(store).expect("reload");
+        let toa = Toa::load(store)
+            .expect("reload")
+            .expect("toa store missing");
         let s = Test { toa };
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Hello, planet!");

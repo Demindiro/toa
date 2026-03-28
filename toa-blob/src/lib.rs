@@ -1,3 +1,5 @@
+pub use toa_blob_store::DuplicateBlob;
+
 use bitvec::boxed::BitBox;
 #[cfg(feature = "std")]
 use std::os::unix::fs::FileExt;
@@ -243,9 +245,6 @@ pub struct Header {
 pub struct BlobId(u32);
 
 #[derive(Debug)]
-pub struct DuplicateBlob;
-
-#[derive(Debug)]
 pub struct OutOfZones;
 
 /// # Note about zone data alignment
@@ -480,15 +479,15 @@ where
         Ok(self.zone_dev)
     }
 
-    pub fn blob(&self, id: BlobId) -> io::Result<BlobRef<'_, Self>> {
-        Ok(BlobRef { store: self, id })
+    pub fn blob(&self, id: BlobId) -> BlobRef<'_, Self> {
+        BlobRef { store: self, id }
     }
 
     pub fn find(&self, name: &[u8]) -> io::Result<Option<BlobRef<'_, Self>>> {
         assert!(name.len() <= 255, "name too long");
         match self.data.borrow().blob_map.get(name) {
             None => Ok(None),
-            Some(id) => self.blob(*id).map(Some),
+            Some(id) => Ok(Some(self.blob(*id))),
         }
     }
 
@@ -1467,6 +1466,59 @@ impl Blob {
 
 impl Header {
     pub const SIZE: usize = 32;
+}
+
+impl<U> toa_blob_store::BlobStore for BlobStore<U>
+where
+    U: ZoneDev,
+{
+    type BlobHandle = BlobId;
+
+    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
+        let name = name.as_bytes();
+        if let Some(x) = self.find(&name)? {
+            x.delete()?;
+        }
+        Ok(self.create_blob(&name)?.unwrap().id())
+    }
+    fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>> {
+        Ok(self.find(name.as_bytes())?.map(|x| x.id()))
+    }
+    fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
+        Ok(self.create_blob(name.as_bytes())?.map(|x| x.id()))
+    }
+    fn create_unzoned(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
+        Ok(self.create_unzoned_blob(name.as_bytes())?.map(|x| x.id()))
+    }
+    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
+        self.find(old_name.as_bytes())?
+            .unwrap()
+            .rename(new_name.as_bytes())
+    }
+    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+        self.blob(*blob).append(data)
+    }
+    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+        self.blob(*blob).append_many(data)
+    }
+    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.blob(*blob).read_at(offset, buf)
+    }
+    fn len(&self, blob: &Self::BlobHandle) -> io::Result<u64> {
+        self.blob(*blob).len()
+    }
+    fn clear(&self, blob: &Self::BlobHandle) -> io::Result<()> {
+        self.blob(*blob).clear()
+    }
+    fn delete(&self, blob: Self::BlobHandle) -> io::Result<()> {
+        self.blob(blob).delete()
+    }
+    fn flush(&self) -> io::Result<()> {
+        (&*self).flush()
+    }
+    fn size_on_disk(&self) -> io::Result<u64> {
+        self.size_on_disk()
+    }
 }
 
 impl fmt::Debug for BlobId {

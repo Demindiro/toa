@@ -46,6 +46,7 @@ pub struct DirData {
 impl<'a, T> Dir<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     pub fn new(toa: &'a Toa<T>, refs: &Hash) -> Result<Self, io::Error> {
         let Some(refs) = toa.get(refs)? else { todo!() };
@@ -86,6 +87,7 @@ where
 impl<'a, T> Dir<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     pub fn len(&self) -> u64 {
         self.len
@@ -154,6 +156,7 @@ where
 impl<T> Iterator for DirIter<'_, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     type Item = Result<(u64, DirItem), toa::ReadExactError<io::Error>>;
 

@@ -116,7 +116,7 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 let Some(Some((_, x, id))) = blobs.get_mut(usize::from(slot)) else {
                     continue;
                 };
-                store.blob(*id).unwrap().clear().unwrap();
+                store.blob(*id).clear().unwrap();
                 x.clear();
             }
             Op::DeleteBlob { slot } => {
@@ -124,7 +124,7 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 else {
                     continue;
                 };
-                store.blob(id).unwrap().delete().unwrap();
+                store.blob(id).delete().unwrap();
                 blob_map.remove(name);
             }
             Op::AppendBlob {
@@ -137,7 +137,7 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 else {
                     continue;
                 };
-                let y = store.blob(*id).unwrap();
+                let y = store.blob(*id);
                 let data = (0..count)
                     .map(|i| start.wrapping_add(step.wrapping_mul(i as u8)))
                     .collect::<Vec<u8>>();
@@ -149,7 +149,7 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 let Some((_, x, id)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref()) else {
                     continue;
                 };
-                let y = store.blob(*id).unwrap();
+                let y = store.blob(*id);
                 let mut buf = vec![0; len.into()];
                 let n = y.read_at(offset.into(), &mut buf).unwrap();
                 let x = x.get(offset as usize..).unwrap_or(&[]);
@@ -162,7 +162,7 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
                 else {
                     continue;
                 };
-                store.blob(*id).unwrap().rename(new_name).unwrap();
+                store.blob(*id).rename(new_name).unwrap();
                 if *old_name != new_name {
                     blob_map.remove(old_name);
                     blob_map

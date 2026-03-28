@@ -256,7 +256,7 @@ fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
 }
 
 fn open(store: &Path, write: bool) -> Result<(Toa, Hash)> {
-    let dev = Toa::open(store, write)?;
+    let dev = Toa::load(store, write)?;
     let key = dev
         .meta("unix.root")
         .ok_or("meta key \"unix.root\" not found")?;

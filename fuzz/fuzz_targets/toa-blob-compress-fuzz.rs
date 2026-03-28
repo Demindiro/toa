@@ -2,7 +2,7 @@
 
 use std::collections::hash_map::{Entry, HashMap};
 use toa_blob::{BlobStore, MemBlocks};
-use toa_blob_compress::{BlobSet, BlobStoreCompress, Compression, PageSize};
+use toa_blob_compress::{BlobRef, BlobSet, Compression, PageSize};
 
 #[derive(Debug, arbitrary::Arbitrary)]
 enum Op<'a> {
@@ -29,10 +29,6 @@ enum Op<'a> {
         offset: u32,
         len: u16,
     },
-    RenameBlob {
-        slot: u16,
-        new_name: &'a [u8],
-    },
 }
 
 libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
@@ -47,22 +43,24 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
     let dev = MemBlocks::new(toa_blob::BlockShift::N9, 200, 100);
     let store = BlobStore::init(dev).unwrap();
-    let store = BlobStoreCompress::new(store);
 
-    let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
-    let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobSet)>>::with_capacity(1 << 16);
+    let mut blob_map = HashMap::<&str, u16>::with_capacity(1 << 16);
+    let mut blobs = Vec::<Option<(&str, Vec<u8>, BlobSet<_>)>>::with_capacity(1 << 16);
 
     for op in ops {
         match op {
             Op::CreateBlob { name } => {
                 let name = &name[..name.len().min(200)];
+                let Ok(name) = core::str::from_utf8(name) else {
+                    continue;
+                };
                 match (
                     blob_map.entry(name),
-                    store.create_blob(name, PageSize::K4, compress, 0).unwrap(),
+                    BlobRef::create(&store, name, PageSize::K4, compress, 0).unwrap(),
                 ) {
                     (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
-                        blobs.push(Some((name, Vec::new(), x.blob_set())));
+                        blobs.push(Some((name, Vec::new(), *x.blob_set())));
                     }
                     (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
                     _ => panic!("blob map corrupt"),
@@ -73,7 +71,7 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
                 else {
                     continue;
                 };
-                store.blob(id).unwrap().delete().unwrap();
+                BlobRef::blob(&store, id).delete().unwrap();
                 blob_map.remove(name);
             }
             Op::AppendBlob {
@@ -86,7 +84,7 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
                 else {
                     continue;
                 };
-                let y = store.blob(*id).unwrap();
+                let y = BlobRef::blob(&store, *id);
                 let data = (0..count)
                     .map(|i| start.wrapping_add(step.wrapping_mul(i as u8)))
                     .collect::<Vec<u8>>();
@@ -98,31 +96,12 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
                 let Some((_, x, id)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref()) else {
                     continue;
                 };
-                let y = store.blob(*id).unwrap();
+                let y = BlobRef::blob(&store, *id);
                 let mut buf = vec![0; len.into()];
                 let n = y.read_at(offset.into(), &mut buf).unwrap();
                 let x = x.get(offset as usize..).unwrap_or(&[]);
                 let x = x.get(..len.into()).unwrap_or(x);
                 assert_eq!(x, &buf[..n]);
-            }
-            Op::RenameBlob { slot, new_name } => {
-                let new_name = &new_name[..new_name.len().min(255)];
-                let Some((old_name, _, id)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref())
-                else {
-                    continue;
-                };
-                store.blob(*id).unwrap().rename(new_name).unwrap();
-                if *old_name != new_name {
-                    blob_map.remove(old_name);
-                    blob_map
-                        .entry(new_name)
-                        .and_modify(|x| {
-                            blobs[usize::from(*x)] = None;
-                            *x = slot;
-                        })
-                        .or_insert(slot);
-                    blobs[usize::from(slot)].as_mut().unwrap().0 = new_name;
-                }
             }
         }
     }

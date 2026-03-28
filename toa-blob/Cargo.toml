@@ -10,3 +10,4 @@ std = []
 bitvec = { version = "1.0.1", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1.25.0", features = ["derive", "min_const_generics"] }
 nora_endian = "0.1.3"
+toa-blob-store = { path = "../toa-blob-store" }
