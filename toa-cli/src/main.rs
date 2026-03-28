@@ -24,8 +24,8 @@ struct Toa {
     meta: BTreeMap<Box<str>, Hash>,
 }
 
-#[derive(Default)]
 struct Stat {
+    original_disk_size: u64,
     size_sum: u64,
 }
 
@@ -144,11 +144,22 @@ impl ops::DerefMut for Toa {
 }
 
 impl Stat {
+    fn new(toa: &Toa) -> Result<Self> {
+        Ok(Self {
+            original_disk_size: toa.size_on_disk()?,
+            size_sum: 0,
+        })
+    }
+
     fn summarize(self, toa: &Toa) {
+        let Self {
+            original_disk_size,
+            size_sum,
+        } = self;
         let toa_size = toa.inner.size_on_disk().unwrap();
-        let Self { size_sum } = self;
-        let ratio = size_sum as f64 / toa_size as f64;
-        println!("store size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
+        let added = toa_size - original_disk_size;
+        let ratio = size_sum as f64 / added as f64;
+        println!("store size: {toa_size}, added: {added}, files size: {size_sum}, ratio: {ratio}");
     }
 }
 

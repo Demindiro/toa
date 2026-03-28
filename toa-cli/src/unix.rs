@@ -35,7 +35,7 @@ where
     let store = PathBuf::from(store);
 
     let mut dev = Toa::load(&store, true)?;
-    let mut stat = Stat::default();
+    let mut stat = Stat::new(&dev)?;
     let root_key = add_dir(&mut dev, &dir, &mut stat)?;
     println!("d {root_key:?} {dir}");
     dev.set_meta(&name, &root_key);
