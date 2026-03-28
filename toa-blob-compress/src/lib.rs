@@ -10,10 +10,6 @@ const TABLE_SUFFIX: &str = ".table.compr";
 const PAGES_SUFFIX: &str = ".pages.compr";
 const TAIL_SUFFIX: &str = ".tail.compr";
 
-pub struct BlobStoreCompress<T> {
-    store: T,
-}
-
 pub struct BlobRef<'a, T>
 where
     T: BlobStore,
@@ -78,39 +74,33 @@ struct TableEntry {
     compressed_len: u32le,
 }
 
-impl<T> BlobStoreCompress<T> {
-    pub fn new(store: T) -> Self {
-        Self { store }
-    }
-
-    pub fn inner(&self) -> &T {
-        &self.store
-    }
-
-    pub fn into_inner(self) -> T {
-        self.store
-    }
-}
-
-impl<T> BlobStoreCompress<T>
+impl<'a, T> BlobRef<'a, T>
 where
     T: BlobStore,
 {
-    pub fn create_blob<'a>(
-        &'a self,
+    pub fn blob(store: &'a T, blobs: BlobSet<T::BlobHandle>) -> Self {
+        Self { store, blobs }
+    }
+
+    pub fn blob_set(&self) -> &BlobSet<T::BlobHandle> {
+        &self.blobs
+    }
+
+    pub fn create(
+        store: &'a T,
         name: &str,
         page_size: PageSize,
         compression: Compression,
         compression_level: u8,
-    ) -> io::Result<Result<BlobRef<'a, T>, DuplicateBlob>> {
+    ) -> io::Result<Result<Self, DuplicateBlob>> {
         // TODO transactions (rollbacks!)
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
         match (
-            self.store.create(&table)?,
-            self.store.create(&pages)?,
-            self.store.create_unzoned(&tail)?,
+            store.create(&table)?,
+            store.create(&pages)?,
+            store.create_unzoned(&tail)?,
         ) {
             (Ok(table), Ok(pages), Ok(tail)) => {
                 let hdr = TableHeader {
@@ -121,40 +111,36 @@ where
                     compression_level,
                     _pad_0: Default::default(),
                 };
-                self.store.append(&table, bytemuck::bytes_of(&hdr))?;
-                Ok(Ok(self.blob(BlobSet {
-                    page_size,
-                    compression,
-                    compression_level,
-                    table,
-                    pages,
-                    tail,
-                })))
+                store.append(&table, bytemuck::bytes_of(&hdr))?;
+                Ok(Ok(Self::blob(
+                    store,
+                    BlobSet {
+                        page_size,
+                        compression,
+                        compression_level,
+                        table,
+                        pages,
+                        tail,
+                    },
+                )))
             }
             (Err(e), Err(_), Err(_)) => Ok(Err(e)),
             _ => todo!("blob missing"),
         }
     }
 
-    pub fn blob<'a>(&'a self, blobs: BlobSet<T::BlobHandle>) -> BlobRef<'a, T> {
-        BlobRef {
-            store: &self.store,
-            blobs,
-        }
-    }
-
-    pub fn find<'a>(&'a self, name: &str) -> io::Result<Option<BlobRef<'a, T>>> {
+    pub fn find(store: &'a T, name: &str) -> io::Result<Option<Self>> {
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
-        let f = |x| self.store.find(x);
+        let f = |x| store.find(x);
         match (f(&table)?, f(&pages)?, f(&tail)?) {
             (Some(table), Some(pages), Some(tail)) => {
-                if self.store.len(&table)? < 32 {
+                if store.len(&table)? < 32 {
                     todo!("table too short");
                 }
                 let hdr = &mut [0; 32];
-                self.store.read_at(&table, 0, hdr)?;
+                store.read_at(&table, 0, hdr)?;
                 let hdr = bytemuck::cast_ref::<_, TableHeader>(hdr);
                 if hdr.magic != TableHeader::MAGIC {
                     todo!("bad table magic");
@@ -165,14 +151,17 @@ where
                 let page_size = PageSize::try_from(u32::from(hdr.page_size)).unwrap();
                 let compression = Compression::try_from(hdr.compression).unwrap();
                 let compression_level = hdr.compression_level.into();
-                Ok(Some(self.blob(BlobSet {
-                    page_size,
-                    compression,
-                    compression_level,
-                    table,
-                    pages,
-                    tail,
-                })))
+                Ok(Some(Self::blob(
+                    store,
+                    BlobSet {
+                        page_size,
+                        compression,
+                        compression_level,
+                        table,
+                        pages,
+                        tail,
+                    },
+                )))
             }
             (None, None, None) => Ok(None),
             _ => todo!("blob missing"),
@@ -185,15 +174,6 @@ where
 
     pub fn size_on_disk(&self) -> io::Result<u64> {
         self.store.size_on_disk()
-    }
-}
-
-impl<'a, T> BlobRef<'a, T>
-where
-    T: BlobStore,
-{
-    pub fn blob_set(&self) -> &BlobSet<T::BlobHandle> {
-        &self.blobs
     }
 
     pub fn clear(&self) -> io::Result<()> {
@@ -384,15 +364,16 @@ impl<T> BlobSet<T> {
             out[..page.len()].copy_from_slice(page);
             (Compression::None, page.len())
         };
-        let n = match self.compression {
+        let _n = match self.compression {
             Compression::None => return f(out),
             #[cfg(feature = "lz4")]
             Compression::Lz4 => self.compress_lz4(page, out),
             #[cfg(feature = "zstd")]
             Compression::Zstd => self.compress_zstd(page, out),
         };
-        if n < page.len() {
-            (self.compression, n)
+        #[allow(unreachable_code)] // if all features are disabled
+        if _n < page.len() {
+            (self.compression, _n)
         } else {
             f(out)
         }
@@ -485,15 +466,14 @@ mod test {
     use super::*;
     use toa_blob::{BlobStore, BlockShift, MemBlocks};
 
-    fn init() -> BlobStoreCompress<BlobStore<MemBlocks>> {
-        BlobStoreCompress::new(BlobStore::init(MemBlocks::new(BlockShift::N9, 42, 10)).unwrap())
+    fn init() -> BlobStore<MemBlocks> {
+        BlobStore::init(MemBlocks::new(BlockShift::N9, 42, 10)).unwrap()
     }
 
     #[test]
     fn read_large() {
         let s = init();
-        let b = s
-            .create_blob("", PageSize::K4, Compression::None, 0)
+        let b = BlobRef::create(&s, "", PageSize::K4, Compression::None, 0)
             .unwrap()
             .unwrap();
         let x = &[1; 20000];
@@ -507,8 +487,7 @@ mod test {
     #[test]
     fn read_small() {
         let s = init();
-        let b = s
-            .create_blob("", PageSize::K4, Compression::None, 0)
+        let b = BlobRef::create(&s, "", PageSize::K4, Compression::None, 0)
             .unwrap()
             .unwrap();
         let x = &[1; 20000];

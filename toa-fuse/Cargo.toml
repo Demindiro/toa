@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-toa = { path = "../toa", features = ["blob-compress"] }
+toa = { path = "../toa" }
 toa-blob = { path = "../toa-blob", features = ["std"] }
-toa-blob-compress = { path = "../toa-blob-compress", features = ["lz4", "zstd"] }
 toa-unix = { path = "../toa-unix" }
 env_logger = "0.11.8"
 fuser = "0.16.0"

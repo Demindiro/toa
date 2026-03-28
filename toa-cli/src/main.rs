@@ -10,12 +10,11 @@ use std::{
     ops,
     path::{Path, PathBuf},
 };
-use toa::Hash;
+use toa::{Compression, Hash, PageSize};
 use toa_blob::{BlobStore, FileBlocks};
-use toa_blob_compress::{BlobStoreCompress, Compression, PageSize};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Store = toa::BlobStoreCompress<BlobStore<FileBlocks>>;
+type Store = BlobStore<FileBlocks>;
 type InnerToa = toa::Toa<Store>;
 type Object<'a> = toa::Object<'a, Store>;
 
@@ -32,8 +31,7 @@ struct Stat {
 impl Toa {
     fn init(dev: FileBlocks) -> Result<Self> {
         let store = BlobStore::init(dev)?;
-        let store = Self::wrap_store(store);
-        let inner = toa::Toa::open(store)?;
+        let inner = toa::Toa::open(store, PageSize::K128, Compression::Zstd, 200)?;
         let meta = BTreeMap::default();
         Ok(Self { inner, meta })
     }
@@ -51,8 +49,7 @@ impl Toa {
             };
             let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
             let store = BlobStore::load(dev)?;
-            let store = Self::wrap_store(store);
-            toa::Toa::open(store)?
+            toa::Toa::open(store, PageSize::K128, Compression::Zstd, 200)?
         };
 
         let root = inner.root();
@@ -92,17 +89,6 @@ impl Toa {
         }
 
         Ok(Self { inner, meta })
-    }
-
-    fn wrap_store(store: BlobStore<FileBlocks>) -> Store {
-        let store = BlobStoreCompress::new(store);
-        let store = toa::BlobStoreCompress {
-            store,
-            page_size: PageSize::K128,
-            compression: Compression::Zstd,
-            compression_level: u8::MAX,
-        };
-        store
     }
 
     fn get(&self, key: &Hash) -> Result<Object<'_>> {

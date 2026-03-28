@@ -1,5 +1,6 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
+pub use toa_blob_compress::{Compression, PageSize};
 pub use toa_blob_store::{BlobStore, BlobStoreExt};
 pub use toa_hash::Hash;
 
@@ -48,14 +49,6 @@ pub struct Refs<'a, T>(Typed<'a, T>)
 where
     T: BlobStore;
 
-#[cfg(feature = "blob-compress")]
-pub struct BlobStoreCompress<T> {
-    pub store: toa_blob_compress::BlobStoreCompress<T>,
-    pub page_size: toa_blob_compress::PageSize,
-    pub compression: toa_blob_compress::Compression,
-    pub compression_level: u8,
-}
-
 type Map = BTreeMap<Hash, FileRef>;
 
 struct Typed<'a, T>
@@ -96,7 +89,12 @@ impl<T> Toa<T>
 where
     T: BlobStore,
 {
-    pub fn open(mut store: T) -> io::Result<Self> {
+    pub fn open(
+        mut store: T,
+        page_size: PageSize,
+        compression: Compression,
+        compression_level: u8,
+    ) -> io::Result<Self> {
         let mut map = Map::default();
         let data = BlobsTyped::open_at(&mut store, "data", &mut map, Domain::Data)?;
         let refs = BlobsTyped::open_at(&mut store, "refs", &mut map, Domain::Refs)?;
@@ -842,84 +840,6 @@ impl BlobStore for Dir {
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         std::fs::read_dir(&self.0)?.try_fold(0, |s, x| Ok(s + x?.metadata()?.len()))
-    }
-
-    fn find(&self, _name: &str) -> io::Result<Option<Self::BlobHandle>> {
-        todo!()
-    }
-    fn create(&self, _name: &str) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
-        todo!()
-    }
-    fn create_unzoned(
-        &self,
-        _name: &str,
-    ) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
-        todo!()
-    }
-    fn len(&self, _blob: &Self::BlobHandle) -> io::Result<u64> {
-        todo!()
-    }
-    fn clear(&self, _blob: &Self::BlobHandle) -> io::Result<()> {
-        todo!()
-    }
-    fn delete(&self, _blob: Self::BlobHandle) -> io::Result<()> {
-        todo!()
-    }
-}
-
-#[cfg(feature = "blob-compress")]
-impl<U> BlobStore for BlobStoreCompress<toa_blob::BlobStore<U>>
-where
-    U: toa_blob::ZoneDev,
-{
-    type BlobHandle = toa_blob_compress::BlobSet<toa_blob::BlobId>;
-
-    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        match self.store.create_blob(
-            name,
-            self.page_size,
-            self.compression,
-            self.compression_level,
-        )? {
-            Ok(x) => Ok(*x.blob_set()),
-            Err(_) => Ok(*self.store.find(&name)?.unwrap().blob_set()),
-        }
-    }
-    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        match self.store.find(name)? {
-            Some(x) => {
-                x.clear()?;
-                Ok(*x.blob_set())
-            }
-            None => Ok(*self
-                .store
-                .create_blob(
-                    name,
-                    self.page_size,
-                    self.compression,
-                    self.compression_level,
-                )?
-                .unwrap()
-                .blob_set()),
-        }
-    }
-    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
-        self.store.find(old_name)?.unwrap().rename(new_name)
-    }
-    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
-        self.store.blob(*blob).append(data)
-    }
-    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
-        self.store.blob(*blob).append_many(data)
-    }
-    fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.store.blob(*blob).read_at(offset, buf)
-    }
-    fn flush(&self) -> io::Result<()> {
-        self.store.flush()
-    }
-    fn size_on_disk(&self) -> io::Result<u64> {
-        self.store.size_on_disk()
     }
 
     fn find(&self, _name: &str) -> io::Result<Option<Self::BlobHandle>> {
