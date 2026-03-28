@@ -283,17 +283,6 @@ where
     };
     eprintln!("using {} blocks", fmt_size_si(block_size.into()));
 
-    // default to 256MiB zone size
-    // https://146a55aca6f00848c565-a7635525d40ac1c70300198708936b4e.ssl.cf1.rackcdn.com/images/133059501b4dfbcabffde7b8d0e3427481af62f1.pdf
-    // > Initial de facto zone size chosen was 256MiB for all zones.
-    // It works out to about 30k zones for a 8TB drive and ~2.5s for full zone copies. Seems reasonable?
-    let zone_size = 1 << 28;
-    let zone_blocks = u32::try_from(zone_size / u64::from(block_size)).unwrap();
-    eprintln!(
-        "using {} zones ({zone_blocks} blocks)",
-        fmt_size_si(zone_size.into())
-    );
-
     let mut len = meta.len();
     if len == 0 {
         eprintln!("file appears to be empty");
@@ -302,6 +291,27 @@ where
         len = parse_size_si(&n).ok_or("invalid size")?;
         dev.set_len(len)?;
     }
+
+    // default to 256MiB zone size
+    // https://146a55aca6f00848c565-a7635525d40ac1c70300198708936b4e.ssl.cf1.rackcdn.com/images/133059501b4dfbcabffde7b8d0e3427481af62f1.pdf
+    // > Initial de facto zone size chosen was 256MiB for all zones.
+    // It works out to about 30k zones for a 8TB drive and ~2.5s for full zone copies. Seems reasonable?
+    //
+    // Simultaneously, ensure we have at least a couple hundred zones in case of very small drives
+    // (or files).
+    let mut zone_size = 1 << 28;
+    const MIN_ZONES: u64 = 100;
+
+    while len / zone_size < MIN_ZONES {
+        zone_size >>= 1;
+    }
+
+    let zone_blocks = u32::try_from(zone_size / u64::from(block_size)).unwrap();
+    eprintln!(
+        "using {} zones ({zone_blocks} blocks)",
+        fmt_size_si(zone_size.into())
+    );
+
     let zone_count = u32::try_from(len / zone_size).unwrap();
     eprintln!("{zone_count} zones");
 
