@@ -11,14 +11,13 @@ use std::{
 };
 use toa::Hash;
 use toa_blob::{BlobStore, FileBlocks};
-use toa_blob_compress::{BlobStoreCompress, Compression, PageSize};
 use toa_unix::DirItemType;
 
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Store = toa::BlobStoreCompress<BlobStore<FileBlocks>>;
+type Store = BlobStore<FileBlocks>;
 type InnerToa = toa::Toa<Store>;
 type Object<'a> = toa::Object<'a, Store>;
 type Data<'a> = toa::Data<'a, Store>;
@@ -63,14 +62,7 @@ impl Toa {
             };
             let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
             let store = BlobStore::load(dev)?;
-            let store = BlobStoreCompress::new(store);
-            let store = toa::BlobStoreCompress {
-                store,
-                page_size: PageSize::K128,
-                compression: Compression::Lz4,
-                compression_level: u8::MAX,
-            };
-            toa::Toa::open(store)?
+            toa::Toa::load(store)?.ok_or("no Toa store initialized")?
         };
         let mut meta = BTreeMap::default();
 
