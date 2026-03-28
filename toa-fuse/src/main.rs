@@ -415,7 +415,7 @@ fn file_attr(
 }
 
 fn usage(procname: &str) -> Box<dyn Error> {
-    format!("usage: {procname} <pack> <mount> [--allow-other]").into()
+    format!("usage: {procname} <store> <name> <mount> [--allow-other]").into()
 }
 
 fn start() -> Result<()> {
@@ -428,6 +428,7 @@ fn start() -> Result<()> {
     let procname = procname.as_deref().unwrap_or("toa-fuse");
 
     let pack = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
     let mount = args.next().ok_or_else(|| usage(procname))?;
     while let Some(x) = args.next() {
         match x.to_str() {
@@ -436,12 +437,16 @@ fn start() -> Result<()> {
         }
     }
 
+    let name = name
+        .into_string()
+        .map_err(|e| format!("name {e:?} is not valid UTF-8"))?;
+
     let pack = PathBuf::from(pack);
     let dev = Toa::new(&pack).map_err(|e| format!("failed to open pack {pack:?}: {e}"))?;
     let root_key = *dev
         .meta
-        .get("unix.root")
-        .ok_or("\"unix.root\" not present in meta table")?;
+        .get(&*name)
+        .ok_or("{name:?} not present in meta table")?;
     let fs = Fs {
         dev,
         root: Node {
