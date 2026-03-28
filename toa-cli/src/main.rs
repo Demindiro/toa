@@ -31,12 +31,13 @@ struct Stat {
 impl Toa {
     fn init(dev: FileBlocks) -> Result<Self> {
         let store = BlobStore::init(dev)?;
-        let inner = toa::Toa::open(store, PageSize::K128, Compression::Zstd, 200)?;
+        let inner = toa::Toa::init(store, PageSize::K128, Compression::Zstd, 200)?
+            .map_err(|_| "store already initialized")?;
         let meta = BTreeMap::default();
         Ok(Self { inner, meta })
     }
 
-    fn open(path: &Path, write: bool) -> Result<Self> {
+    fn load(path: &Path, write: bool) -> Result<Self> {
         let inner = {
             let mut hdr = [0; 32];
             let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
@@ -49,7 +50,7 @@ impl Toa {
             };
             let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
             let store = BlobStore::load(dev)?;
-            toa::Toa::open(store, PageSize::K128, Compression::Zstd, 200)?
+            toa::Toa::load(store)?.ok_or("no store initialized")?
         };
 
         let root = inner.root();
@@ -260,7 +261,7 @@ where
     let store = PathBuf::from(store);
 
     let key = toa::Hash::from_bytes(parse_hex(&key)?);
-    let dev = Toa::open(&store, false)?;
+    let dev = Toa::load(&store, false)?;
     dump_object(&dev, &key)?;
 
     Ok(())
@@ -275,7 +276,7 @@ where
 
     let store = PathBuf::from(store);
 
-    let dev = Toa::open(&store, false)?;
+    let dev = Toa::load(&store, false)?;
     dev.iter_with(|key| {
         println!("{key:?}");
         false
@@ -294,7 +295,7 @@ where
 
     let store = PathBuf::from(store);
 
-    let dev = Toa::open(&store, false)?;
+    let dev = Toa::load(&store, false)?;
     todo!("implement Toa::scrub");
 }
 

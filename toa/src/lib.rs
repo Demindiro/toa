@@ -1,7 +1,7 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
 pub use toa_blob_compress::{Compression, PageSize};
-pub use toa_blob_store::{BlobStore, BlobStoreExt};
+pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
@@ -89,15 +89,18 @@ impl<T> Toa<T>
 where
     T: BlobStore,
 {
-    pub fn open(
+    pub fn init(
         mut store: T,
         page_size: PageSize,
         compression: Compression,
         compression_level: u8,
-    ) -> io::Result<Self> {
+    ) -> io::Result<Result<Self, DuplicateBlob>> {
         let mut map = Map::default();
-        let data = BlobsTyped::open_at(&mut store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::open_at(&mut store, "refs", &mut map, Domain::Refs)?;
+        let data = BlobsTyped::init_at(&mut store, "data", &mut map, Domain::Data)?;
+        let refs = BlobsTyped::init_at(&mut store, "refs", &mut map, Domain::Refs)?;
+        let [Ok(data), Ok(refs)] = [data, refs] else {
+            return Ok(Err(DuplicateBlob));
+        };
         let mut root = [0; 32];
         let x = store.open("root.bin")?;
         let n = store.read_at(&x, 0, &mut root)?;
@@ -105,13 +108,36 @@ where
             todo!()
         };
         let root = Hash::from_bytes(root);
-        Ok(Self {
+        Ok(Ok(Self {
             store,
             data,
             refs,
             map,
             root,
-        })
+        }))
+    }
+
+    pub fn load(mut store: T) -> io::Result<Option<Self>> {
+        let mut map = Map::default();
+        let data = BlobsTyped::load_at(&mut store, "data", &mut map, Domain::Data)?;
+        let refs = BlobsTyped::load_at(&mut store, "refs", &mut map, Domain::Refs)?;
+        let [Some(data), Some(refs)] = [data, refs] else {
+            return Ok(None);
+        };
+        let mut root = [0; 32];
+        let x = store.open("root.bin")?;
+        let n = store.read_at(&x, 0, &mut root)?;
+        if n != 32 && n != 0 {
+            todo!()
+        };
+        let root = Hash::from_bytes(root);
+        Ok(Some(Self {
+            store,
+            data,
+            refs,
+            map,
+            root,
+        }))
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
@@ -213,18 +239,60 @@ impl Blob<fs::File> {
 }
 
 impl<T> BlobsTyped<T> {
-    fn open_at<S>(store: &mut S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Self>
+    fn init_at<S>(
+        store: &mut S,
+        dir: &str,
+        map: &mut Map,
+        domain: Domain,
+    ) -> io::Result<Result<Self, DuplicateBlob>>
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let f = |name: &str| store.open(&format!("{dir}_{name}"));
-        let mut s = Self {
-            chunks_full: f("chunks_full.bin")?,
-            chunks_partial: f("chunks_partial.bin")?,
-            pairs: f("pairs.bin")?,
-        };
-        s.load(store, map, domain)?;
-        Ok(s)
+        let f = |name: &str| store.create(&format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            f("pairs.bin")?,
+        ) {
+            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => {
+                let mut s = Self {
+                    chunks_full,
+                    chunks_partial,
+                    pairs,
+                };
+                s.load(store, map, domain)?;
+                Ok(Ok(s))
+            }
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
+        }
+    }
+
+    fn load_at<S>(
+        store: &mut S,
+        dir: &str,
+        map: &mut Map,
+        domain: Domain,
+    ) -> io::Result<Option<Self>>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let f = |name: &str| store.find(&format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            f("pairs.bin")?,
+        ) {
+            (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
+                let mut s = Self {
+                    chunks_full,
+                    chunks_partial,
+                    pairs,
+                };
+                s.load(store, map, domain)?;
+                Ok(Some(s))
+            }
+            (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
+        }
     }
 
     fn add<S>(
