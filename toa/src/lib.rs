@@ -219,7 +219,7 @@ impl<T> BlobsTyped<T> {
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let mut f = |name: &str| store.open(&format!("{dir}_{name}"));
+        let f = |name: &str| store.open(&format!("{dir}_{name}"));
         let mut s = Self {
             chunks_full: f("chunks_full.bin")?,
             chunks_partial: f("chunks_partial.bin")?,
@@ -819,25 +819,25 @@ impl Dir {
 impl BlobStore for Dir {
     type BlobHandle = Blob<fs::File>;
 
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
         self.open_or_create(name, true, false)
     }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         self.open_or_create(name, true, true)
     }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         fs::rename(self.path(old_name), self.path(new_name))
     }
-    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         blob.append(data)
     }
-    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         blob.append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         blob.read_at(offset, buf)
     }
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         todo!("Dir flush")
     }
     fn size_on_disk(&self) -> io::Result<u64> {
@@ -852,7 +852,7 @@ where
 {
     type BlobHandle = toa_blob_compress::BlobSet;
 
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
         let name = name.as_bytes();
         match self.store.create_blob(
             name,
@@ -864,7 +864,7 @@ where
             Err(_) => Ok(self.store.find(&name)?.unwrap().blob_set()),
         }
     }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         let name = name.as_bytes();
         match self.store.find(name)? {
             Some(x) => {
@@ -883,22 +883,22 @@ where
                 .blob_set()),
         }
     }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         self.store
             .find(old_name.as_bytes())?
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         self.store.blob(*blob).append(data)
     }
-    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         self.store.blob(*blob).append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.store.blob(*blob).read_at(offset, buf)
     }
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         self.store.flush()
     }
     fn size_on_disk(&self) -> io::Result<u64> {

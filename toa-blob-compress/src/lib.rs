@@ -174,7 +174,7 @@ where
         }
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&self) -> io::Result<()> {
         self.store.flush()
     }
 

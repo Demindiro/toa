@@ -3,13 +3,13 @@ use std::io;
 pub trait BlobStore {
     type BlobHandle;
 
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle>;
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle>;
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()>;
-    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
-    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
+    fn open(&self, name: &str) -> io::Result<Self::BlobHandle>;
+    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle>;
+    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()>;
+    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
+    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
-    fn flush(&mut self) -> io::Result<()>;
+    fn flush(&self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
 }
 
@@ -61,25 +61,25 @@ where
 {
     type BlobHandle = T::BlobHandle;
 
-    fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
         (**self).open(name)
     }
-    fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle> {
+    fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         (**self).open_clear(name)
     }
-    fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
+    fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         (**self).rename(old_name, new_name)
     }
-    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         (**self).append(blob, data)
     }
-    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         (**self).append_many(blob, data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read_at(blob, offset, buf)
     }
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         (**self).flush()
     }
     fn size_on_disk(&self) -> io::Result<u64> {
