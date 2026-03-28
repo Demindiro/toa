@@ -203,6 +203,29 @@ where
         Ok(og_len - (buf.len() - n))
     }
 
+    pub fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+        match self.read_at(offset, buf) {
+            Ok(n) if n == buf.len() => Ok(true),
+            Ok(n) => todo!("want {}, got {n}", buf.len()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn read_at_exact_or_none(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+        match self.read_at(offset, buf) {
+            Ok(n) if n == buf.len() => Ok(true),
+            Ok(0) => Ok(false),
+            Ok(_) => todo!(),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn read_at_array<const N: usize>(&self, offset: u64) -> io::Result<[u8; N]> {
+        let mut buf = [0; N];
+        self.read_at_exact(offset, &mut buf)?;
+        Ok(buf)
+    }
+
     pub fn append(&self, data: &[u8]) -> io::Result<u64> {
         // split into (start, middle, end)
         // add tail with start to fill a page

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
-pub use toa_blob_compress::{Compression, PageSize};
+pub use toa_blob_compress::{BlobRef, Compression, PageSize};
 pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
 
@@ -12,6 +12,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
+use toa_blob_compress::BlobSet;
 use toa_hash::Domain;
 
 const CHUNK_SIZE: u128 = 1 << 13;
@@ -62,8 +63,8 @@ where
 }
 
 struct BlobsTyped<T> {
-    chunks_full: T,
-    chunks_partial: T,
+    chunks_full: BlobSet<T>,
+    chunks_partial: BlobSet<T>,
     pairs: T,
 }
 
@@ -88,6 +89,7 @@ pub enum ReadExactError<S> {
 impl<T> Toa<T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     pub fn init(
         store: T,
@@ -95,8 +97,8 @@ where
         compression: Compression,
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
-        let data = BlobsTyped::init_at(&store, "data")?;
-        let refs = BlobsTyped::init_at(&store, "refs")?;
+        let data = BlobsTyped::init_at(&store, "data", page_size, compression, compression_level)?;
+        let refs = BlobsTyped::init_at(&store, "refs", page_size, compression, compression_level)?;
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
@@ -231,20 +233,38 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T> {
-    fn init_at<S>(store: &S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
+impl<T> BlobsTyped<T>
+where
+    T: Copy, // TODO do this properly
+{
+    fn init_at<S>(
+        store: &S,
+        dir: &str,
+        page_size: PageSize,
+        compression: Compression,
+        compression_level: u8,
+    ) -> io::Result<Result<Self, DuplicateBlob>>
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let f = |name: &str| store.create(&format!("{dir}_{name}"));
+        let g = |name: &str| store.create(&format!("{dir}_{name}"));
+        let f = |name: &str| {
+            BlobRef::create(
+                store,
+                &format!("{dir}_{name}"),
+                page_size,
+                compression,
+                compression_level,
+            )
+        };
         match (
             f("chunks_full.bin")?,
             f("chunks_partial.bin")?,
-            f("pairs.bin")?,
+            g("pairs.bin")?,
         ) {
             (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
-                chunks_full,
-                chunks_partial,
+                chunks_full: *chunks_full.blob_set(),
+                chunks_partial: *chunks_partial.blob_set(),
                 pairs,
             })),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
@@ -255,16 +275,17 @@ impl<T> BlobsTyped<T> {
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let f = |name: &str| store.find(&format!("{dir}_{name}"));
+        let g = |name: &str| store.find(&format!("{dir}_{name}"));
+        let f = |name: &str| BlobRef::find(store, &format!("{dir}_{name}"));
         match (
             f("chunks_full.bin")?,
             f("chunks_partial.bin")?,
-            f("pairs.bin")?,
+            g("pairs.bin")?,
         ) {
             (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
                 let mut s = Self {
-                    chunks_full,
-                    chunks_partial,
+                    chunks_full: *chunks_full.blob_set(),
+                    chunks_partial: *chunks_partial.blob_set(),
                     pairs,
                 };
                 s.load(store, map, domain)?;
@@ -376,7 +397,7 @@ impl<T> BlobsTyped<T> {
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let offt = store.append(&mut self.chunks_full, bytes)?;
+        let offt = BlobRef::blob(store, self.chunks_full).append(bytes)?;
         Ok(FileRef::new_chunk_full(domain, offt))
     }
 
@@ -394,8 +415,11 @@ impl<T> BlobsTyped<T> {
             .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
         let pad = (!(2 + bytes.len()) + 1) & 7;
         let pad = &[0; 8][..pad];
-        let offt =
-            store.append_many(&mut self.chunks_partial, &[&hdr.to_le_bytes(), bytes, pad])?;
+        let offt = BlobRef::blob(store, self.chunks_partial).append_many(&[
+            &hdr.to_le_bytes(),
+            bytes,
+            pad,
+        ])?;
         Ok(FileRef::new_chunk_partial(domain, offt))
     }
 
@@ -434,7 +458,7 @@ impl<T> BlobsTyped<T> {
     {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.chunks_full, offt, &mut buf)? {
+        while BlobRef::blob(store, self.chunks_full).read_at_exact_or_none(offt, &mut buf)? {
             let key = toa_hash::hash_chunk(domain, &buf);
             map.insert(key, FileRef::new_chunk_full(domain, offt));
             offt += buf.len() as u64;
@@ -449,10 +473,10 @@ impl<T> BlobsTyped<T> {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = 0;
-        while store.read_at_exact_or_none(&self.chunks_partial, offt, len)? {
+        while BlobRef::blob(store, self.chunks_partial).read_at_exact_or_none(offt, len)? {
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
-            store.read_at_exact(&self.chunks_partial, offt + 2, buf)?;
+            BlobRef::blob(store, self.chunks_partial).read_at_exact(offt + 2, buf)?;
             let key = toa_hash::hash_chunk(domain, buf);
             map.insert(key, FileRef::new_chunk_partial(domain, offt));
             offt += align8(2 + u64::from(len));
@@ -557,6 +581,7 @@ where
 impl<'a, T> Data<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     /// # Note
     ///
@@ -594,6 +619,7 @@ where
 impl<'a, T> Refs<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     /// # Note
     ///
@@ -636,6 +662,7 @@ where
 impl<'a, T> Typed<'a, T>
 where
     T: BlobStore,
+    T::BlobHandle: Copy, // TODO
 {
     pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
         match self.location.ty().0 {
@@ -670,9 +697,8 @@ where
     pub fn len_bits(&self) -> io::Result<u128> {
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
-            FileRef::TY_CHUNK_PARTIAL => self
-                .store
-                .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+            FileRef::TY_CHUNK_PARTIAL => BlobRef::blob(self.store, self.blobs.chunks_partial)
+                .read_at_array(self.location.offset())
                 .map(u16::from_le_bytes)
                 .map(u128::from),
             FileRef::TY_PAIR => self
@@ -713,12 +739,8 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        self.store
-            .read_at(
-                &self.blobs.chunks_full,
-                self.location.offset() + offset as u64,
-                buf,
-            )
+        BlobRef::blob(self.store, self.blobs.chunks_full)
+            .read_at(self.location.offset() + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(len)
     }
@@ -728,9 +750,8 @@ where
         offset: u128,
         buf: &mut [u8],
     ) -> Result<usize, ReadError<io::Error>> {
-        let nb = self
-            .store
-            .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+        let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
+            .read_at_array(self.location.offset())
             .map(u16::from_le_bytes)
             .map_err(ReadError::Io)?;
         let n = align8(nb) >> 3;
@@ -739,12 +760,8 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        self.store
-            .read_at(
-                &self.blobs.chunks_partial,
-                self.location.offset() + 2 + offset as u64,
-                buf,
-            )
+        BlobRef::blob(self.store, self.blobs.chunks_partial)
+            .read_at(self.location.offset() + 2 + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(n)
     }
@@ -755,9 +772,8 @@ where
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => println!("F"),
             FileRef::TY_CHUNK_PARTIAL => {
-                let nb = self
-                    .store
-                    .read_at_array(&self.blobs.chunks_partial, self.location.offset())
+                let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
+                    .read_at_array(self.location.offset())
                     .map(u16::from_le_bytes)
                     .unwrap();
                 println!("{}", nb);
