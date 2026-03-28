@@ -5,6 +5,7 @@ pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
 use std::{
+    cell::Cell,
     collections::btree_map::{BTreeMap, Entry},
     fs,
     io::{self, Write},
@@ -29,7 +30,7 @@ where
 
 pub struct Blob<T> {
     file: T,
-    len: u64,
+    len: Cell<u64>,
 }
 
 pub enum Object<'a, T>
@@ -183,18 +184,18 @@ impl Blob<fs::File> {
     /// # Returns
     ///
     /// Offset.
-    fn append(&mut self, data: &[u8]) -> io::Result<u64> {
+    fn append(&self, data: &[u8]) -> io::Result<u64> {
         self.append_many(&[data])
     }
 
     /// # Returns
     ///
     /// Offset.
-    fn append_many(&mut self, data: &[&[u8]]) -> io::Result<u64> {
-        let o = self.len;
+    fn append_many(&self, data: &[&[u8]]) -> io::Result<u64> {
+        let o = self.len.get();
         for x in data {
-            self.file.write_all(x)?;
-            self.len += x.len() as u64;
+            (&self.file).write_all(x)?;
+            self.len.update(|y| y + x.len() as u64);
         }
         Ok(o)
     }
@@ -803,7 +804,7 @@ impl Dir {
             .truncate(truncate)
             .open(path)
             .and_then(|file| {
-                let len = file.metadata()?.len();
+                let len = file.metadata()?.len().into();
                 Ok(Blob { file, len })
             })
     }
@@ -827,10 +828,10 @@ impl BlobStore for Dir {
     fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
         fs::rename(self.path(old_name), self.path(new_name))
     }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         blob.append(data)
     }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         blob.append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
@@ -888,10 +889,10 @@ where
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         self.store.blob(*blob).append(data)
     }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         self.store.blob(*blob).append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {

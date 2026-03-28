@@ -6,8 +6,8 @@ pub trait BlobStore {
     fn open(&mut self, name: &str) -> io::Result<Self::BlobHandle>;
     fn open_clear(&mut self, name: &str) -> io::Result<Self::BlobHandle>;
     fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()>;
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
+    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
+    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
     fn flush(&mut self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
@@ -70,10 +70,10 @@ where
     fn rename(&mut self, old_name: &str, new_name: &str) -> io::Result<()> {
         (**self).rename(old_name, new_name)
     }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         (**self).append(blob, data)
     }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         (**self).append_many(blob, data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {

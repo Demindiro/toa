@@ -1493,10 +1493,10 @@ where
             .unwrap()
             .rename(new_name.as_bytes())
     }
-    fn append(&mut self, blob: &mut Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
+    fn append(&mut self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         self.blob(*blob).append(data)
     }
-    fn append_many(&mut self, blob: &mut Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
+    fn append_many(&mut self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64> {
         self.blob(*blob).append_many(data)
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
