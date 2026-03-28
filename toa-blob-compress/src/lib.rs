@@ -255,17 +255,6 @@ where
             .try_for_each(|x| self.store.delete(x))
     }
 
-    pub fn rename(&mut self, new_name: &str) -> io::Result<()> {
-        /*
-        // FIXME we need atomic renames
-        self.store.rename(&self.blobs.table, &concat(new_name, TABLE_SUFFIX))?;
-        self.pages().rename(&concat(new_name, PAGES_SUFFIX))?;
-        self.tail().rename(&concat(new_name, TAIL_SUFFIX))?;
-        Ok(())
-        */
-        todo!("BlobStore::rename should take BlobId, not &str");
-    }
-
     fn read_compressed_partial(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let page_size = self.blobs.page_size as u64;
         let page_mask = page_size - 1;
