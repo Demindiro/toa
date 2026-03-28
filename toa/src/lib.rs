@@ -95,9 +95,8 @@ where
         compression: Compression,
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
-        let mut map = Map::default();
-        let data = BlobsTyped::init_at(&mut store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::init_at(&mut store, "refs", &mut map, Domain::Refs)?;
+        let data = BlobsTyped::init_at(&mut store, "data")?;
+        let refs = BlobsTyped::init_at(&mut store, "refs")?;
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
@@ -105,7 +104,7 @@ where
             store,
             data,
             refs,
-            map,
+            map: Default::default(),
             root: Default::default(),
         }))
     }
@@ -233,12 +232,7 @@ impl Blob<fs::File> {
 }
 
 impl<T> BlobsTyped<T> {
-    fn init_at<S>(
-        store: &mut S,
-        dir: &str,
-        map: &mut Map,
-        domain: Domain,
-    ) -> io::Result<Result<Self, DuplicateBlob>>
+    fn init_at<S>(store: &mut S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -248,15 +242,11 @@ impl<T> BlobsTyped<T> {
             f("chunks_partial.bin")?,
             f("pairs.bin")?,
         ) {
-            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => {
-                let mut s = Self {
-                    chunks_full,
-                    chunks_partial,
-                    pairs,
-                };
-                s.load(store, map, domain)?;
-                Ok(Ok(s))
-            }
+            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
+                chunks_full,
+                chunks_partial,
+                pairs,
+            })),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
         }
     }
