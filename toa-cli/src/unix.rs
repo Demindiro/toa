@@ -3,7 +3,6 @@ use crate::{InnerToa, Result, Stat, Toa, add_file, args_end, usage};
 use chrono::prelude::*;
 use std::{
     fs,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use toa::Hash;
@@ -17,86 +16,29 @@ where
 {
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
-        "new" => cmd_new(procname, args),
+        "add" => cmd_add(procname, args),
         "get" => cmd_get(procname, args),
         "ls" => cmd_ls(procname, args),
         _ => Err(usage(procname)),
     }
 }
 
-fn cmd_new<A>(procname: &str, mut args: A) -> Result<()>
+fn cmd_add<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
-    let root = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
+    let dir = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
-
-    eprint!("Will overwrite {store:?}. Continue? [y/N] ");
-    let proceed = std::io::stdin()
-        .lines()
-        .next()
-        .transpose()?
-        .is_some_and(|x| matches!(&*x.trim().to_lowercase(), "y" | "yes"));
-    if !proceed {
-        eprintln!("aborting formatting");
-        return Ok(());
-    }
-
-    eprintln!("continuing with formatting...");
 
     let store = PathBuf::from(store);
 
-    let dev = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(store)?;
-    let meta = dev.metadata()?;
-
-    let block_size = match meta.blksize() {
-        512 => toa_blob::BlockShift::N9,
-        4096 => toa_blob::BlockShift::N12,
-        x => panic!(
-            "unsupported block size {x}. Please report a bug along with filesystem and disk information."
-        ),
-    };
-    eprintln!("using {} blocks", fmt_size_si(block_size.into()));
-
-    // default to 256MiB zone size
-    // https://146a55aca6f00848c565-a7635525d40ac1c70300198708936b4e.ssl.cf1.rackcdn.com/images/133059501b4dfbcabffde7b8d0e3427481af62f1.pdf
-    // > Initial de facto zone size chosen was 256MiB for all zones.
-    // It works out to about 30k zones for a 8TB drive and ~2.5s for full zone copies. Seems reasonable?
-    let zone_size = 1 << 28;
-    let zone_blocks = u32::try_from(zone_size / u64::from(block_size)).unwrap();
-    eprintln!(
-        "using {} zones ({zone_blocks} blocks)",
-        fmt_size_si(zone_size.into())
-    );
-
-    let mut len = meta.len();
-    if len == 0 {
-        eprintln!("file appears to be empty");
-        eprint!("Please enter the desired file size (suffixes: K, M, G, T, P, E): ");
-        let n = std::io::stdin().lines().next().transpose()?.unwrap();
-        len = parse_size_si(&n).ok_or("invalid size")?;
-        dev.set_len(len)?;
-    }
-    let zone_count = u32::try_from(len / zone_size).unwrap();
-    eprintln!("{zone_count} zones");
-
-    eprintln!(
-        "{} of slack at end of file",
-        fmt_size_si(len - u64::from(zone_count) * zone_size)
-    );
-
-    let dev = toa_blob::FileBlocks::wrap(block_size, zone_blocks, zone_count, dev);
-
-    let mut dev = Toa::init(dev)?;
-    let mut stat = Stat::default();
-    let root_key = add_dir(&mut dev, &root, &mut stat)?;
-    println!("d {root_key:?} {root}");
-    dev.set_meta("unix.root", &root_key);
+    let mut dev = Toa::load(&store, true)?;
+    let mut stat = Stat::new(&dev)?;
+    let root_key = add_dir(&mut dev, &dir, &mut stat)?;
+    println!("d {root_key:?} {dir}");
+    dev.set_meta(&name, &root_key);
     dev.save_root()?;
 
     dev.flush()?;
@@ -111,12 +53,13 @@ where
     A: Iterator<Item = String>,
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
 
-    let (dev, dir) = open(&store, false)?;
+    let (dev, dir) = open(&store, &name, false)?;
     let file = traverse_path(&dev, &path, dir)?;
     crate::dump_object(&dev, &file)?;
 
@@ -128,13 +71,14 @@ where
     A: Iterator<Item = String>,
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next();
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
 
-    let (dev, dir) = open(&store, false)?;
+    let (dev, dir) = open(&store, &name, false)?;
     let dir = traverse_path(&dev, path, dir)?;
     let dir = Dir::new(&dev, &dir)?;
     println!("items: {}", dir.len());
@@ -255,11 +199,9 @@ fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     Ok(key)
 }
 
-fn open(store: &Path, write: bool) -> Result<(Toa, Hash)> {
+fn open(store: &Path, name: &str, write: bool) -> Result<(Toa, Hash)> {
     let dev = Toa::load(store, write)?;
-    let key = dev
-        .meta("unix.root")
-        .ok_or("meta key \"unix.root\" not found")?;
+    let key = dev.meta(name).ok_or("meta key \"unix.root\" not found")?;
     Ok((dev, key))
 }
 
@@ -334,33 +276,4 @@ fn fmt_item(dev: &InnerToa, dir: &Dir<'_>, item: &DirItem, key: &Hash) -> Result
     Ok(format!(
         "{ty}{permissions} {uid}:{gid} {modified:?} {len:>10} {name}"
     ))
-}
-
-fn fmt_size_si(n: u64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-    for (i, suffix) in units.into_iter().enumerate().rev() {
-        let shift = 1 << (i * 10);
-        if n >= shift {
-            let n = n as f64 / shift as f64;
-            let n = (n * 1e3).round() / 1e3;
-            return format!("{n}{suffix}");
-        }
-    }
-    "0B".into()
-}
-
-fn parse_size_si(s: &str) -> Option<u64> {
-    let (s, mul) = match s.chars().last()? {
-        '0'..='9' => (s, 0),
-        'K' => (&s[..s.len() - 1], 1),
-        'M' => (&s[..s.len() - 1], 2),
-        'G' => (&s[..s.len() - 1], 3),
-        'T' => (&s[..s.len() - 1], 4),
-        'E' => (&s[..s.len() - 1], 5),
-        'P' => (&s[..s.len() - 1], 6),
-        _ => return None,
-    };
-    let mul = 1 << (mul * 10);
-    let n = s.parse::<u64>().ok()?;
-    n.checked_mul(mul)
 }

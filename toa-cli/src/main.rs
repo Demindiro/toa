@@ -8,6 +8,7 @@ use std::{
     fs, io,
     io::{Read, Write},
     ops,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use toa::{Compression, Hash, PageSize};
@@ -23,20 +24,12 @@ struct Toa {
     meta: BTreeMap<Box<str>, Hash>,
 }
 
-#[derive(Default)]
 struct Stat {
+    original_disk_size: u64,
     size_sum: u64,
 }
 
 impl Toa {
-    fn init(dev: FileBlocks) -> Result<Self> {
-        let store = BlobStore::init(dev)?;
-        let inner = toa::Toa::init(store, PageSize::K128, Compression::Zstd, 200)?
-            .map_err(|_| "store already initialized")?;
-        let meta = BTreeMap::default();
-        Ok(Self { inner, meta })
-    }
-
     fn load(path: &Path, write: bool) -> Result<Self> {
         let inner = {
             let mut hdr = [0; 32];
@@ -63,7 +56,7 @@ impl Toa {
                 .ok_or("root is missing from store")?;
             let Object::Refs(refs) = refs else { todo!() };
             let Ok([data]) = refs.read_array(0) else {
-                todo!()
+                return Ok(Self { inner, meta });
             };
             let Ok(Some(data)) = inner.get(&data) else {
                 todo!()
@@ -151,11 +144,22 @@ impl ops::DerefMut for Toa {
 }
 
 impl Stat {
+    fn new(toa: &Toa) -> Result<Self> {
+        Ok(Self {
+            original_disk_size: toa.size_on_disk()?,
+            size_sum: 0,
+        })
+    }
+
     fn summarize(self, toa: &Toa) {
+        let Self {
+            original_disk_size,
+            size_sum,
+        } = self;
         let toa_size = toa.inner.size_on_disk().unwrap();
-        let Self { size_sum } = self;
-        let ratio = size_sum as f64 / toa_size as f64;
-        println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
+        let added = toa_size - original_disk_size;
+        let ratio = size_sum as f64 / added as f64;
+        println!("store size: {toa_size}, added: {added}, files size: {size_sum}, ratio: {ratio}");
     }
 }
 
@@ -163,19 +167,21 @@ fn usage(procname: &str) -> Box<dyn Error> {
     let s = format!(
         "\
 usage: {procname} <add|get|list>
-    get <pack> <key>
+    init <store>
+        initialize a store
+    get <store> <key>
         dump object data to stdout (may contain raw bytes!)
-    list <pack>
+    list <store>
         list all known objects
-    scrub <pack>
-        verify pack integrity
-    unix new <pack> <directory>
-    unix get <pack> <path>
-    unix ls <pack> [path]"
+    scrub <store>
+        verify store integrity
+    unix add <store> <name> <directory>
+    unix get <store> <name> <path>
+    unix ls <store> <name> [path]"
     );
     #[cfg(feature = "magic")]
     let s = s + "
-    magic all <pack>
+    magic all <store>
         list all objects along with detected file type";
     s.into()
 }
@@ -250,6 +256,93 @@ fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
     Ok(())
 }
 
+fn cmd_init<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    eprint!("Will overwrite {store:?}. Continue? [y/N] ");
+    let proceed = std::io::stdin()
+        .lines()
+        .next()
+        .transpose()?
+        .is_some_and(|x| matches!(&*x.trim().to_lowercase(), "y" | "yes"));
+    if !proceed {
+        eprintln!("aborting formatting");
+        return Ok(());
+    }
+
+    eprintln!("continuing with formatting...");
+
+    let store = PathBuf::from(store);
+
+    let dev = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(store)?;
+    let meta = dev.metadata()?;
+
+    let block_size = match meta.blksize() {
+        512 => toa_blob::BlockShift::N9,
+        4096 => toa_blob::BlockShift::N12,
+        x => panic!(
+            "unsupported block size {x}. Please report a bug along with filesystem and disk information."
+        ),
+    };
+    eprintln!("using {} blocks", fmt_size_si(block_size.into()));
+
+    let mut len = meta.len();
+    if len == 0 {
+        eprintln!("file appears to be empty");
+        eprint!("Please enter the desired file size (suffixes: K, M, G, T, P, E): ");
+        let n = std::io::stdin().lines().next().transpose()?.unwrap();
+        len = parse_size_si(&n).ok_or("invalid size")?;
+        dev.set_len(len)?;
+    }
+
+    // default to 256MiB zone size
+    // https://146a55aca6f00848c565-a7635525d40ac1c70300198708936b4e.ssl.cf1.rackcdn.com/images/133059501b4dfbcabffde7b8d0e3427481af62f1.pdf
+    // > Initial de facto zone size chosen was 256MiB for all zones.
+    // It works out to about 30k zones for a 8TB drive and ~2.5s for full zone copies. Seems reasonable?
+    //
+    // Simultaneously, ensure we have at least a couple hundred zones in case of very small drives
+    // (or files).
+    let mut zone_size = 1 << 28;
+    const MIN_ZONES: u64 = 100;
+
+    while len / zone_size < MIN_ZONES {
+        zone_size >>= 1;
+    }
+
+    let zone_blocks = u32::try_from(zone_size / u64::from(block_size)).unwrap();
+    eprintln!(
+        "using {} zones ({zone_blocks} blocks)",
+        fmt_size_si(zone_size.into())
+    );
+
+    let zone_count = u32::try_from(len / zone_size).unwrap();
+    eprintln!("{zone_count} zones");
+
+    eprintln!(
+        "{} of slack at end of file",
+        fmt_size_si(len - u64::from(zone_count) * zone_size)
+    );
+
+    let dev = toa_blob::FileBlocks::wrap(block_size, zone_blocks, zone_count, dev);
+
+    let store = BlobStore::init(dev)?;
+    let mut toa = toa::Toa::init(store, PageSize::K128, Compression::Zstd, 200)?
+        .map_err(|_| "store already initialized")?;
+    let key = toa.add_refs(&[]).unwrap();
+    toa.set_root(key).unwrap();
+    toa.flush()?;
+
+    Ok(())
+}
+
 fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -299,12 +392,42 @@ where
     todo!("implement Toa::scrub");
 }
 
+fn fmt_size_si(n: u64) -> String {
+    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    for (i, suffix) in units.into_iter().enumerate().rev() {
+        let shift = 1 << (i * 10);
+        if n >= shift {
+            let n = n as f64 / shift as f64;
+            let n = (n * 1e3).round() / 1e3;
+            return format!("{n}{suffix}");
+        }
+    }
+    "0B".into()
+}
+
+fn parse_size_si(s: &str) -> Option<u64> {
+    let (s, mul) = match s.chars().last()? {
+        '0'..='9' => (s, 0),
+        'K' => (&s[..s.len() - 1], 1),
+        'M' => (&s[..s.len() - 1], 2),
+        'G' => (&s[..s.len() - 1], 3),
+        'T' => (&s[..s.len() - 1], 4),
+        'E' => (&s[..s.len() - 1], 5),
+        'P' => (&s[..s.len() - 1], 6),
+        _ => return None,
+    };
+    let mul = 1 << (mul * 10);
+    let n = s.parse::<u64>().ok()?;
+    n.checked_mul(mul)
+}
+
 fn start() -> Result<()> {
     let mut args = std::env::args();
     let procname = args.next();
     let procname = procname.as_deref().unwrap_or("toa-cli");
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
+        "init" => cmd_init(procname, args),
         "get" => cmd_get(procname, args),
         "list" => cmd_list(procname, args),
         "scrub" => cmd_scrub(procname, args),
