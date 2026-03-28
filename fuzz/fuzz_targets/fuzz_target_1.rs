@@ -1,7 +1,7 @@
 #![no_main]
 
 use core::cell::RefCell;
-use toa::{Hash, Object};
+use toa::{Compression, Hash, Object, PageSize};
 use toa_blob::{BlobStore, MemZones};
 
 /// Like a slice but shorter and designed for repeating.
@@ -62,7 +62,9 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
 
         objs.clear();
 
-        let mut toa = toa::Toa::open(store).unwrap();
+        let mut toa = toa::Toa::init(store, PageSize::K4, Compression::Lz4, 0)
+            .unwrap()
+            .unwrap();
 
         for op in ops {
             let collect_refs = |slots: &[u8]| -> Option<Vec<Hash>> {
@@ -129,7 +131,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                 Op::Remount => {
                     let (store, res) = toa.unmount();
                     res.unwrap();
-                    toa = toa::Toa::open(store).unwrap();
+                    toa = toa::Toa::load(store).unwrap().unwrap();
                 }
             }
         }
