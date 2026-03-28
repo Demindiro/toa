@@ -983,7 +983,9 @@ mod test {
 
     fn init() -> Test {
         let store = BlobStore::init(MemZones::new(1 << 20, 20)).unwrap();
-        let toa = Toa::open(store).expect("toa init failed");
+        let toa = Toa::init(store, PageSize::K4, Compression::None, 0)
+            .expect("toa init failed")
+            .expect("duplicate toa store");
         Test { toa }
     }
 
@@ -1077,7 +1079,9 @@ mod test {
         let Test { toa } = s;
         let (store, res) = toa.unmount();
         res.unwrap();
-        let toa = Toa::open(store).expect("reload");
+        let toa = Toa::load(store)
+            .expect("reload")
+            .expect("toa store missing");
         let s = Test { toa };
         s.assert_eq(&a, b"Hello, world!");
         s.assert_eq(&b, b"Hello, planet!");
