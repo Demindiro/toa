@@ -155,7 +155,7 @@ impl Stat {
         let toa_size = toa.inner.size_on_disk().unwrap();
         let Self { size_sum } = self;
         let ratio = size_sum as f64 / toa_size as f64;
-        println!("pack size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
+        println!("store size: {toa_size}, files size: {size_sum}, ratio: {ratio}");
     }
 }
 
@@ -163,19 +163,19 @@ fn usage(procname: &str) -> Box<dyn Error> {
     let s = format!(
         "\
 usage: {procname} <add|get|list>
-    get <pack> <key>
+    get <store> <key>
         dump object data to stdout (may contain raw bytes!)
-    list <pack>
+    list <store>
         list all known objects
-    scrub <pack>
-        verify pack integrity
-    unix new <pack> <directory>
-    unix get <pack> <path>
-    unix ls <pack> [path]"
+    scrub <store>
+        verify store integrity
+    unix new <store> <directory>
+    unix get <store> <path>
+    unix ls <store> [path]"
     );
     #[cfg(feature = "magic")]
     let s = s + "
-    magic all <pack>
+    magic all <store>
         list all objects along with detected file type";
     s.into()
 }
