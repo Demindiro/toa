@@ -49,20 +49,23 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
     let store = BlobStore::init(dev).unwrap();
     let store = BlobStoreCompress::new(store);
 
-    let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
-    let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobSet)>>::with_capacity(1 << 16);
+    let mut blob_map = HashMap::<&str, u16>::with_capacity(1 << 16);
+    let mut blobs = Vec::<Option<(&str, Vec<u8>, BlobSet<_>)>>::with_capacity(1 << 16);
 
     for op in ops {
         match op {
             Op::CreateBlob { name } => {
                 let name = &name[..name.len().min(200)];
+                let Ok(name) = core::str::from_utf8(name) else {
+                    continue;
+                };
                 match (
                     blob_map.entry(name),
                     store.create_blob(name, PageSize::K4, compress, 0).unwrap(),
                 ) {
                     (Entry::Vacant(e), Ok(x)) => {
                         e.insert(blobs.len() as u16);
-                        blobs.push(Some((name, Vec::new(), x.blob_set())));
+                        blobs.push(Some((name, Vec::new(), *x.blob_set())));
                     }
                     (Entry::Occupied(_), Err(toa_blob::DuplicateBlob)) => {}
                     _ => panic!("blob map corrupt"),
@@ -107,6 +110,9 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
             }
             Op::RenameBlob { slot, new_name } => {
                 let new_name = &new_name[..new_name.len().min(255)];
+                let Ok(new_name) = core::str::from_utf8(new_name) else {
+                    continue;
+                };
                 let Some((old_name, _, id)) = blobs.get(usize::from(slot)).and_then(|x| x.as_ref())
                 else {
                     continue;

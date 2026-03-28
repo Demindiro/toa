@@ -5,10 +5,16 @@ pub trait BlobStore {
 
     fn open(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle>;
+    fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>>;
+    fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>>;
+    fn create_unzoned(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>>;
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()>;
     fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
     fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
+    fn len(&self, blob: &Self::BlobHandle) -> io::Result<u64>;
+    fn clear(&self, blob: &Self::BlobHandle) -> io::Result<()>;
+    fn delete(&self, blob: Self::BlobHandle) -> io::Result<()>;
     fn flush(&self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
 }
@@ -67,6 +73,15 @@ where
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         (**self).open_clear(name)
     }
+    fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>> {
+        (**self).find(name)
+    }
+    fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
+        (**self).create(name)
+    }
+    fn create_unzoned(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
+        (**self).create_unzoned(name)
+    }
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         (**self).rename(old_name, new_name)
     }
@@ -78,6 +93,15 @@ where
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read_at(blob, offset, buf)
+    }
+    fn len(&self, blob: &Self::BlobHandle) -> io::Result<u64> {
+        (**self).len(blob)
+    }
+    fn clear(&self, blob: &Self::BlobHandle) -> io::Result<()> {
+        (**self).clear(blob)
+    }
+    fn delete(&self, blob: Self::BlobHandle) -> io::Result<()> {
+        (**self).delete(blob)
     }
     fn flush(&self) -> io::Result<()> {
         (**self).flush()

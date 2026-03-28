@@ -1488,6 +1488,15 @@ where
         }
         Ok(self.create_blob(&name)?.unwrap().id())
     }
+    fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>> {
+        Ok(self.find(name.as_bytes())?.map(|x| x.id()))
+    }
+    fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
+        Ok(self.create_blob(name.as_bytes())?.map(|x| x.id()))
+    }
+    fn create_unzoned(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
+        Ok(self.create_unzoned_blob(name.as_bytes())?.map(|x| x.id()))
+    }
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         self.find(old_name.as_bytes())?
             .unwrap()
@@ -1501,6 +1510,15 @@ where
     }
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.blob(*blob).read_at(offset, buf)
+    }
+    fn len(&self, blob: &Self::BlobHandle) -> io::Result<u64> {
+        self.blob(*blob).len()
+    }
+    fn clear(&self, blob: &Self::BlobHandle) -> io::Result<()> {
+        self.blob(*blob).clear()
+    }
+    fn delete(&self, blob: Self::BlobHandle) -> io::Result<()> {
+        self.blob(blob).delete()
     }
     fn flush(&self) -> io::Result<()> {
         (&*self).flush()

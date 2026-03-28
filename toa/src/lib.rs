@@ -843,6 +843,28 @@ impl BlobStore for Dir {
     fn size_on_disk(&self) -> io::Result<u64> {
         std::fs::read_dir(&self.0)?.try_fold(0, |s, x| Ok(s + x?.metadata()?.len()))
     }
+
+    fn find(&self, _name: &str) -> io::Result<Option<Self::BlobHandle>> {
+        todo!()
+    }
+    fn create(&self, _name: &str) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
+        todo!()
+    }
+    fn create_unzoned(
+        &self,
+        _name: &str,
+    ) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
+        todo!()
+    }
+    fn len(&self, _blob: &Self::BlobHandle) -> io::Result<u64> {
+        todo!()
+    }
+    fn clear(&self, _blob: &Self::BlobHandle) -> io::Result<()> {
+        todo!()
+    }
+    fn delete(&self, _blob: Self::BlobHandle) -> io::Result<()> {
+        todo!()
+    }
 }
 
 #[cfg(feature = "blob-compress")]
@@ -850,28 +872,26 @@ impl<U> BlobStore for BlobStoreCompress<toa_blob::BlobStore<U>>
 where
     U: toa_blob::ZoneDev,
 {
-    type BlobHandle = toa_blob_compress::BlobSet;
+    type BlobHandle = toa_blob_compress::BlobSet<toa_blob::BlobId>;
 
     fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
         match self.store.create_blob(
             name,
             self.page_size,
             self.compression,
             self.compression_level,
         )? {
-            Ok(x) => Ok(x.blob_set()),
-            Err(_) => Ok(self.store.find(&name)?.unwrap().blob_set()),
+            Ok(x) => Ok(*x.blob_set()),
+            Err(_) => Ok(*self.store.find(&name)?.unwrap().blob_set()),
         }
     }
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
         match self.store.find(name)? {
             Some(x) => {
                 x.clear()?;
-                Ok(x.blob_set())
+                Ok(*x.blob_set())
             }
-            None => Ok(self
+            None => Ok(*self
                 .store
                 .create_blob(
                     name,
@@ -884,10 +904,7 @@ where
         }
     }
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
-        self.store
-            .find(old_name.as_bytes())?
-            .unwrap()
-            .rename(new_name.as_bytes())
+        self.store.find(old_name)?.unwrap().rename(new_name)
     }
     fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         self.store.blob(*blob).append(data)
@@ -903,6 +920,28 @@ where
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         self.store.size_on_disk()
+    }
+
+    fn find(&self, _name: &str) -> io::Result<Option<Self::BlobHandle>> {
+        todo!()
+    }
+    fn create(&self, _name: &str) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
+        todo!()
+    }
+    fn create_unzoned(
+        &self,
+        _name: &str,
+    ) -> io::Result<Result<Self::BlobHandle, toa_blob::DuplicateBlob>> {
+        todo!()
+    }
+    fn len(&self, _blob: &Self::BlobHandle) -> io::Result<u64> {
+        todo!()
+    }
+    fn clear(&self, _blob: &Self::BlobHandle) -> io::Result<()> {
+        todo!()
+    }
+    fn delete(&self, _blob: Self::BlobHandle) -> io::Result<()> {
+        todo!()
     }
 }
 
