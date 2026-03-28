@@ -101,19 +101,12 @@ where
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
-        let mut root = [0; 32];
-        let x = store.open("root.bin")?;
-        let n = store.read_at(&x, 0, &mut root)?;
-        if n != 32 && n != 0 {
-            todo!()
-        };
-        let root = Hash::from_bytes(root);
         Ok(Ok(Self {
             store,
             data,
             refs,
             map,
-            root,
+            root: Default::default(),
         }))
     }
 
@@ -125,11 +118,12 @@ where
             return Ok(None);
         };
         let mut root = [0; 32];
-        let x = store.open("root.bin")?;
-        let n = store.read_at(&x, 0, &mut root)?;
-        if n != 32 && n != 0 {
-            todo!()
-        };
+        if let Some(x) = store.find("root.bin")? {
+            let n = store.read_at(&x, 0, &mut root)?;
+            if n != 32 && n != 0 {
+                todo!()
+            }
+        }
         let root = Hash::from_bytes(root);
         Ok(Some(Self {
             store,
@@ -885,9 +879,6 @@ impl Dir {
 impl BlobStore for Dir {
     type BlobHandle = Blob<fs::File>;
 
-    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        self.open_or_create(name, true, false)
-    }
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         self.open_or_create(name, true, true)
     }

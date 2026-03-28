@@ -3,7 +3,6 @@ use std::io;
 pub trait BlobStore {
     type BlobHandle;
 
-    fn open(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>>;
     fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>>;
@@ -67,9 +66,6 @@ where
 {
     type BlobHandle = T::BlobHandle;
 
-    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        (**self).open(name)
-    }
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         (**self).open_clear(name)
     }

@@ -1474,13 +1474,6 @@ where
 {
     type BlobHandle = BlobId;
 
-    fn open(&self, name: &str) -> io::Result<Self::BlobHandle> {
-        let name = name.as_bytes();
-        match self.create_blob(&name)? {
-            Ok(x) => Ok(x.id()),
-            Err(_) => Ok(self.find(&name)?.unwrap().id()),
-        }
-    }
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         let name = name.as_bytes();
         if let Some(x) = self.find(&name)? {
