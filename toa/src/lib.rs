@@ -90,13 +90,13 @@ where
     T: BlobStore,
 {
     pub fn init(
-        mut store: T,
+        store: T,
         page_size: PageSize,
         compression: Compression,
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
-        let data = BlobsTyped::init_at(&mut store, "data")?;
-        let refs = BlobsTyped::init_at(&mut store, "refs")?;
+        let data = BlobsTyped::init_at(&store, "data")?;
+        let refs = BlobsTyped::init_at(&store, "refs")?;
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
@@ -109,10 +109,10 @@ where
         }))
     }
 
-    pub fn load(mut store: T) -> io::Result<Option<Self>> {
+    pub fn load(store: T) -> io::Result<Option<Self>> {
         let mut map = Map::default();
-        let data = BlobsTyped::load_at(&mut store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::load_at(&mut store, "refs", &mut map, Domain::Refs)?;
+        let data = BlobsTyped::load_at(&store, "data", &mut map, Domain::Data)?;
+        let refs = BlobsTyped::load_at(&store, "refs", &mut map, Domain::Refs)?;
         let [Some(data), Some(refs)] = [data, refs] else {
             return Ok(None);
         };
@@ -232,7 +232,7 @@ impl Blob<fs::File> {
 }
 
 impl<T> BlobsTyped<T> {
-    fn init_at<S>(store: &mut S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
+    fn init_at<S>(store: &S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -251,12 +251,7 @@ impl<T> BlobsTyped<T> {
         }
     }
 
-    fn load_at<S>(
-        store: &mut S,
-        dir: &str,
-        map: &mut Map,
-        domain: Domain,
-    ) -> io::Result<Option<Self>>
+    fn load_at<S>(store: &S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Option<Self>>
     where
         S: BlobStore<BlobHandle = T>,
     {
