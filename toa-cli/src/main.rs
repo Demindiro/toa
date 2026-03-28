@@ -164,9 +164,9 @@ usage: {procname} <add|get|list>
         list all known objects
     scrub <store>
         verify store integrity
-    unix new <store> <directory>
-    unix get <store> <path>
-    unix ls <store> [path]"
+    unix add <store> <name> <directory>
+    unix get <store> <name> <path>
+    unix ls <store> <name> [path]"
     );
     #[cfg(feature = "magic")]
     let s = s + "

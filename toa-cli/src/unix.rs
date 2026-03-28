@@ -16,28 +16,29 @@ where
 {
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
-        "new" => cmd_new(procname, args),
+        "add" => cmd_add(procname, args),
         "get" => cmd_get(procname, args),
         "ls" => cmd_ls(procname, args),
         _ => Err(usage(procname)),
     }
 }
 
-fn cmd_new<A>(procname: &str, mut args: A) -> Result<()>
+fn cmd_add<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
-    let root = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
+    let dir = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
 
     let mut dev = Toa::load(&store, true)?;
     let mut stat = Stat::default();
-    let root_key = add_dir(&mut dev, &root, &mut stat)?;
-    println!("d {root_key:?} {root}");
-    dev.set_meta("unix.root", &root_key);
+    let root_key = add_dir(&mut dev, &dir, &mut stat)?;
+    println!("d {root_key:?} {dir}");
+    dev.set_meta(&name, &root_key);
     dev.save_root()?;
 
     dev.flush()?;
@@ -52,12 +53,13 @@ where
     A: Iterator<Item = String>,
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
 
-    let (dev, dir) = open(&store, false)?;
+    let (dev, dir) = open(&store, &name, false)?;
     let file = traverse_path(&dev, &path, dir)?;
     crate::dump_object(&dev, &file)?;
 
@@ -69,13 +71,14 @@ where
     A: Iterator<Item = String>,
 {
     let store = args.next().ok_or_else(|| usage(procname))?;
+    let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next();
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
 
-    let (dev, dir) = open(&store, false)?;
+    let (dev, dir) = open(&store, &name, false)?;
     let dir = traverse_path(&dev, path, dir)?;
     let dir = Dir::new(&dev, &dir)?;
     println!("items: {}", dir.len());
@@ -196,11 +199,9 @@ fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     Ok(key)
 }
 
-fn open(store: &Path, write: bool) -> Result<(Toa, Hash)> {
+fn open(store: &Path, name: &str, write: bool) -> Result<(Toa, Hash)> {
     let dev = Toa::load(store, write)?;
-    let key = dev
-        .meta("unix.root")
-        .ok_or("meta key \"unix.root\" not found")?;
+    let key = dev.meta(name).ok_or("meta key \"unix.root\" not found")?;
     Ok((dev, key))
 }
 
