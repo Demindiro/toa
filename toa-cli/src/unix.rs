@@ -80,12 +80,12 @@ where
 
     let (dev, dir) = open(&store, &name, false)?;
     let dir = traverse_path(&dev, path, dir)?;
-    let dir = Dir::new(&dev, &dir)?;
+    let dir = Dir::new(&dev.inner, &dir)?;
     println!("items: {}", dir.len());
     for x in dir.iter() {
         let (i, x) = x.map_err(|e| format!("{e:?}"))?;
         let key = dir.get_ref(i).map_err(|e| format!("{e:?}"))?.unwrap();
-        let fmt = fmt_item(&dev, &dir, &x, &key)?;
+        let fmt = fmt_item(&dev.inner, &dir, &x, &key)?;
         println!("{key}  {fmt}");
     }
 
@@ -176,6 +176,7 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
         data.extend(e.name.as_bytes());
     }
     let data = dev
+        .inner
         .add_data(&data)
         .map_err(|e| format!("failed to add : {e:?}"))?;
 
@@ -183,6 +184,7 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     refs.push(data);
     refs.extend(entries.iter().map(|e| e.key));
     let refs = dev
+        .inner
         .add_refs(&refs)
         .map_err(|e| format!("failed to add : {e:?}"))?;
     Ok(refs)
@@ -194,6 +196,7 @@ fn add_symlink(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     let link = path_to_utf8(&link)?;
     stat.size_sum += u64::try_from(link.len()).expect("usize <= u64");
     let key = dev
+        .inner
         .add_data(link.as_bytes())
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
@@ -211,7 +214,7 @@ fn traverse_path(dev: &Toa, path: &str, mut start: Hash) -> Result<Hash> {
         if !is_dir {
             return Err(format!("{p:?} is not a directory").into());
         }
-        let dir = Dir::new(dev, &start)?;
+        let dir = Dir::new(&dev.inner, &start)?;
         for x in dir.iter() {
             let (i, x) = x.map_err(|e| format!("{e:?}"))?;
             if x.name.len() != p.len() as u64 {

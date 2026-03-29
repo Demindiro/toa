@@ -7,7 +7,6 @@ use std::{
     error::Error,
     fs, io,
     io::{Read, Write},
-    ops,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
@@ -101,6 +100,7 @@ impl Toa {
             data.extend(k.bytes());
         }
         let root = self
+            .inner
             .add_data(&data)
             .map_err(|e| format!("failed to create meta data: {e:?}"))?;
 
@@ -108,10 +108,12 @@ impl Toa {
         hashes.push(root);
         hashes.extend(self.meta.values());
         let root = self
+            .inner
             .add_refs(&hashes)
             .map_err(|e| format!("failed to create meta refs: {e:?}"))?;
 
-        self.set_root(root)
+        self.inner
+            .set_root(root)
             .map_err(|e| format!("failed to set root: {e:?}"))?;
         Ok(())
     }
@@ -129,24 +131,10 @@ impl Toa {
     }
 }
 
-impl ops::Deref for Toa {
-    type Target = InnerToa;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl ops::DerefMut for Toa {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
 impl Stat {
     fn new(toa: &Toa) -> Result<Self> {
         Ok(Self {
-            original_disk_size: toa.size_on_disk()?,
+            original_disk_size: toa.inner.size_on_disk()?,
             size_sum: 0,
         })
     }
@@ -229,6 +217,7 @@ fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     };
     stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
     let key = dev
+        .inner
         .add_data(&data)
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
     Ok(key)
@@ -368,11 +357,12 @@ where
     let store = PathBuf::from(store);
 
     let dev = Toa::load(&store, false)?;
-    dev.iter_with(|key| {
-        println!("{key:?}");
-        false
-    })
-    .map_err(|e| format!("failure during store iteration: {e:?}"))?;
+    dev.inner
+        .iter_with(|key| {
+            println!("{key:?}");
+            false
+        })
+        .map_err(|e| format!("failure during store iteration: {e:?}"))?;
 
     Ok(())
 }
