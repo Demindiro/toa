@@ -336,8 +336,6 @@ where
     let store = BlobStore::init(dev)?;
     let mut toa = toa::Toa::init(store, PageSize::K128, Compression::Zstd, 200)?
         .map_err(|_| "store already initialized")?;
-    let key = toa.add_refs(&[]).unwrap();
-    toa.set_root(key).unwrap();
     toa.flush()?;
 
     Ok(())
