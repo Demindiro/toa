@@ -17,71 +17,39 @@ type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
 type InnerToa = toa::Toa<Store>;
 type Object<'a> = toa::Object<'a, Store>;
+type Refs<'a> = toa::Refs<'a, Store>;
+
+// FIXME bro
+struct ToaToa {
+    inner: InnerToa,
+}
 
 struct Toa {
-    inner: InnerToa,
+    toa: ToaToa,
     meta: BTreeMap<Box<str>, Hash>,
 }
 
 struct Stat {
     original_disk_size: u64,
     size_sum: u64,
+    dropped: u64,
 }
 
-impl Toa {
+impl ToaToa {
     fn load(path: &Path, write: bool) -> Result<Self> {
-        let inner = {
-            let mut hdr = [0; 32];
-            let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
-            (&dev).read_exact(&mut hdr)?;
-            let hdr = toa_blob::snoop_header(hdr).unwrap();
-            let blk = match hdr.block_size {
-                512 => toa_blob::BlockShift::N9,
-                4096 => toa_blob::BlockShift::N12,
-                x => todo!("block size {x}"),
-            };
-            let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
-            let store = BlobStore::load(dev)?;
-            toa::Toa::load(store)?.ok_or("no store initialized")?
+        let mut hdr = [0; 32];
+        let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
+        (&dev).read_exact(&mut hdr)?;
+        let hdr = toa_blob::snoop_header(hdr).unwrap();
+        let blk = match hdr.block_size {
+            512 => toa_blob::BlockShift::N9,
+            4096 => toa_blob::BlockShift::N12,
+            x => todo!("block size {x}"),
         };
-
-        let root = inner.root();
-        let mut meta = BTreeMap::default();
-
-        if root != Hash::default() {
-            let refs = inner
-                .get(&root)
-                .map_err(|e| format!("failed to get root from store: {e:?}"))?
-                .ok_or("root is missing from store")?;
-            let Object::Refs(refs) = refs else { todo!() };
-            let Ok([data]) = refs.read_array(0) else {
-                return Ok(Self { inner, meta });
-            };
-            let Ok(Some(data)) = inner.get(&data) else {
-                todo!()
-            };
-            let Object::Data(data) = data else { todo!() };
-            let data = {
-                let mut b = vec![0; data.len()? as usize];
-                data.read_exact(0, &mut b)
-                    .map_err(|e| format!("root: failed to read data: {e:?}"))?;
-                b
-            };
-            let mut offset = 0;
-            for i in 1..refs.len()? {
-                let kl = usize::from(data[offset]);
-                offset += 1;
-                let k = &data[offset..][..kl];
-                let k = core::str::from_utf8(k).unwrap();
-                offset += kl;
-                let [v] = refs
-                    .read_array(i)
-                    .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
-                meta.insert(k.into(), v);
-            }
-        }
-
-        Ok(Self { inner, meta })
+        let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+        let store = BlobStore::load(dev)?;
+        let inner = toa::Toa::load(store)?.ok_or("no store initialized")?;
+        Ok(Self { inner })
     }
 
     fn get(&self, key: &Hash) -> Result<Object<'_>> {
@@ -91,29 +59,86 @@ impl Toa {
             .ok_or_else(|| format!("no object with key {key:?}").into())
     }
 
-    fn save_root(&mut self) -> Result<()> {
-        let mut data =
-            Vec::with_capacity(self.meta.keys().fold(self.meta.len(), |s, x| s + x.len()));
-        for k in self.meta.keys() {
-            let kl = u8::try_from(k.len()).map_err(|_| format!("meta key {k:?} too long"))?;
-            data.push(kl);
-            data.extend(k.bytes());
+    fn add_dir<'a, I>(&mut self, items: I) -> Result<Hash>
+    where
+        I: Iterator<Item = (&'a str, Hash)> + Clone,
+    {
+        let e = |e| format!("failed to add dir: {e:?}");
+        let mut dir = Vec::new();
+        for (name, _) in items.clone() {
+            dir.push(name.len() as u8);
+            dir.extend(name.bytes());
         }
-        let root = self
-            .inner
-            .add_data(&data)
-            .map_err(|e| format!("failed to create meta data: {e:?}"))?;
+        let dir = self.inner.add_data(&dir).map_err(e)?;
+        let dir = [dir]
+            .into_iter()
+            .chain(items.map(|x| x.1))
+            .collect::<Vec<_>>();
+        let dir = self.inner.add_refs(&dir).map_err(e)?;
+        Ok(dir)
+    }
 
-        let mut hashes = Vec::with_capacity(1 + self.meta.len());
-        hashes.push(root);
-        hashes.extend(self.meta.values());
-        let root = self
-            .inner
-            .add_refs(&hashes)
-            .map_err(|e| format!("failed to create meta refs: {e:?}"))?;
+    fn iter_dir(
+        &self,
+        obj: Refs<'_>,
+    ) -> Result<impl ExactSizeIterator<Item = Result<(String, Hash)>>> {
+        self.dir_to_btree(obj)
+            .map(|x| x.into_iter().map(|(k, v)| Ok((k.into(), v))))
+    }
 
-        self.inner
-            .set_root(root)
+    fn dir_to_btree(&self, refs: Refs<'_>) -> Result<BTreeMap<Box<str>, Hash>> {
+        let mut map = BTreeMap::default();
+        let Ok([data]) = refs.read_array(0) else {
+            todo!()
+        };
+        let Ok(Some(data)) = self.inner.get(&data) else {
+            todo!()
+        };
+        let Object::Data(data) = data else { todo!() };
+        let data = {
+            let mut b = vec![0; data.len()? as usize];
+            data.read_exact(0, &mut b)
+                .map_err(|e| format!("root: failed to read data: {e:?}"))?;
+            b
+        };
+        let mut offset = 0;
+        for i in 1..refs.len()? {
+            let kl = usize::from(data[offset]);
+            offset += 1;
+            let k = &data[offset..][..kl];
+            let k = core::str::from_utf8(k).unwrap();
+            offset += kl;
+            let [v] = refs
+                .read_array(i)
+                .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
+            map.insert(k.into(), v);
+        }
+
+        Ok(map)
+    }
+}
+
+impl Toa {
+    fn load(path: &Path, write: bool) -> Result<Self> {
+        let toa = ToaToa::load(path, write)?;
+        let root = toa.inner.root();
+        let root = (root != Hash::default()).then(|| toa.get(&root)).transpose()?;
+        let meta = if let Some(Object::Refs(root)) = root {
+            toa.dir_to_btree(root)?
+        } else if let Some(_) = root {
+            eprintln!("warning: meta/root is not a refs object");
+            Default::default()
+        } else {
+            Default::default()
+        };
+        Ok(Self { toa, meta })
+    }
+
+    fn save_root(&mut self) -> Result<()> {
+        let root = self.toa.add_dir(self.meta.iter().map(|x| (&**x.0, *x.1)));
+        self.toa
+            .inner
+            .set_root(root?)
             .map_err(|e| format!("failed to set root: {e:?}"))?;
         Ok(())
     }
@@ -127,15 +152,16 @@ impl Toa {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
+        self.toa.inner.flush()
     }
 }
 
 impl Stat {
     fn new(toa: &Toa) -> Result<Self> {
         Ok(Self {
-            original_disk_size: toa.inner.size_on_disk()?,
+            original_disk_size: toa.toa.inner.size_on_disk()?,
             size_sum: 0,
+            dropped: 0,
         })
     }
 
@@ -143,11 +169,13 @@ impl Stat {
         let Self {
             original_disk_size,
             size_sum,
+            dropped,
         } = self;
-        let toa_size = toa.inner.size_on_disk().unwrap();
+        let toa_size = toa.toa.inner.size_on_disk().unwrap();
         let added = toa_size - original_disk_size;
         let ratio = size_sum as f64 / added as f64;
         println!("store size: {toa_size}, added: {added}, files size: {size_sum}, ratio: {ratio}");
+        println!("dropped: {dropped}");
     }
 }
 
@@ -202,29 +230,8 @@ fn parse_hex<const N: usize>(key: &str) -> Result<[u8; N]> {
     Ok(k)
 }
 
-fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
-    let data = fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .map_err(|e| format!("failed to open {path:?}: {e}"))?;
-    // FIXME other processes *can* modify "CoW" mappings,
-    // so that's a very big problem...
-    let data = unsafe {
-        memmap2::MmapOptions::new()
-            .populate()
-            .map_copy_read_only(&data)
-            .map_err(|e| format!("failed to memory-map {path:?}: {e}"))?
-    };
-    stat.size_sum += u64::try_from(data.len()).expect("usize <= u64");
-    let key = dev
-        .inner
-        .add_data(&data)
-        .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
-    Ok(key)
-}
-
 fn dump_object(dev: &Toa, key: &Hash) -> Result<()> {
-    let obj = dev.get(&key)?;
+    let obj = dev.toa.get(&key)?;
     let Object::Data(obj) = obj else {
         todo!("dump refs?")
     };
@@ -357,7 +364,8 @@ where
     let store = PathBuf::from(store);
 
     let dev = Toa::load(&store, false)?;
-    dev.inner
+    dev.toa
+        .inner
         .iter_with(|key| {
             println!("{key:?}");
             false

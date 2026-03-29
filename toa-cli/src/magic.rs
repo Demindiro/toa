@@ -25,7 +25,8 @@ where
 
     let dev = Toa::load(&std::path::PathBuf::from(pack), false)?;
     let buf = &mut [0; 1 << 13];
-    dev.inner
+    dev.toa
+        .inner
         .iter_with(|key| {
             // TODO we can't load the entire file in memory as it may be hundred of GBs in size
             // For now loading just the 64KiB is likely sufficient,
@@ -37,7 +38,7 @@ where
             // OTOH, it appears even `file` itself can't check the end of files,
             // so perhaps it doesn't matter?
             //println!("{key:?} {}");
-            let obj = dev.get(&key).expect("exists");
+            let obj = dev.toa.get(&key).expect("exists");
             let toa::Object::Data(obj) = obj else {
                 return false;
             };
