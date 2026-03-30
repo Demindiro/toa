@@ -996,6 +996,9 @@ impl BlobStore for Dir {
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         fs::rename(self.path(old_name), self.path(new_name))
     }
+    fn name(&self, _blob: &Self::BlobHandle) -> io::Result<String> {
+        todo!();
+    }
     fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         blob.append(data)
     }
@@ -1032,6 +1035,10 @@ impl BlobStore for Dir {
     }
     fn delete(&self, _blob: Self::BlobHandle) -> io::Result<()> {
         todo!()
+    }
+    fn blobs<'a>(&'a self) -> io::Result<impl Iterator<Item = io::Result<Self::BlobHandle>> + 'a> {
+        #[allow(unreachable_code)]
+        Ok::<std::vec::IntoIter<_>, _>(todo!())
     }
 }
 
