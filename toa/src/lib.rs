@@ -98,7 +98,7 @@ where
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
         let data = BlobsTyped::init_at(&store, "data", page_size, compression, compression_level)?;
-        let refs = BlobsTyped::init_at(&store, "refs", page_size, compression, compression_level)?;
+        let refs = BlobsTyped::init_at(&store, "refs", page_size, Compression::None, 0)?;
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
