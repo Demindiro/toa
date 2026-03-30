@@ -104,7 +104,7 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
             } else {
                 eprintln!("skipping {path} (unknown format)");
                 stat.dropped += 1;
-                return Ok(())
+                return Ok(());
             };
             let name = entry
                 .file_name()

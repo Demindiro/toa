@@ -122,7 +122,9 @@ impl Toa {
     fn load(path: &Path, write: bool) -> Result<Self> {
         let toa = ToaToa::load(path, write)?;
         let root = toa.inner.root();
-        let root = (root != Hash::default()).then(|| toa.get(&root)).transpose()?;
+        let root = (root != Hash::default())
+            .then(|| toa.get(&root))
+            .transpose()?;
         let meta = if let Some(Object::Refs(root)) = root {
             toa.dir_to_btree(root)?
         } else if let Some(_) = root {
