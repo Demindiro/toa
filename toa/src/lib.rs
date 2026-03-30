@@ -24,8 +24,8 @@ where
     T: BlobStore,
 {
     store: T,
-    data: BlobsTyped<T::BlobHandle>,
-    refs: BlobsTyped<T::BlobHandle>,
+    data: BlobsTyped<T::BlobHandle, BlobSet<T::BlobHandle>>,
+    refs: BlobsTyped<T::BlobHandle, BlobSet<T::BlobHandle>>,
     map: Map,
     root: Hash,
 }
@@ -43,28 +43,28 @@ where
     Refs(Refs<'a, T>),
 }
 
-pub struct Data<'a, T>(Typed<'a, T>)
+pub struct Data<'a, T>(Typed<'a, T, BlobSet<T::BlobHandle>>)
 where
     T: BlobStore;
-pub struct Refs<'a, T>(Typed<'a, T>)
+pub struct Refs<'a, T>(Typed<'a, T, BlobSet<T::BlobHandle>>)
 where
     T: BlobStore;
 
 type Map = BTreeMap<Hash, FileRef>;
 
-struct Typed<'a, T>
+struct Typed<'a, T, CT>
 where
     T: BlobStore,
 {
-    blobs: &'a BlobsTyped<T::BlobHandle>,
+    blobs: &'a BlobsTyped<T::BlobHandle, CT>,
     map: &'a Map,
     store: &'a T,
     location: FileRef,
 }
 
-struct BlobsTyped<T> {
-    chunks_full: BlobSet<T>,
-    chunks_partial: BlobSet<T>,
+struct BlobsTyped<T, CT> {
+    chunks_full: CT,
+    chunks_partial: CT,
     pairs: T,
 }
 
@@ -233,7 +233,7 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T>
+impl<T> BlobsTyped<T, BlobSet<T>>
 where
     T: Copy, // TODO do this properly
 {
@@ -552,7 +552,7 @@ where
     }
 }
 
-impl<'a, T> Typed<'a, T>
+impl<'a, T> Typed<'a, T, BlobSet<T::BlobHandle>>
 where
     T: BlobStore,
 {
@@ -659,7 +659,7 @@ where
     }
 }
 
-impl<'a, T> Typed<'a, T>
+impl<'a, T> Typed<'a, T, BlobSet<T::BlobHandle>>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
@@ -822,7 +822,7 @@ impl<T: BlobStore> Clone for Refs<'_, T> {
     }
 }
 
-impl<T: BlobStore> Clone for Typed<'_, T> {
+impl<T: BlobStore> Clone for Typed<'_, T, BlobSet<T::BlobHandle>> {
     fn clone(&self) -> Self {
         Self {
             store: self.store,
@@ -835,7 +835,7 @@ impl<T: BlobStore> Clone for Typed<'_, T> {
 
 impl<T: BlobStore> Copy for Data<'_, T> {}
 impl<T: BlobStore> Copy for Refs<'_, T> {}
-impl<T: BlobStore> Copy for Typed<'_, T> {}
+impl<T: BlobStore> Copy for Typed<'_, T, BlobSet<T::BlobHandle>> {}
 
 impl fmt::Debug for FileRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
