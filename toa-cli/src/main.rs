@@ -11,10 +11,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use toa::{Compression, Hash, PageSize};
-use toa_blob::{BlobStore, FileBlocks};
+use toa_blob::{BlobStore, MmapBlocks};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Store = BlobStore<FileBlocks>;
+type Store = BlobStore<MmapBlocks>;
 type InnerToa = toa::Toa<Store>;
 type Object<'a> = toa::Object<'a, Store>;
 type Refs<'a> = toa::Refs<'a, Store>;
@@ -46,7 +46,9 @@ impl ToaToa {
             4096 => toa_blob::BlockShift::N12,
             x => todo!("block size {x}"),
         };
-        let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+        let dev = toa_blob::memmap::MmapRaw::map_raw(&dev)
+            .map_err(|e| format!("memory map failed: {e:?}"))?;
+        let dev = MmapBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
         let store = BlobStore::load(dev)?;
         let inner = toa::Toa::load(store)?.ok_or("no store initialized")?;
         Ok(Self { inner })

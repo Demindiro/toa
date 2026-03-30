@@ -9,13 +9,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 use toa::Hash;
-use toa_blob::{BlobStore, FileBlocks};
+use toa_blob::{BlobStore, MmapBlocks};
 
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
-type Store = BlobStore<FileBlocks>;
+type Store = BlobStore<MmapBlocks>;
 type InnerToa = toa::Toa<Store>;
 type Object<'a> = toa::Object<'a, Store>;
 type Data<'a> = toa::Data<'a, Store>;
@@ -59,7 +59,10 @@ impl Toa {
                 4096 => toa_blob::BlockShift::N12,
                 x => todo!("block size {x}"),
             };
-            let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+            let dev = toa_blob::memmap::MmapOptions::new()
+                .map_raw_read_only(&dev)
+                .map_err(|e| format!("memory map failed: {e:?}"))?;
+            let dev = MmapBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
             let store = BlobStore::load(dev)?;
             toa::Toa::load(store)?.ok_or("no Toa store initialized")?
         };
@@ -434,6 +437,7 @@ fn start() -> Result<()> {
         .map_err(|e| format!("name {e:?} is not valid UTF-8"))?;
 
     let pack = PathBuf::from(pack);
+    eprintln!("loading");
     let dev = Toa::new(&pack).map_err(|e| format!("failed to open pack {pack:?}: {e}"))?;
     let root_key = *dev
         .meta
@@ -464,6 +468,7 @@ fn start() -> Result<()> {
     if allow_other {
         opt.push(fuser::MountOption::AllowOther);
     }
+    eprintln!("mounting");
     fuser::mount2(fs, mount, &opt).map_err(|e| format!("failed to mount pack: {e}"))?;
     Ok(())
 }

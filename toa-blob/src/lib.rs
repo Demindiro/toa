@@ -1,3 +1,5 @@
+#[cfg(feature = "mmap")]
+pub use memmap2 as memmap;
 pub use toa_blob_store::DuplicateBlob;
 
 use bitvec::boxed::BitBox;
@@ -219,6 +221,19 @@ pub struct MemBlocks {
 #[cfg(feature = "std")]
 pub struct FileBlocks {
     file: std::fs::File,
+    block_size: BlockShift,
+    zone_blocks: u32,
+    zone_count: u32,
+}
+
+#[cfg(feature = "mmap")]
+pub struct MmapBlocks {
+    // Thanks to funky UNIX semantics, we cannot guarantee exclusive access even
+    // if we use a lock because external processes are allowed to modify the
+    // mapping at any time.
+    // For this reason we instead rely on "opaque" memory copies, i.e. don't
+    // allow the compiler to assume the bytes behind the memory map are stable.
+    mmap: memmap2::MmapRaw,
     block_size: BlockShift,
     zone_blocks: u32,
     zone_count: u32,
@@ -1346,6 +1361,101 @@ impl ZoneDev for FileBlocks {
     fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
         let start = self.translate(zone, offset);
         self.file.write_all_at(data, start)?;
+        Ok(())
+    }
+
+    fn reset(&self, _zone: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn zone_write_head(&self, _zone: u32) -> io::Result<Option<u64>> {
+        Ok(None)
+    }
+
+    fn block_size(&self) -> BlockShift {
+        self.block_size
+    }
+    fn zone_blocks(&self) -> u32 {
+        self.zone_blocks
+    }
+    fn zone_count(&self) -> u32 {
+        self.zone_count
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl MmapBlocks {
+    pub fn wrap(
+        block_size: BlockShift,
+        zone_blocks: u32,
+        zone_count: u32,
+        mmap: memmap2::MmapRaw,
+    ) -> Self {
+        Self {
+            mmap,
+            block_size,
+            zone_blocks,
+            zone_count,
+        }
+    }
+
+    fn zone_size(&self) -> u64 {
+        u64::from(self.zone_blocks) * u64::from(self.block_size)
+    }
+
+    #[track_caller]
+    fn translate(&self, zone: u32, offset: u64) -> usize {
+        let offset = u128::from(zone) * u128::from(self.zone_size()) + u128::from(offset);
+        usize::try_from(offset).expect("offset out of bounds")
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl ZoneDev for MmapBlocks {
+    fn read_at(&self, zone: u32, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let start = self.translate(zone, offset);
+        assert!(
+            start <= self.mmap.len() && buf.len() <= self.mmap.len() - start,
+            "out of bounds"
+        );
+        // SAFETY:
+        // - buf.len() <= map.len()
+        // - map and buf do not overlap
+        // FIXME this very likely is still unsound in terms of Rust's memory model.
+        // Some sort of "data-race-safe" memcpy would be ideal, but does that exist?
+        use core::{ptr, sync::atomic};
+        atomic::fence(atomic::Ordering::Acquire);
+        unsafe {
+            let src = self.mmap.as_ptr().add(start);
+            let dst = buf.as_mut_ptr();
+            ptr::copy_nonoverlapping(src, dst, buf.len());
+        }
+        Ok(())
+    }
+
+    fn append<'a>(&'a self, zone: u32, offset: u64, data: &[u8]) -> io::Result<()> {
+        let start = self.translate(zone, offset);
+        assert!(
+            start <= self.mmap.len() && data.len() <= self.mmap.len() - start,
+            "out of bounds"
+        );
+        let start = self.translate(zone, offset);
+        // SAFETY:
+        // - data.len() <= map.len()
+        // - map and data do not overlap
+        // FIXME this very likely is still unsound in terms of Rust's memory model.
+        // Some sort of "data-race-safe" memcpy would be ideal, but does that exist?
+        use core::{ptr, sync::atomic};
+        unsafe {
+            let dst = self.mmap.as_mut_ptr().add(start);
+            let src = data.as_ptr();
+            ptr::copy_nonoverlapping(src, dst, data.len());
+        }
+        atomic::fence(atomic::Ordering::Release);
         Ok(())
     }
 

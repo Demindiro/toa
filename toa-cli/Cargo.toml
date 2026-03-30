@@ -12,5 +12,5 @@ toa = { path = "../toa", features = ["lz4", "zstd"] }
 memmap2 = { version = "0.9.9", default-features = false }
 rand = { version = "0.8.0" }
 magic = { version = "0.16.7", optional = true }
-toa-blob = { path = "../toa-blob", features = ["std"] }
+toa-blob = { path = "../toa-blob", features = ["mmap"] }
 toa-hash = { path = "../toa-hash" }
