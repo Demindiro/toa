@@ -25,27 +25,29 @@ where
 
     let dev = Toa::load(&std::path::PathBuf::from(pack), false)?;
     let buf = &mut [0; 1 << 13];
-    dev.iter_with(|key| {
-        // TODO we can't load the entire file in memory as it may be hundred of GBs in size
-        // For now loading just the 64KiB is likely sufficient,
-        // but not all file types necessarily put the magic at the start.
-        //
-        // For Linux, the easiest workaround would probably be a "fake" mmap():
-        // unmap a large range and lazily load pages that causes a segfault.
-        //
-        // OTOH, it appears even `file` itself can't check the end of files,
-        // so perhaps it doesn't matter?
-        //println!("{key:?} {}");
-        let obj = dev.get(&key).expect("exists");
-        let toa::Object::Data(obj) = obj else {
-            return false;
-        };
-        let n = obj.read(0, buf).unwrap();
-        let ty = cookie.buffer(&buf[..n]).unwrap();
-        println!("{key} {ty}");
-        false
-    })
-    .map_err(|e| format!("failure during store iteration: {e:?}"))?;
+    dev.toa
+        .inner
+        .iter_with(|key| {
+            // TODO we can't load the entire file in memory as it may be hundred of GBs in size
+            // For now loading just the 64KiB is likely sufficient,
+            // but not all file types necessarily put the magic at the start.
+            //
+            // For Linux, the easiest workaround would probably be a "fake" mmap():
+            // unmap a large range and lazily load pages that causes a segfault.
+            //
+            // OTOH, it appears even `file` itself can't check the end of files,
+            // so perhaps it doesn't matter?
+            //println!("{key:?} {}");
+            let obj = dev.toa.get(&key).expect("exists");
+            let toa::Object::Data(obj) = obj else {
+                return false;
+            };
+            let n = obj.read(0, buf).unwrap();
+            let ty = cookie.buffer(&buf[..n]).unwrap();
+            println!("{key} {ty}");
+            false
+        })
+        .map_err(|e| format!("failure during store iteration: {e:?}"))?;
 
     Ok(())
 }
