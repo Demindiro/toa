@@ -105,7 +105,7 @@ where
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
         let data = BlobsTyped::init_at(&store, "data", page_size, compression, compression_level)?;
-        let refs = BlobsTyped::init_at(&store, "refs", page_size, Compression::None, 0)?;
+        let refs = BlobsTyped::init_at_plain(&store, "refs")?;
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
@@ -121,7 +121,7 @@ where
     pub fn load(store: T) -> io::Result<Option<Self>> {
         let mut map = Map::default();
         let data = BlobsTyped::load_at(&store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::load_at(&store, "refs", &mut map, Domain::Refs)?;
+        let refs = BlobsTyped::load_at_plain(&store, "refs", &mut map, Domain::Refs)?;
         let [Some(data), Some(refs)] = [data, refs] else {
             return Ok(None);
         };
@@ -278,6 +278,25 @@ where
         }
     }
 
+    fn init_at_plain<S>(store: &S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let f = |name: &str| store.create(&format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            f("pairs.bin")?,
+        ) {
+            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
+                chunks_full: AbstractBlob::Plain(chunks_full),
+                chunks_partial: AbstractBlob::Plain(chunks_partial),
+                pairs,
+            })),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
+        }
+    }
+
     fn load_at<S>(store: &S, dir: &str, map: &mut Map, domain: Domain) -> io::Result<Option<Self>>
     where
         S: BlobStore<BlobHandle = T>,
@@ -293,6 +312,34 @@ where
                 let mut s = Self {
                     chunks_full: AbstractBlob::Compressed(*chunks_full.blob_set()),
                     chunks_partial: AbstractBlob::Compressed(*chunks_partial.blob_set()),
+                    pairs,
+                };
+                s.load(store, map, domain)?;
+                Ok(Some(s))
+            }
+            (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
+        }
+    }
+
+    fn load_at_plain<S>(
+        store: &S,
+        dir: &str,
+        map: &mut Map,
+        domain: Domain,
+    ) -> io::Result<Option<Self>>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let f = |name: &str| store.find(&format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            f("pairs.bin")?,
+        ) {
+            (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
+                let mut s = Self {
+                    chunks_full: AbstractBlob::Plain(chunks_full),
+                    chunks_partial: AbstractBlob::Plain(chunks_partial),
                     pairs,
                 };
                 s.load(store, map, domain)?;
