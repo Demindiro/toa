@@ -24,9 +24,9 @@ pub trait BlobStoreExt: BlobStore {
         blob: &Self::BlobHandle,
         offset: u64,
         buf: &mut [u8],
-    ) -> io::Result<bool> {
+    ) -> io::Result<()> {
         match self.read_at(blob, offset, buf) {
-            Ok(n) if n == buf.len() => Ok(true),
+            Ok(n) if n == buf.len() => Ok(()),
             Ok(n) => todo!("want {}, got {n}", buf.len()),
             Err(e) => Err(e),
         }

@@ -203,9 +203,9 @@ where
         Ok(og_len - (buf.len() - n))
     }
 
-    pub fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> io::Result<bool> {
+    pub fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         match self.read_at(offset, buf) {
-            Ok(n) if n == buf.len() => Ok(true),
+            Ok(n) if n == buf.len() => Ok(()),
             Ok(n) => todo!("want {}, got {n}", buf.len()),
             Err(e) => Err(e),
         }
