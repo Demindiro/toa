@@ -750,6 +750,13 @@ where
         offset: u128,
         buf: &mut [u8],
     ) -> Result<usize, ReadError<io::Error>> {
+        // FIXME it is possible that the tail of the blob is not flushed
+        // if I/O is suddenly interrupted.
+        // Due to this a partial chunk might get torn, leading to an error
+        // here if reloaded.
+        // The best fix would be to implement transactions. Transactions will
+        // make consistency guarantees a lot easier in many cases, as well as
+        // allow fsck to completely restore consistency at the lowest layer.
         let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
             .read_at_array(self.location.offset())
             .map(u16::from_le_bytes)
