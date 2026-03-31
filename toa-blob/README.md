@@ -190,6 +190,19 @@ Unlike delete, the blob and its ID is kept.
 | u24   | (pad)                  |
 | u32   | blob ID                |
 
+##### 10. Transaction
+
+> **NOTE**: not implemented
+
+Apply the next N entries atomically.
+If any entries are missing, do not apply any of them.
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u24   | (pad)                  |
+| u32   | entry count            |
+
 ##### 84. Header
 
 Every log zone must start with this header.
