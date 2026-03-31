@@ -24,8 +24,8 @@ where
     T: BlobStore,
 {
     store: T,
-    data: BlobsTyped<T::BlobHandle>,
-    refs: BlobsTyped<T::BlobHandle>,
+    data: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
+    refs: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
     map: Map,
     root: Hash,
 }
@@ -43,29 +43,36 @@ where
     Refs(Refs<'a, T>),
 }
 
-pub struct Data<'a, T>(Typed<'a, T>)
+pub struct Data<'a, T>(Typed<'a, T, AbstractBlob<T::BlobHandle>>)
 where
     T: BlobStore;
-pub struct Refs<'a, T>(Typed<'a, T>)
+pub struct Refs<'a, T>(Typed<'a, T, AbstractBlob<T::BlobHandle>>)
 where
     T: BlobStore;
 
 type Map = BTreeMap<Hash, FileRef>;
 
-struct Typed<'a, T>
+struct Typed<'a, T, CT>
 where
     T: BlobStore,
 {
-    blobs: &'a BlobsTyped<T::BlobHandle>,
+    blobs: &'a BlobsTyped<T::BlobHandle, CT>,
     map: &'a Map,
     store: &'a T,
     location: FileRef,
 }
 
-struct BlobsTyped<T> {
-    chunks_full: BlobSet<T>,
-    chunks_partial: BlobSet<T>,
+struct BlobsTyped<T, CT> {
+    chunks_full: CT,
+    chunks_partial: CT,
     pairs: T,
+}
+
+// lol@names
+#[derive(Clone, Copy)]
+enum AbstractBlob<T> {
+    Plain(T),
+    Compressed(BlobSet<T>),
 }
 
 #[derive(Clone, Copy)]
@@ -98,7 +105,7 @@ where
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
         let data = BlobsTyped::init_at(&store, "data", page_size, compression, compression_level)?;
-        let refs = BlobsTyped::init_at(&store, "refs", page_size, compression, compression_level)?;
+        let refs = BlobsTyped::init_at_plain(&store, "refs")?;
         let [Ok(data), Ok(refs)] = [data, refs] else {
             return Ok(Err(DuplicateBlob));
         };
@@ -114,7 +121,7 @@ where
     pub fn load(store: T) -> io::Result<Option<Self>> {
         let mut map = Map::default();
         let data = BlobsTyped::load_at(&store, "data", &mut map, Domain::Data)?;
-        let refs = BlobsTyped::load_at(&store, "refs", &mut map, Domain::Refs)?;
+        let refs = BlobsTyped::load_at_plain(&store, "refs", &mut map, Domain::Refs)?;
         let [Some(data), Some(refs)] = [data, refs] else {
             return Ok(None);
         };
@@ -233,7 +240,7 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T>
+impl<T> BlobsTyped<T, AbstractBlob<T>>
 where
     T: Copy, // TODO do this properly
 {
@@ -263,8 +270,27 @@ where
             g("pairs.bin")?,
         ) {
             (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
-                chunks_full: *chunks_full.blob_set(),
-                chunks_partial: *chunks_partial.blob_set(),
+                chunks_full: AbstractBlob::Compressed(*chunks_full.blob_set()),
+                chunks_partial: AbstractBlob::Compressed(*chunks_partial.blob_set()),
+                pairs,
+            })),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
+        }
+    }
+
+    fn init_at_plain<S>(store: &S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let f = |name: &str| store.create(&format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            f("pairs.bin")?,
+        ) {
+            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
+                chunks_full: AbstractBlob::Plain(chunks_full),
+                chunks_partial: AbstractBlob::Plain(chunks_partial),
                 pairs,
             })),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
@@ -284,8 +310,36 @@ where
         ) {
             (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
                 let mut s = Self {
-                    chunks_full: *chunks_full.blob_set(),
-                    chunks_partial: *chunks_partial.blob_set(),
+                    chunks_full: AbstractBlob::Compressed(*chunks_full.blob_set()),
+                    chunks_partial: AbstractBlob::Compressed(*chunks_partial.blob_set()),
+                    pairs,
+                };
+                s.load(store, map, domain)?;
+                Ok(Some(s))
+            }
+            (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
+        }
+    }
+
+    fn load_at_plain<S>(
+        store: &S,
+        dir: &str,
+        map: &mut Map,
+        domain: Domain,
+    ) -> io::Result<Option<Self>>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let f = |name: &str| store.find(&format!("{dir}_{name}"));
+        match (
+            f("chunks_full.bin")?,
+            f("chunks_partial.bin")?,
+            f("pairs.bin")?,
+        ) {
+            (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
+                let mut s = Self {
+                    chunks_full: AbstractBlob::Plain(chunks_full),
+                    chunks_partial: AbstractBlob::Plain(chunks_partial),
                     pairs,
                 };
                 s.load(store, map, domain)?;
@@ -397,7 +451,7 @@ where
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let offt = BlobRef::blob(store, self.chunks_full).append(bytes)?;
+        let offt = self.chunks_full.append(store, bytes)?;
         Ok(FileRef::new_chunk_full(domain, offt))
     }
 
@@ -415,11 +469,9 @@ where
             .expect("less than CHUNK_SIZE as usize bytes / 65536 bits");
         let pad = (!(2 + bytes.len()) + 1) & 7;
         let pad = &[0; 8][..pad];
-        let offt = BlobRef::blob(store, self.chunks_partial).append_many(&[
-            &hdr.to_le_bytes(),
-            bytes,
-            pad,
-        ])?;
+        let offt = self
+            .chunks_partial
+            .append_many(store, &[&hdr.to_le_bytes(), bytes, pad])?;
         Ok(FileRef::new_chunk_partial(domain, offt))
     }
 
@@ -458,7 +510,10 @@ where
     {
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
-        while BlobRef::blob(store, self.chunks_full).read_at_exact_or_none(offt, &mut buf)? {
+        while self
+            .chunks_full
+            .read_at_exact_or_none(store, offt, &mut buf)?
+        {
             let key = toa_hash::hash_chunk(domain, &buf);
             map.insert(key, FileRef::new_chunk_full(domain, offt));
             offt += buf.len() as u64;
@@ -473,10 +528,13 @@ where
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = 0;
-        while BlobRef::blob(store, self.chunks_partial).read_at_exact_or_none(offt, len)? {
+        while self
+            .chunks_partial
+            .read_at_exact_or_none(store, offt, len)?
+        {
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
-            BlobRef::blob(store, self.chunks_partial).read_at_exact(offt + 2, buf)?;
+            self.chunks_partial.read_at_exact(store, offt + 2, buf)?;
             let key = toa_hash::hash_chunk(domain, buf);
             map.insert(key, FileRef::new_chunk_partial(domain, offt));
             offt += align8(2 + u64::from(len));
@@ -552,7 +610,7 @@ where
     }
 }
 
-impl<'a, T> Typed<'a, T>
+impl<'a, T> Typed<'a, T, AbstractBlob<T::BlobHandle>>
 where
     T: BlobStore,
 {
@@ -659,7 +717,7 @@ where
     }
 }
 
-impl<'a, T> Typed<'a, T>
+impl<'a, T> Typed<'a, T, AbstractBlob<T::BlobHandle>>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
@@ -697,8 +755,10 @@ where
     pub fn len_bits(&self) -> io::Result<u128> {
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
-            FileRef::TY_CHUNK_PARTIAL => BlobRef::blob(self.store, self.blobs.chunks_partial)
-                .read_at_array(self.location.offset())
+            FileRef::TY_CHUNK_PARTIAL => self
+                .blobs
+                .chunks_partial
+                .read_at_array(self.store, self.location.offset())
                 .map(u16::from_le_bytes)
                 .map(u128::from),
             FileRef::TY_PAIR => self
@@ -739,8 +799,9 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        BlobRef::blob(self.store, self.blobs.chunks_full)
-            .read_at(self.location.offset() + offset as u64, buf)
+        self.blobs
+            .chunks_full
+            .read_at(self.store, self.location.offset() + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(len)
     }
@@ -757,8 +818,10 @@ where
         // The best fix would be to implement transactions. Transactions will
         // make consistency guarantees a lot easier in many cases, as well as
         // allow fsck to completely restore consistency at the lowest layer.
-        let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
-            .read_at_array(self.location.offset())
+        let nb = self
+            .blobs
+            .chunks_partial
+            .read_at_array(self.store, self.location.offset())
             .map(u16::from_le_bytes)
             .map_err(ReadError::Io)?;
         let n = align8(nb) >> 3;
@@ -767,8 +830,9 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
-        BlobRef::blob(self.store, self.blobs.chunks_partial)
-            .read_at(self.location.offset() + 2 + offset as u64, buf)
+        self.blobs
+            .chunks_partial
+            .read_at(self.store, self.location.offset() + 2 + offset as u64, buf)
             .map_err(ReadError::Io)?;
         Ok(n)
     }
@@ -779,8 +843,10 @@ where
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => println!("F"),
             FileRef::TY_CHUNK_PARTIAL => {
-                let nb = BlobRef::blob(self.store, self.blobs.chunks_partial)
-                    .read_at_array(self.location.offset())
+                let nb = self
+                    .blobs
+                    .chunks_partial
+                    .read_at_array(self.store, self.location.offset())
                     .map(u16::from_le_bytes)
                     .unwrap();
                 println!("{}", nb);
@@ -822,7 +888,7 @@ impl<T: BlobStore> Clone for Refs<'_, T> {
     }
 }
 
-impl<T: BlobStore> Clone for Typed<'_, T> {
+impl<T: BlobStore> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>> {
     fn clone(&self) -> Self {
         Self {
             store: self.store,
@@ -835,7 +901,44 @@ impl<T: BlobStore> Clone for Typed<'_, T> {
 
 impl<T: BlobStore> Copy for Data<'_, T> {}
 impl<T: BlobStore> Copy for Refs<'_, T> {}
-impl<T: BlobStore> Copy for Typed<'_, T> {}
+impl<T: BlobStore> Copy for Typed<'_, T, AbstractBlob<T::BlobHandle>> {}
+
+macro_rules! abstract_blob_imp {
+    ($(fn $fn:ident<S>(&self, store: &S, $($param:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        $(
+            fn $fn<S>(&self, store: &S, $($param: $ty,)*) -> $ret
+            where
+                S: BlobStore<BlobHandle = T>,
+            {
+                match self {
+                    Self::Plain(x) => store.$fn(x, $($param,)*),
+                    Self::Compressed(x) => BlobRef::blob(store, *x).$fn($($param,)*),
+                }
+            }
+        )*
+    }
+}
+
+impl<T> AbstractBlob<T>
+where
+    T: Copy,
+{
+    abstract_blob_imp! {
+        fn append<S>(&self, store: &S, data: &[u8]) -> io::Result<u64>;
+        fn append_many<S>(&self, store: &S, data: &[&[u8]]) -> io::Result<u64>;
+        fn read_at<S>(&self, store: &S, offt: u64, buf: &mut [u8]) -> io::Result<usize>;
+        fn read_at_exact_or_none<S>(&self, store: &S, offt: u64, buf: &mut [u8]) -> io::Result<bool>;
+        fn read_at_exact<S>(&self, store: &S, offt: u64, buf: &mut [u8]) -> io::Result<()>;
+    }
+    fn read_at_array<const N: usize, S>(&self, store: &S, offt: u64) -> io::Result<[u8; N]>
+    where
+        S: BlobStore<BlobHandle = T>,
+    {
+        let mut buf = [0; N];
+        self.read_at_exact(store, offt, &mut buf)?;
+        Ok(buf)
+    }
+}
 
 impl fmt::Debug for FileRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -893,6 +996,9 @@ impl BlobStore for Dir {
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         fs::rename(self.path(old_name), self.path(new_name))
     }
+    fn name(&self, _blob: &Self::BlobHandle) -> io::Result<String> {
+        todo!();
+    }
     fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64> {
         blob.append(data)
     }
@@ -929,6 +1035,10 @@ impl BlobStore for Dir {
     }
     fn delete(&self, _blob: Self::BlobHandle) -> io::Result<()> {
         todo!()
+    }
+    fn blobs<'a>(&'a self) -> io::Result<impl Iterator<Item = io::Result<Self::BlobHandle>> + 'a> {
+        #[allow(unreachable_code)]
+        Ok::<std::vec::IntoIter<_>, _>(todo!())
     }
 }
 

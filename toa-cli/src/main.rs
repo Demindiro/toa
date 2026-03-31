@@ -1,3 +1,4 @@
+mod blob;
 #[cfg(feature = "magic")]
 mod magic;
 mod unix;
@@ -37,17 +38,7 @@ struct Stat {
 
 impl ToaToa {
     fn load(path: &Path, write: bool) -> Result<Self> {
-        let mut hdr = [0; 32];
-        let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
-        (&dev).read_exact(&mut hdr)?;
-        let hdr = toa_blob::snoop_header(hdr).unwrap();
-        let blk = match hdr.block_size {
-            512 => toa_blob::BlockShift::N9,
-            4096 => toa_blob::BlockShift::N12,
-            x => todo!("block size {x}"),
-        };
-        let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
-        let store = BlobStore::load(dev)?;
+        let store = load_store(path, write)?;
         let inner = toa::Toa::load(store)?.ok_or("no store initialized")?;
         Ok(Self { inner })
     }
@@ -193,6 +184,8 @@ usage: {procname} <add|get|list>
         list all known objects
     scrub <store>
         verify store integrity
+    blob ls <store>
+        list all blobs
     unix add <store> <name> <directory>
     unix get <store> <name> <path>
     unix ls <store> <name> [path]"
@@ -419,6 +412,21 @@ fn parse_size_si(s: &str) -> Option<u64> {
     n.checked_mul(mul)
 }
 
+fn load_store(path: &Path, write: bool) -> Result<Store> {
+    let mut hdr = [0; 32];
+    let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
+    (&dev).read_exact(&mut hdr)?;
+    let hdr = toa_blob::snoop_header(hdr).unwrap();
+    let blk = match hdr.block_size {
+        512 => toa_blob::BlockShift::N9,
+        4096 => toa_blob::BlockShift::N12,
+        x => todo!("block size {x}"),
+    };
+    let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+    let store = Store::load(dev)?;
+    Ok(store)
+}
+
 fn start() -> Result<()> {
     let mut args = std::env::args();
     let procname = args.next();
@@ -430,6 +438,7 @@ fn start() -> Result<()> {
         "list" => cmd_list(procname, args),
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
+        "blob" => blob::cmd(procname, args),
         #[cfg(feature = "magic")]
         "magic" => magic::cmd(procname, args),
         _ => Err(usage(procname)),

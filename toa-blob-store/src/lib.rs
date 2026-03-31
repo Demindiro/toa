@@ -11,11 +11,13 @@ pub trait BlobStore {
     fn append(&self, blob: &Self::BlobHandle, data: &[u8]) -> io::Result<u64>;
     fn append_many(&self, blob: &Self::BlobHandle, data: &[&[u8]]) -> io::Result<u64>;
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
+    fn name(&self, blob: &Self::BlobHandle) -> io::Result<String>;
     fn len(&self, blob: &Self::BlobHandle) -> io::Result<u64>;
     fn clear(&self, blob: &Self::BlobHandle) -> io::Result<()>;
     fn delete(&self, blob: Self::BlobHandle) -> io::Result<()>;
     fn flush(&self) -> io::Result<()>;
     fn size_on_disk(&self) -> io::Result<u64>;
+    fn blobs<'a>(&'a self) -> io::Result<impl Iterator<Item = io::Result<Self::BlobHandle>> + 'a>;
 }
 
 pub trait BlobStoreExt: BlobStore {
@@ -24,9 +26,9 @@ pub trait BlobStoreExt: BlobStore {
         blob: &Self::BlobHandle,
         offset: u64,
         buf: &mut [u8],
-    ) -> io::Result<bool> {
+    ) -> io::Result<()> {
         match self.read_at(blob, offset, buf) {
-            Ok(n) if n == buf.len() => Ok(true),
+            Ok(n) if n == buf.len() => Ok(()),
             Ok(n) => todo!("want {}, got {n}", buf.len()),
             Err(e) => Err(e),
         }
@@ -90,6 +92,9 @@ where
     fn read_at(&self, blob: &Self::BlobHandle, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read_at(blob, offset, buf)
     }
+    fn name(&self, blob: &Self::BlobHandle) -> io::Result<String> {
+        (**self).name(blob)
+    }
     fn len(&self, blob: &Self::BlobHandle) -> io::Result<u64> {
         (**self).len(blob)
     }
@@ -104,5 +109,8 @@ where
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         (**self).size_on_disk()
+    }
+    fn blobs<'a>(&'a self) -> io::Result<impl Iterator<Item = io::Result<Self::BlobHandle>> + 'a> {
+        (**self).blobs()
     }
 }

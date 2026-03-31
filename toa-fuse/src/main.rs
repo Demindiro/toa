@@ -41,7 +41,7 @@ struct Node {
 }
 
 struct Dir<'a> {
-    data: Data<'a>,
+    data: Vec<u8>,
     refs: Refs<'a>,
     index: u32,
     name_offset: u32,
@@ -185,8 +185,12 @@ impl Fs {
         let [data] = refs.read_array(0).unwrap();
         let data = self.dev.get(&data).unwrap();
         let Object::Data(data) = data else { todo!() };
+
+        let mut names = vec![0; data.len().unwrap().try_into().unwrap()];
+        data.read_exact(0, &mut names).unwrap();
+
         Dir {
-            data,
+            data: names,
             refs,
             name_offset: 0,
             index: 0,
@@ -239,20 +243,22 @@ impl fuser::Filesystem for Fs {
         let n;
         (n, dir.name_offset) = (offset as u32, (offset >> 32) as u32);
 
-        let mut name = vec![];
-
         for i in n.. {
             let end = match i {
                 0 => reply.add(ino, 1, fuser::FileType::Directory, "."),
                 1 => reply.add(node.parent_ino, 2, fuser::FileType::Directory, ".."),
                 2.. => {
                     dir.index = i - 2;
-                    let Some((name, key)) = dir.next(&mut name) else {
+                    let Some(key) = dir.get_key() else {
                         break;
                     };
+                    let name = dir.get_name();
                     let ty = self.get_ty(&key);
-                    let offset = i64::from(2 + dir.index) | i64::from(dir.name_offset) << 32;
-                    reply.add(u64::MAX, offset, ty, name)
+                    let offset = i64::from(2 + dir.index + 1)
+                        | i64::from(dir.name_offset + 1 + name.len() as u32) << 32;
+                    let end = reply.add(u64::MAX, offset, ty, name);
+                    dir.next();
+                    end
                 }
             };
             if end {
@@ -278,9 +284,10 @@ impl fuser::Filesystem for Fs {
         };
 
         let mut dir = self.open_dir(dir);
-        let mut nam = vec![];
-        while let Some((nam, key)) = dir.next(&mut nam) {
-            if name != nam {
+        while let Some(key) = dir.get_key() {
+            let eq_name = name == dir.get_name();
+            dir.next();
+            if !eq_name {
                 continue;
             }
             let (len, ty) = self.get_len_ty(&key);
@@ -358,8 +365,7 @@ impl fuser::Filesystem for Fs {
 }
 
 impl<'a> Dir<'a> {
-    fn get_key(&mut self) -> Option<Hash> {
-        // get key
+    fn get_key(&self) -> Option<Hash> {
         let e = &mut [Hash::default()];
         match self.refs.read((self.index + 1).into(), e).unwrap() {
             0 => None,
@@ -367,22 +373,16 @@ impl<'a> Dir<'a> {
         }
     }
 
-    fn get_name<'n>(&mut self, name: &'n mut Vec<u8>) -> &'n str {
-        // get name
-        let [name_len] = self.data.read_array(self.name_offset.into()).unwrap();
-        name.resize(usize::from(name_len), 0);
-        self.data
-            .read_exact((self.name_offset + 1).into(), name)
-            .unwrap();
+    fn get_name(&self) -> &str {
+        let name_len = self.data[self.name_offset as usize];
+        let name = &self.data[(1 + self.name_offset) as usize..][..usize::from(name_len)];
         core::str::from_utf8(name).unwrap()
     }
 
-    fn next<'n>(&mut self, name: &'n mut Vec<u8>) -> Option<(&'n str, Hash)> {
-        let key = self.get_key()?;
-        let name = self.get_name(name);
+    fn next(&mut self) {
+        let name_len = self.data[self.name_offset as usize];
         self.index += 1;
-        self.name_offset += 1 + name.len() as u32;
-        Some((name, key))
+        self.name_offset += 1 + u32::from(name_len);
     }
 }
 

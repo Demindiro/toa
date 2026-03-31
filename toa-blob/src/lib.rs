@@ -1484,6 +1484,9 @@ where
     fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>> {
         Ok(self.find(name.as_bytes())?.map(|x| x.id()))
     }
+    fn name(&self, blob: &Self::BlobHandle) -> io::Result<String> {
+        Ok(String::from_utf8_lossy(&self.data.borrow().blobs[*blob].name).to_string())
+    }
     fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
         Ok(self.create_blob(name.as_bytes())?.map(|x| x.id()))
     }
@@ -1518,6 +1521,33 @@ where
     }
     fn size_on_disk(&self) -> io::Result<u64> {
         self.size_on_disk()
+    }
+    fn blobs<'a>(&'a self) -> io::Result<impl Iterator<Item = io::Result<Self::BlobHandle>> + 'a> {
+        struct Iter<'a> {
+            data: &'a RefCell<BlobStoreData>,
+            index: u32,
+        }
+
+        impl<'a> Iterator for Iter<'a> {
+            type Item = io::Result<BlobId>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let data = self.data.borrow();
+                while let Some(x) = data.blobs.table.get(self.index as usize) {
+                    let id = BlobId(self.index);
+                    self.index += 1;
+                    if x.is_some() {
+                        return Some(Ok(id));
+                    }
+                }
+                None
+            }
+        }
+
+        Ok(Iter {
+            data: &self.data,
+            index: 0,
+        })
     }
 }
 
