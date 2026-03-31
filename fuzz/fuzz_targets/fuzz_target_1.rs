@@ -66,6 +66,18 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
             .unwrap()
             .unwrap();
 
+        // avoid repeated remounts
+        let ops = {
+            let mut n = Vec::with_capacity(ops.len());
+            for x in ops {
+                match (n.last(), x) {
+                    (Some(Op::Remount), Op::Remount) => {}
+                    (_, x) => n.push(x),
+                }
+            }
+            n
+        };
+
         for op in ops {
             let collect_refs = |slots: &[u8]| -> Option<Vec<Hash>> {
                 slots

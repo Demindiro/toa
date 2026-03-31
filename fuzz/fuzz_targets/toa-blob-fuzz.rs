@@ -67,6 +67,17 @@ libfuzzer_sys::fuzz_target!(|dev_ops: (DevType, Vec<Op<'_>>)| {
     let mut blob_map = HashMap::<&[u8], u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&[u8], Vec<u8>, BlobId)>>::with_capacity(1 << 16);
 
+    let ops = {
+        let mut n = Vec::with_capacity(ops.len());
+        for x in ops {
+            match (n.last(), x) {
+                (Some(Op::Remount), Op::Remount) => {}
+                (_, x) => n.push(x),
+            }
+        }
+        n
+    };
+
     for op in ops {
         match op {
             Op::Remount => {
