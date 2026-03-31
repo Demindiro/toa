@@ -1,6 +1,4 @@
 mod blob;
-#[cfg(feature = "magic")]
-mod magic;
 mod unix;
 
 use std::{
