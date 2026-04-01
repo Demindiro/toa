@@ -1,4 +1,4 @@
-use crate::{Result, Store, args_end, load_store, usage};
+use crate::{Result, args_end, load_store, usage};
 use std::path::PathBuf;
 use toa::BlobStore;
 

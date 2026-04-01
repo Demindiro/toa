@@ -188,10 +188,6 @@ usage: {procname} <add|get|list>
     unix get <store> <name> <path>
     unix ls <store> <name> [path]"
     );
-    #[cfg(feature = "magic")]
-    let s = s + "
-    magic all <store>
-        list all objects along with detected file type";
     s.into()
 }
 
@@ -437,8 +433,6 @@ fn start() -> Result<()> {
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
         "blob" => blob::cmd(procname, args),
-        #[cfg(feature = "magic")]
-        "magic" => magic::cmd(procname, args),
         _ => Err(usage(procname)),
     }
 }
