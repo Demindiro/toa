@@ -6,6 +6,7 @@ use nora_endian::{u32le, u64le};
 use std::io;
 use toa_blob_store::BlobStore;
 
+const DESCRIPTOR_SUFFIX: &str = ".descr.compr";
 const TABLE_SUFFIX: &str = ".table.compr";
 const PAGES_SUFFIX: &str = ".pages.compr";
 const TAIL_SUFFIX: &str = ".tail.compr";
@@ -23,6 +24,7 @@ pub struct BlobSet<T> {
     page_size: PageSize,
     compression: Compression,
     compression_level: u8,
+    descriptor: T,
     table: T,
     pages: T,
     tail: T,
@@ -56,7 +58,7 @@ pub enum Compression {
 
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct TableHeader {
+struct Descriptor {
     magic: [u8; 8],
     version: u32le,
     page_size: u32le,
@@ -94,59 +96,63 @@ where
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
         // TODO transactions (rollbacks!)
+        let descriptor = concat(name, DESCRIPTOR_SUFFIX);
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
         match (
+            store.create_unzoned(&descriptor)?,
             store.create(&table)?,
             store.create(&pages)?,
             store.create_unzoned(&tail)?,
         ) {
-            (Ok(table), Ok(pages), Ok(tail)) => {
-                let hdr = TableHeader {
-                    magic: TableHeader::MAGIC,
-                    version: TableHeader::VERSION.into(),
+            (Ok(descriptor), Ok(table), Ok(pages), Ok(tail)) => {
+                let hdr = Descriptor {
+                    magic: Descriptor::MAGIC,
+                    version: Descriptor::VERSION.into(),
                     page_size: (page_size as u32).into(),
                     compression: compression as u8,
                     compression_level,
                     _pad_0: Default::default(),
                 };
-                store.append(&table, bytemuck::bytes_of(&hdr))?;
+                store.append(&descriptor, bytemuck::bytes_of(&hdr))?;
                 Ok(Ok(Self::blob(
                     store,
                     BlobSet {
                         page_size,
                         compression,
                         compression_level,
+                        descriptor,
                         table,
                         pages,
                         tail,
                     },
                 )))
             }
-            (Err(e), Err(_), Err(_)) => Ok(Err(e)),
+            (Err(e), Err(_), Err(_), Err(_)) => Ok(Err(e)),
             _ => todo!("blob missing"),
         }
     }
 
     pub fn find(store: &'a T, name: &str) -> io::Result<Option<Self>> {
+        let descriptor = concat(name, DESCRIPTOR_SUFFIX);
         let table = concat(name, TABLE_SUFFIX);
         let pages = concat(name, PAGES_SUFFIX);
         let tail = concat(name, TAIL_SUFFIX);
         let f = |x| store.find(x);
-        match (f(&table)?, f(&pages)?, f(&tail)?) {
-            (Some(table), Some(pages), Some(tail)) => {
-                if store.len(&table)? < 32 {
-                    todo!("table too short");
-                }
+        match (f(&descriptor)?, f(&table)?, f(&pages)?, f(&tail)?) {
+            (Some(descriptor), Some(table), Some(pages), Some(tail)) => {
                 let hdr = &mut [0; 32];
-                store.read_at(&table, 0, hdr)?;
-                let hdr = bytemuck::cast_ref::<_, TableHeader>(hdr);
-                if hdr.magic != TableHeader::MAGIC {
-                    todo!("bad table magic");
+                let n = store.read_at(&descriptor, 0, hdr)?;
+                if n < 32 {
+                    todo!("descriptor too short");
                 }
-                if hdr.version != TableHeader::VERSION {
-                    todo!("bad table version");
+                let hdr = bytemuck::cast_ref::<_, Descriptor>(hdr);
+                if hdr.magic != Descriptor::MAGIC {
+                    todo!("bad descriptor magic");
+                }
+                if hdr.version != Descriptor::VERSION {
+                    todo!("bad descriptor version");
                 }
                 let page_size = PageSize::try_from(u32::from(hdr.page_size)).unwrap();
                 let compression = Compression::try_from(hdr.compression).unwrap();
@@ -157,13 +163,14 @@ where
                         page_size,
                         compression,
                         compression_level,
+                        descriptor,
                         table,
                         pages,
                         tail,
                     },
                 )))
             }
-            (None, None, None) => Ok(None),
+            (None, None, None, None) => Ok(None),
             _ => todo!("blob missing"),
         }
     }
@@ -273,9 +280,14 @@ where
     }
 
     pub fn delete(self) -> io::Result<()> {
-        [self.blobs.table, self.blobs.pages, self.blobs.tail]
-            .into_iter()
-            .try_for_each(|x| self.store.delete(x))
+        [
+            self.blobs.descriptor,
+            self.blobs.table,
+            self.blobs.pages,
+            self.blobs.tail,
+        ]
+        .into_iter()
+        .try_for_each(|x| self.store.delete(x))
     }
 
     fn read_compressed_partial(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
@@ -301,9 +313,7 @@ where
 
         while buf.len() >= page_size as usize {
             let entry = &mut TableEntry::default();
-            let entry_offt = core::mem::size_of::<TableHeader>() as u64;
-            let entry_offt =
-                entry_offt + (offset / page_size) * core::mem::size_of_val(entry) as u64;
+            let entry_offt = (offset / page_size) * core::mem::size_of_val(entry) as u64;
             let n =
                 self.store
                     .read_at(&self.blobs.table, entry_offt, bytemuck::bytes_of_mut(entry))?;
@@ -346,7 +356,6 @@ where
     /// The total amount of compressed data in bytes.
     fn compressed_len(&self) -> io::Result<u64> {
         let n = self.store.len(&self.blobs.table)?;
-        let n = n - core::mem::size_of::<TableHeader>() as u64;
         let n = n / 16;
         let n = n * (self.blobs.page_size as u64);
         Ok(n)
@@ -361,7 +370,12 @@ where
         F: Fn(&T::BlobHandle) -> io::Result<R>,
     {
         // TODO transactions!
-        for x in [&self.blobs.table, &self.blobs.pages, &self.blobs.tail] {
+        for x in [
+            &self.blobs.descriptor,
+            &self.blobs.table,
+            &self.blobs.pages,
+            &self.blobs.tail,
+        ] {
             (f)(x)?;
         }
         Ok(())
@@ -448,7 +462,7 @@ impl TryFrom<u8> for Compression {
     }
 }
 
-impl TableHeader {
+impl Descriptor {
     pub const MAGIC: [u8; 8] = *b"Compress";
     pub const VERSION: u32 = 0x20260317;
 }
