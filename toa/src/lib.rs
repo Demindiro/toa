@@ -684,7 +684,9 @@ where
     /// Offset is in *hashes*.
     pub fn read(&self, offset: u128, buf: &mut [Hash]) -> Result<usize, ReadError<io::Error>> {
         let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
-        self.0.read(offset, bytemuck::cast_slice_mut(buf))
+        self.0
+            .read(offset, bytemuck::cast_slice_mut(buf))
+            .map(|x| x / mem::size_of::<Hash>())
     }
 
     /// # Note
@@ -1217,6 +1219,18 @@ mod test {
             let mut s = init();
             let k = s.add(&bytes);
             s.assert_eq(&k, &bytes);
+        }
+
+        #[test]
+        fn refs_read_len() {
+            let Test { mut toa } = init();
+            let y = toa.add_refs(&[Hash::default()]).unwrap();
+            let Object::Refs(y) = toa.get(&y).unwrap().unwrap() else {
+                unreachable!()
+            };
+            let mut buf = [Hash::default()];
+            let n = y.read(0, &mut buf).unwrap();
+            assert_eq!(n, buf.len());
         }
     }
 }

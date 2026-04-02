@@ -136,6 +136,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                             };
                             let buf = &mut *buf_refs;
                             let n = test.read(offset, &mut buf[..len]).unwrap();
+                            assert_eq!(n, expect.len(), "object refs len mismatch");
                             assert_eq!(&buf[..n], expect, "object refs mismatch");
                         }
                     }
