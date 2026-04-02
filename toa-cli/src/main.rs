@@ -279,7 +279,12 @@ where
     };
     eprintln!("using {} blocks", fmt_size_si(block_size.into()));
 
-    let mut len = meta.len();
+    // len() doesn't work because Linux reports 0 for block devices
+    //
+    // "but but this makes sense!!" no it fucking doesn't
+    use io::Seek;
+    let mut len = (&dev).seek(io::SeekFrom::End(0))?;
+    (&dev).seek(io::SeekFrom::Start(0))?;
     if len == 0 {
         eprintln!("file appears to be empty");
         eprint!("Please enter the desired file size (suffixes: K, M, G, T, P, E): ");
