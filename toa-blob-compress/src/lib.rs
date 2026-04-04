@@ -2,6 +2,7 @@
 
 pub use toa_blob_store::DuplicateBlob;
 
+use core::cell::Cell;
 use nora_endian::{u32le, u64le};
 use std::io;
 use toa_blob_store::BlobStore;
@@ -17,6 +18,7 @@ where
 {
     store: &'a T,
     blobs: BlobSet<T::BlobHandle>,
+    cache: Cell<Cache>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -28,6 +30,11 @@ pub struct BlobSet<T> {
     table: T,
     pages: T,
     tail: T,
+}
+
+pub struct Cache {
+    buf: Vec<u8>,
+    offset: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -81,11 +88,23 @@ where
     T: BlobStore,
 {
     pub fn blob(store: &'a T, blobs: BlobSet<T::BlobHandle>) -> Self {
-        Self { store, blobs }
+        Self::blob_with_cache(store, blobs, Default::default())
+    }
+
+    pub fn blob_with_cache(store: &'a T, blobs: BlobSet<T::BlobHandle>, cache: Cache) -> Self {
+        Self {
+            store,
+            blobs,
+            cache: cache.into(),
+        }
     }
 
     pub fn blob_set(&self) -> &BlobSet<T::BlobHandle> {
         &self.blobs
+    }
+
+    pub fn into_blob_set(self) -> (BlobSet<T::BlobHandle>, Cache) {
+        (self.blobs, self.cache.take())
     }
 
     pub fn create(
@@ -293,15 +312,26 @@ where
     fn read_compressed_partial(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         let page_size = self.blobs.page_size as u64;
         let page_mask = page_size - 1;
-        let cbuf = &mut vec![0; page_size as usize];
         let offt = offset & !page_mask;
-        self.read_compressed_whole(offt, cbuf)?;
+
+        let mut cache = self.cache.take();
+
+        if offt.wrapping_sub(cache.offset) != 0 {
+            cache.buf.resize(page_size as usize, 0);
+            // don't restore cache on error, the cached data might be partially modified
+            self.read_compressed_whole(offt, &mut cache.buf)?;
+            cache.offset = offt;
+        }
+
         let start = (offset & page_mask) as usize;
         let end = start + buf.len();
-        let start = start.min(cbuf.len());
-        let end = end.min(cbuf.len());
+        let start = start.min(cache.buf.len());
+        let end = end.min(cache.buf.len());
         let buf = &mut buf[..end - start];
-        buf.copy_from_slice(&cbuf[start..end]);
+        buf.copy_from_slice(&cache.buf[start..end]);
+
+        self.cache.set(cache);
+
         Ok(buf.len())
     }
 
@@ -419,6 +449,15 @@ impl<T> BlobSet<T> {
         let n = out.len().max(zstd_safe::compress_bound(page.len()));
         out.resize(n, 0);
         zstd_safe::compress(&mut **out, page, self.compression_level.into()).unwrap()
+    }
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            buf: Default::default(),
+            offset: u64::MAX,
+        }
     }
 }
 

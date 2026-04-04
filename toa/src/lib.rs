@@ -69,10 +69,12 @@ struct BlobsTyped<T, CT> {
 }
 
 // lol@names
-#[derive(Clone, Copy)]
 enum AbstractBlob<T> {
     Plain(T),
-    Compressed(BlobSet<T>),
+    Compressed {
+        set: BlobSet<T>,
+        cache: Cell<toa_blob_compress::Cache>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -264,14 +266,19 @@ where
                 compression_level,
             )
         };
+        let h = |x: BlobRef<'_, _>| {
+            let (set, cache) = x.into_blob_set();
+            let cache = cache.into();
+            AbstractBlob::Compressed { set, cache }
+        };
         match (
             f("chunks_full.bin")?,
             f("chunks_partial.bin")?,
             g("pairs.bin")?,
         ) {
             (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
-                chunks_full: AbstractBlob::Compressed(*chunks_full.blob_set()),
-                chunks_partial: AbstractBlob::Compressed(*chunks_partial.blob_set()),
+                chunks_full: h(chunks_full),
+                chunks_partial: h(chunks_partial),
                 pairs,
             })),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
@@ -303,6 +310,11 @@ where
     {
         let g = |name: &str| store.find(&format!("{dir}_{name}"));
         let f = |name: &str| BlobRef::find(store, &format!("{dir}_{name}"));
+        let h = |x: BlobRef<'_, _>| {
+            let (set, cache) = x.into_blob_set();
+            let cache = cache.into();
+            AbstractBlob::Compressed { set, cache }
+        };
         match (
             f("chunks_full.bin")?,
             f("chunks_partial.bin")?,
@@ -310,8 +322,8 @@ where
         ) {
             (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
                 let mut s = Self {
-                    chunks_full: AbstractBlob::Compressed(*chunks_full.blob_set()),
-                    chunks_partial: AbstractBlob::Compressed(*chunks_partial.blob_set()),
+                    chunks_full: h(chunks_full),
+                    chunks_partial: h(chunks_partial),
                     pairs,
                 };
                 s.load(store, map, domain)?;
@@ -914,7 +926,14 @@ macro_rules! abstract_blob_imp {
             {
                 match self {
                     Self::Plain(x) => store.$fn(x, $($param,)*),
-                    Self::Compressed(x) => BlobRef::blob(store, *x).$fn($($param,)*),
+                    Self::Compressed { set, cache } => {
+                        let c = cache.take();
+                        let blob = BlobRef::blob_with_cache(store, *set, c);
+                        let res = blob.$fn($($param,)*);
+                        let (_, c) = blob.into_blob_set();
+                        cache.set(c);
+                        res
+                    }
                 }
             }
         )*
