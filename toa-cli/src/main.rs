@@ -323,8 +323,13 @@ where
 
     let dev = toa_blob::FileBlocks::wrap(block_size, zone_blocks, zone_count, dev);
 
+    // TODO do some benchmarks to find a good default
+    // given the lack of in-place writes, a size larger than ZFS's default 128K likely makes sense.
+    let page_size = PageSize::M4;
+    eprintln!("using {page_size} page size");
+
     let store = BlobStore::init(dev)?;
-    let mut toa = toa::Toa::init(store, PageSize::K128, Compression::Zstd, 200)?
+    let mut toa = toa::Toa::init(store, page_size, Compression::Zstd, 200)?
         .map_err(|_| "store already initialized")?;
     toa.flush()?;
 

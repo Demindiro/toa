@@ -2,7 +2,7 @@
 
 pub use toa_blob_store::DuplicateBlob;
 
-use core::cell::Cell;
+use core::{cell::Cell, fmt};
 use nora_endian::{u32le, u64le};
 use std::io;
 use toa_blob_store::BlobStore;
@@ -482,6 +482,28 @@ impl TryFrom<u32> for PageSize {
             0x1000000 => M16,
             _ => return Err("unsupported page size"),
         })
+    }
+}
+
+impl fmt::Display for PageSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use PageSize as P;
+        let s = match self {
+            P::K4 => "4KiB",
+            P::K8 => "8KiB",
+            P::K16 => "16KiB",
+            P::K32 => "32KiB",
+            P::K64 => "64KiB",
+            P::K128 => "128KiB",
+            P::K256 => "256KiB",
+            P::K512 => "512KiB",
+            P::M1 => "1MiB",
+            P::M2 => "2MiB",
+            P::M4 => "4MiB",
+            P::M8 => "8MiB",
+            P::M16 => "16MiB",
+        };
+        f.write_str(s)
     }
 }
 
