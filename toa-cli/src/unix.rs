@@ -1,6 +1,7 @@
 use crate::{Object, Result, Stat, Toa, args_end, usage};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 use toa::Hash;
@@ -129,15 +130,21 @@ fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
         }
     }
 
+    print!("{path}/ -> ");
+    let _ = std::io::stdout().flush();
+
     entries.sort_by(|x, y| x.0.cmp(&y.0));
 
     let dir = dev.toa.add_dir(entries.iter().map(|(k, v)| (&**k, *v)))?;
 
-    println!("d {dir:?} {path}");
+    println!("{dir}");
     Ok(dir)
 }
 
 fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
+    print!("{path} -> ");
+    let _ = std::io::stdout().flush();
+
     let data = fs::OpenOptions::new()
         .read(true)
         .open(path)
@@ -156,7 +163,8 @@ fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
         .inner
         .add_data(&data)
         .map_err(|e| format!("failed to add {path:?} to store: {e:?}"))?;
-    println!("f {key:?} {path}");
+
+    println!("{key}");
     Ok(key)
 }
 
