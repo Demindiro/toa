@@ -165,7 +165,11 @@ impl Stat {
         let toa_size = toa.toa.inner.size_on_disk().unwrap();
         let added = toa_size - original_disk_size;
         let ratio = size_sum as f64 / added as f64;
-        println!("store size: {toa_size}, added: {added}, files size: {size_sum}, ratio: {ratio}");
+        let f = |s, x| println!("{s}: {x} ({})", fmt_size_si(x));
+        f("store size", toa_size);
+        f("added", added);
+        f("files size", size_sum);
+        println!("ratio: {ratio}");
         println!("dropped: {dropped}");
     }
 }
