@@ -32,7 +32,12 @@ where
 
     let mut dev = Toa::load(&store, true)?;
     let mut stat = Stat::new(&dev)?;
+
+    let t_start = std::time::Instant::now();
     let root_key = add_dir(&mut dev, &dir, &mut stat)?;
+    let t_end = std::time::Instant::now();
+    println!("{:?} elapsed", t_end.duration_since(t_start));
+
     dev.set_meta(&name, &root_key);
     dev.save_root()?;
 
