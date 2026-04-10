@@ -173,16 +173,6 @@ where
         Ok(Some(x))
     }
 
-    pub fn iter_with<F>(&self, mut f: F) -> io::Result<()>
-    where
-        F: FnMut(Hash) -> bool,
-    {
-        self.store.map.keys().for_each(|x| {
-            f(*x);
-        });
-        Ok(())
-    }
-
     pub fn add_data(&mut self, data: &[u8]) -> io::Result<Hash> {
         self.data.add(&mut self.store, Domain::Data, data)
     }

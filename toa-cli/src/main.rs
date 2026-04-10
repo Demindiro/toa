@@ -182,13 +182,11 @@ impl Stat {
 fn usage(procname: &str) -> Box<dyn Error> {
     let s = format!(
         "\
-usage: {procname} <add|get|list>
+usage: {procname} <cmd> [...]
     init <store>
         initialize a store
     get <store> <key>
         dump object data to stdout (may contain raw bytes!)
-    list <store>
-        list all known objects
     scrub <store>
         verify store integrity
     blob ls <store>
@@ -363,27 +361,6 @@ where
     Ok(())
 }
 
-fn cmd_list<A>(procname: &str, mut args: A) -> Result<()>
-where
-    A: Iterator<Item = String>,
-{
-    let store = args.next().ok_or_else(|| usage(procname))?;
-    args_end(procname, args)?;
-
-    let store = PathBuf::from(store);
-
-    let dev = Toa::load(&store, false)?;
-    dev.toa
-        .inner
-        .iter_with(|key| {
-            println!("{key:?}");
-            false
-        })
-        .map_err(|e| format!("failure during store iteration: {e:?}"))?;
-
-    Ok(())
-}
-
 fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -449,7 +426,6 @@ fn start() -> Result<()> {
     match &*cmd {
         "init" => cmd_init(procname, args),
         "get" => cmd_get(procname, args),
-        "list" => cmd_list(procname, args),
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
         "blob" => blob::cmd(procname, args),
