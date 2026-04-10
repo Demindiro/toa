@@ -3,7 +3,7 @@
 ARCH=${ARCH:-x86_64}
 CC=${CC:-cc}
 
-WADDLE_SRC=https://codeberg.org/Demindiro/waddle/raw/branch/master
+WADDLE_SRC=https://codeberg.org/Demindiro/waddle/raw/commit/9af6172beaf98a8510b8290b0a69861939d83c74
 ALPINE_SRC=https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/$ARCH
 
 set -xe
