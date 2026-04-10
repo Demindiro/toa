@@ -1,4 +1,5 @@
 use crate::{Object, Result, Stat, Toa, args_end, usage};
+use regex::Regex;
 use std::{
     fs,
     io::Write,
@@ -26,6 +27,23 @@ where
     let store = args.next().ok_or_else(|| usage(procname))?;
     let name = args.next().ok_or_else(|| usage(procname))?;
     let dir = args.next().ok_or_else(|| usage(procname))?;
+
+    let mut skip = None;
+
+    while let Some(a) = args.next() {
+        match &*a {
+            "-e" => {
+                assert!(skip.is_none());
+                let x = args.next().unwrap();
+                let x = Regex::new(&x).unwrap();
+                skip = Some(x);
+            }
+            a => todo!("unexpected argument {a}"),
+        }
+    }
+
+    let skip = skip.unwrap_or_else(|| Regex::new("^$").unwrap());
+
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
@@ -34,7 +52,7 @@ where
     let mut stat = Stat::new(&dev)?;
 
     let t_start = std::time::Instant::now();
-    let root_key = add_dir(&mut dev, &dir, &mut stat)?;
+    let root_key = add_dir(&mut dev, &dir, &mut stat, &skip)?;
     let t_end = std::time::Instant::now();
     println!("{:?} elapsed", t_end.duration_since(t_start));
 
@@ -93,20 +111,28 @@ where
     Ok(())
 }
 
-fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
+fn add_dir(dev: &mut Toa, path: &str, stat: &mut Stat, skip: &Regex) -> Result<Hash> {
     let mut entries = Vec::new();
 
     let e = |e| format!("failed to traverse {path:?}: {e}");
     for entry in fs::read_dir(path).map_err(e)? {
         let entry = entry.map_err(e)?;
         let path = entry.path();
+
+        let path = path_to_utf8(&path)?;
+
+        if skip.is_match(&*path) {
+            eprintln!("skipping {path}");
+            stat.skipped += 1;
+            continue;
+        }
+
         let res = (|| -> Result<()> {
             let ty = fs::metadata(&path)?.file_type();
-            let path = path_to_utf8(&path)?;
             let key = if ty.is_file() {
                 add_file(dev, path, stat)?
             } else if ty.is_dir() {
-                add_dir(dev, path, stat)?
+                add_dir(dev, path, stat, skip)?
             } else {
                 eprintln!("skipping {path} (unknown format)");
                 stat.dropped += 1;

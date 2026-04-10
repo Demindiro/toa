@@ -11,3 +11,4 @@ memmap2 = { version = "0.9.9", default-features = false }
 rand = { version = "0.8.0" }
 toa-blob = { path = "../toa-blob", features = ["std"] }
 toa-hash = { path = "../toa-hash" }
+regex = "1.12.3"

@@ -32,6 +32,7 @@ struct Stat {
     original_disk_size: u64,
     size_sum: u64,
     dropped: u64,
+    skipped: u64,
 }
 
 impl ToaToa {
@@ -153,6 +154,7 @@ impl Stat {
             original_disk_size: toa.toa.inner.size_on_disk()?,
             size_sum: 0,
             dropped: 0,
+            skipped: 0,
         })
     }
 
@@ -161,6 +163,7 @@ impl Stat {
             original_disk_size,
             size_sum,
             dropped,
+            skipped,
         } = self;
         let toa_size = toa.toa.inner.size_on_disk().unwrap();
         let added = toa_size - original_disk_size;
@@ -171,6 +174,7 @@ impl Stat {
         f("files size", size_sum);
         println!("ratio: {ratio}");
         println!("dropped: {dropped}");
+        println!("skipped: {skipped}");
     }
 }
 
@@ -188,7 +192,7 @@ usage: {procname} <add|get|list>
         verify store integrity
     blob ls <store>
         list all blobs
-    unix add <store> <name> <directory>
+    unix add <store> <name> <directory> [-e <skip>]
     unix get <store> <name> <path>
     unix ls <store> <name> [path]"
     );
