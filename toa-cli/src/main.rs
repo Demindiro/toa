@@ -14,9 +14,10 @@ use toa_blob::{BlobStore, FileBlocks};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type InnerToa = toa::Toa<Store, ()>;
-type Object<'a> = toa::Object<'a, Store, ()>;
-type Refs<'a> = toa::Refs<'a, Store, ()>;
+type Accel = BTreeMap<Hash, toa::accel::IndexEntry>;
+type InnerToa = toa::Toa<Store, Accel>;
+type Object<'a> = toa::Object<'a, Store, Accel>;
+type Refs<'a> = toa::Refs<'a, Store, Accel>;
 
 // FIXME bro
 struct ToaToa {
@@ -38,7 +39,7 @@ struct Stat {
 impl ToaToa {
     fn load(path: &Path, write: bool) -> Result<Self> {
         let store = load_store(path, write)?;
-        let accel = ();
+        let accel = Default::default();
         let inner = toa::Toa::load(store, accel)?.ok_or("no store initialized")?;
         Ok(Self { inner })
     }
@@ -336,7 +337,7 @@ where
     eprintln!("using {page_size} page size");
 
     let store = BlobStore::init(dev)?;
-    let accel = ();
+    let accel = BTreeMap::default();
     let mut toa = toa::Toa::init(store, accel, page_size, Compression::Zstd, 200)?
         .map_err(|_| "store already initialized")?;
     toa.flush()?;

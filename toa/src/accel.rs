@@ -14,15 +14,11 @@ pub trait Index {
 
     /// Lookup an entry in the index.
     fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>>;
-}
 
-pub trait IndexMut: Index {
     /// Add more entries to the index
-    fn add(
-        &mut self,
-        items: &mut dyn ExactSizeIterator<Item = (Hash, IndexEntry)>,
-        new_top: IndexCookie,
-    ) -> io::Result<()>;
+    fn add(&mut self, key: &Hash, value: IndexEntry) -> io::Result<()>;
+
+    fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()>;
 }
 
 #[derive(Clone, Copy, Default, bytemuck::Zeroable, bytemuck::Pod)]
@@ -56,13 +52,22 @@ struct HashCacheEntry {
     value: IndexEntry,
 }
 
-impl Index for () {
+impl Index for BTreeMap<Hash, IndexEntry> {
     fn top_cookie(&self) -> IndexCookie {
         IndexCookie::default()
     }
 
-    fn get(&self, _key: &Hash) -> io::Result<Option<IndexEntry>> {
-        Ok(None)
+    fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
+        Ok(self.get(key).copied())
+    }
+
+    fn add(&mut self, &key: &Hash, value: IndexEntry) -> io::Result<()> {
+        self.insert(key, value);
+        Ok(())
+    }
+
+    fn set_top(&mut self, _new_top: IndexCookie) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -96,7 +101,10 @@ where
     }
 }
 
-impl<T> Index for HashCache<T> {
+impl<T> Index for HashCache<T>
+where
+    T: Read + Write + Seek,
+{
     fn top_cookie(&self) -> IndexCookie {
         self.cookie
     }
@@ -104,32 +112,23 @@ impl<T> Index for HashCache<T> {
     fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
         Ok(self.map.get(key).copied())
     }
-}
 
-impl<T> IndexMut for HashCache<T>
-where
-    T: Read + Write + Seek,
-{
-    fn add(
-        &mut self,
-        items: &mut dyn ExactSizeIterator<Item = (Hash, IndexEntry)>,
-        new_top: IndexCookie,
-    ) -> io::Result<()> {
+    fn add(&mut self, &key: &Hash, value: IndexEntry) -> io::Result<()> {
         let pos = self.file.seek(io::SeekFrom::End(0))?;
-        assert_eq!(
-            pos,
-            core::mem::size_of::<IndexCookie>() as u64,
+        assert!(
+            pos >= core::mem::size_of::<IndexCookie>() as u64,
             "file missing header"
         );
-        let mut writer = io::BufWriter::new(&mut self.file);
-        for (key, value) in items {
-            let entry = HashCacheEntry { key, value };
-            writer.write_all(bytemuck::bytes_of(&entry))?;
-            self.map.insert(key, value);
-        }
-        writer.seek(io::SeekFrom::Start(0))?;
-        writer.write_all(bytemuck::bytes_of(&new_top))?;
-        writer.flush()?;
+        self.map.insert(key, value);
+        let entry = HashCacheEntry { key, value };
+        self.file.write_all(bytemuck::bytes_of(&entry))?;
+        Ok(())
+    }
+
+    fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
+        self.file.seek(io::SeekFrom::Start(0))?;
+        self.file.write_all(bytemuck::bytes_of(&new_top))?;
+        self.file.flush()?;
         Ok(())
     }
 }
@@ -157,7 +156,6 @@ mod test {
         let mut s = init(accel);
         let f = |x| format!("A number {x}").into_bytes();
         let keys = (0..1 << 12).map(|i| s.add(&f(i))).collect::<Vec<_>>();
-        s.toa.accel_update().unwrap();
         keys.iter()
             .enumerate()
             .for_each(|(i, k)| s.assert_eq(k, &f(i)));

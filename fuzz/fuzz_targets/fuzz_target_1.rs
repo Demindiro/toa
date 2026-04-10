@@ -62,7 +62,8 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
 
         objs.clear();
 
-        let mut toa = toa::Toa::init(store, (), PageSize::K4, Compression::Lz4, 0)
+        let accel = std::collections::BTreeMap::default();
+        let mut toa = toa::Toa::init(store, accel, PageSize::K4, Compression::Lz4, 0)
             .unwrap()
             .unwrap();
 

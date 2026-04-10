@@ -7,9 +7,9 @@ pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
 
 use ::core::{fmt, mem, ops};
+use accel::IndexEntry;
 use std::{
     cell::Cell,
-    collections::btree_map::{BTreeMap, Entry},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -51,12 +51,9 @@ pub struct Refs<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
 where
     T: BlobStore;
 
-type Map = BTreeMap<Hash, FileRef>;
-
 struct MapStore<T, A> {
     store: T,
     accel: A,
-    map: Map,
 }
 
 struct Typed<'a, T, CT, A>
@@ -120,11 +117,7 @@ where
             return Ok(Err(DuplicateBlob));
         };
         Ok(Ok(Self {
-            store: MapStore {
-                store,
-                accel,
-                map: Default::default(),
-            },
+            store: MapStore { store, accel },
             data,
             refs,
             root: Default::default(),
@@ -132,11 +125,7 @@ where
     }
 
     pub fn load(store: T, accel: A) -> io::Result<Option<Self>> {
-        let mut store = MapStore {
-            store,
-            accel,
-            map: Default::default(),
-        };
+        let mut store = MapStore { store, accel };
         let data = BlobsTyped::load_at(&mut store, "data", Domain::Data)?;
         let refs = BlobsTyped::load_at_plain(&mut store, "refs", Domain::Refs)?;
         let [Some(data), Some(refs)] = [data, refs] else {
@@ -159,7 +148,7 @@ where
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
-        Ok(self.store.map.contains_key(key))
+        Ok(self.store.get(key)?.is_some())
     }
 
     pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, T, A>>> {
@@ -203,19 +192,8 @@ where
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
-        self.store.store.flush()
-    }
-}
-
-impl<T, A> Toa<T, A>
-where
-    T: BlobStore,
-    T::BlobHandle: Copy, // TODO
-    A: accel::IndexMut,
-{
-    pub fn accel_update(&mut self) -> io::Result<()> {
-        let MapStore { store, accel, map } = &mut self.store;
-        let mut iter = map.iter().map(|(k, v)| (*k, accel::IndexEntry(v.0)));
+        self.store.store.flush()?;
+        let MapStore { store, accel } = &mut self.store;
         let cookie = accel::IndexCookie {
             data_offset_full: self.data.chunks_full.len(store)?,
             data_offset_partial: self.data.chunks_partial.len(store)?,
@@ -224,8 +202,7 @@ where
             refs_offset_partial: self.refs.chunks_partial.len(store)?,
             refs_offset_pairs: store.len(&self.refs.pairs)?,
         };
-        accel.add(&mut iter, cookie)?;
-        map.clear();
+        accel.set_top(cookie)?;
         Ok(())
     }
 }
@@ -235,11 +212,12 @@ where
     A: accel::Index,
 {
     fn get(&self, key: &Hash) -> io::Result<Option<FileRef>> {
-        match self.map.get(key) {
-            Some(x) => return Ok(Some(*x)),
-            None => {}
-        }
         Ok(self.accel.get(key)?.map(|x| FileRef(x.0)))
+    }
+
+    fn add(&mut self, key: &Hash, fileref: FileRef) -> io::Result<()> {
+        debug_assert!(self.get(key)?.is_none(), "key already present");
+        self.accel.add(key, IndexEntry(fileref.0))
     }
 }
 
@@ -410,6 +388,7 @@ where
     ) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
+        A: accel::Index,
     {
         if data.len() <= CHUNK_SIZE as usize {
             self.add_chunk(store, domain, data)
@@ -455,10 +434,12 @@ where
     ) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
+        A: accel::Index,
     {
         let key = toa_hash::hash_chunk(domain, chunk);
-        if let Entry::Vacant(e) = store.map.entry(key) {
-            e.insert(self.store_chunk(&mut store.store, domain, chunk)?);
+        if store.get(&key)?.is_none() {
+            let x = self.store_chunk(&mut store.store, domain, chunk)?;
+            store.add(&key, x)?;
         }
         Ok(key)
     }
@@ -473,10 +454,12 @@ where
     ) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
+        A: accel::Index,
     {
         let key = toa_hash::hash_pair(*x, *y, len);
-        if let Entry::Vacant(e) = store.map.entry(key) {
-            e.insert(self.store_pair(&mut store.store, domain, x, y, len)?);
+        if store.get(&key)?.is_none() {
+            let x = self.store_pair(&mut store.store, domain, x, y, len)?;
+            store.add(&key, x)?;
         }
         Ok(key)
     }
@@ -564,7 +547,7 @@ where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
-        let MapStore { store, accel, map } = store;
+        let MapStore { store, accel } = store;
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = match domain {
             Domain::Data => accel.top_cookie().data_offset_full,
@@ -575,7 +558,7 @@ where
             .read_at_exact_or_none(store, offt, &mut buf)?
         {
             let key = toa_hash::hash_chunk(domain, &buf);
-            map.insert(key, FileRef::new_chunk_full(domain, offt));
+            accel.add(&key, IndexEntry(FileRef::new_chunk_full(domain, offt).0))?;
             offt += buf.len() as u64;
         }
         Ok(())
@@ -590,7 +573,7 @@ where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
-        let MapStore { store, accel, map } = store;
+        let MapStore { store, accel } = store;
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = match domain {
@@ -605,7 +588,7 @@ where
             let buf = &mut buf[..usize::from(len)];
             self.chunks_partial.read_at_exact(store, offt + 2, buf)?;
             let key = toa_hash::hash_chunk(domain, buf);
-            map.insert(key, FileRef::new_chunk_partial(domain, offt));
+            accel.add(&key, IndexEntry(FileRef::new_chunk_partial(domain, offt).0))?;
             offt += align8(2 + u64::from(len));
         }
         Ok(())
@@ -616,7 +599,7 @@ where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
-        let MapStore { store, accel, map } = store;
+        let MapStore { store, accel } = store;
         let mut buf = [0; 80];
         let mut offt = match domain {
             Domain::Data => accel.top_cookie().data_offset_pairs,
@@ -625,7 +608,7 @@ where
         while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
-            map.insert(key, FileRef::new_pair(domain, offt));
+            accel.add(&key, IndexEntry(FileRef::new_pair(domain, offt).0))?;
             offt += buf.len() as u64;
         }
         Ok(())
@@ -1191,11 +1174,17 @@ mod test {
         }
     }
 
-    fn init() -> Test<()> {
+    fn init() -> Test<std::collections::BTreeMap<Hash, IndexEntry>> {
         let store = BlobStore::init(MemZones::new(1 << 20, 20)).unwrap();
-        let toa = Toa::init(store, (), PageSize::K4, Compression::None, 0)
-            .expect("toa init failed")
-            .expect("duplicate toa store");
+        let toa = Toa::init(
+            store,
+            Default::default(),
+            PageSize::K4,
+            Compression::None,
+            0,
+        )
+        .expect("toa init failed")
+        .expect("duplicate toa store");
         Test { toa }
     }
 
