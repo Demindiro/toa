@@ -62,7 +62,7 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
 
         objs.clear();
 
-        let mut toa = toa::Toa::init(store, PageSize::K4, Compression::Lz4, 0)
+        let mut toa = toa::Toa::init(store, (), PageSize::K4, Compression::Lz4, 0)
             .unwrap()
             .unwrap();
 
@@ -142,9 +142,9 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                     }
                 }
                 Op::Remount => {
-                    let (store, res) = toa.unmount();
+                    let (store, accel, res) = toa.unmount();
                     res.unwrap();
-                    toa = toa::Toa::load(store).unwrap().unwrap();
+                    toa = toa::Toa::load(store, accel).unwrap().unwrap();
                 }
             }
         }

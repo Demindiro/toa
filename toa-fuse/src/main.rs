@@ -16,10 +16,10 @@ const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type InnerToa = toa::Toa<Store>;
-type Object<'a> = toa::Object<'a, Store>;
-type Data<'a> = toa::Data<'a, Store>;
-type Refs<'a> = toa::Refs<'a, Store>;
+type InnerToa = toa::Toa<Store, ()>;
+type Object<'a> = toa::Object<'a, Store, ()>;
+type Data<'a> = toa::Data<'a, Store, ()>;
+type Refs<'a> = toa::Refs<'a, Store, ()>;
 
 struct Toa {
     inner: InnerToa,
@@ -61,7 +61,8 @@ impl Toa {
             };
             let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
             let store = BlobStore::load(dev)?;
-            toa::Toa::load(store)?.ok_or("no Toa store initialized")?
+            let accel = ();
+            toa::Toa::load(store, accel)?.ok_or("no Toa store initialized")?
         };
         let mut meta = BTreeMap::default();
 

@@ -1,5 +1,7 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
+pub mod accel;
+
 pub use toa_blob_compress::{BlobRef, Compression, PageSize};
 pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
@@ -19,11 +21,11 @@ const CHUNK_SIZE: u128 = 1 << 13;
 
 pub struct Dir(pub Box<Path>);
 
-pub struct Toa<T>
+pub struct Toa<T, A>
 where
     T: BlobStore,
 {
-    store: MapStore<T>,
+    store: MapStore<T, A>,
     data: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
     refs: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
     root: Hash,
@@ -34,34 +36,35 @@ pub struct Blob<T> {
     len: Cell<u64>,
 }
 
-pub enum Object<'a, T>
+pub enum Object<'a, T, A>
 where
     T: BlobStore,
 {
-    Data(Data<'a, T>),
-    Refs(Refs<'a, T>),
+    Data(Data<'a, T, A>),
+    Refs(Refs<'a, T, A>),
 }
 
-pub struct Data<'a, T>(Typed<'a, T, AbstractBlob<T::BlobHandle>>)
+pub struct Data<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
 where
     T: BlobStore;
-pub struct Refs<'a, T>(Typed<'a, T, AbstractBlob<T::BlobHandle>>)
+pub struct Refs<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
 where
     T: BlobStore;
 
 type Map = BTreeMap<Hash, FileRef>;
 
-struct MapStore<T> {
+struct MapStore<T, A> {
     store: T,
+    accel: A,
     map: Map,
 }
 
-struct Typed<'a, T, CT>
+struct Typed<'a, T, CT, A>
 where
     T: BlobStore,
 {
     blobs: &'a BlobsTyped<T::BlobHandle, CT>,
-    store: &'a MapStore<T>,
+    store: &'a MapStore<T, A>,
     location: FileRef,
 }
 
@@ -98,13 +101,15 @@ pub enum ReadExactError<S> {
     Io(S),
 }
 
-impl<T> Toa<T>
+impl<T, A> Toa<T, A>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
+    A: accel::Index,
 {
     pub fn init(
         store: T,
+        accel: A,
         page_size: PageSize,
         compression: Compression,
         compression_level: u8,
@@ -117,6 +122,7 @@ where
         Ok(Ok(Self {
             store: MapStore {
                 store,
+                accel,
                 map: Default::default(),
             },
             data,
@@ -125,9 +131,10 @@ where
         }))
     }
 
-    pub fn load(store: T) -> io::Result<Option<Self>> {
+    pub fn load(store: T, accel: A) -> io::Result<Option<Self>> {
         let mut store = MapStore {
             store,
+            accel,
             map: Default::default(),
         };
         let data = BlobsTyped::load_at(&mut store, "data", Domain::Data)?;
@@ -155,7 +162,7 @@ where
         Ok(self.store.map.contains_key(key))
     }
 
-    pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, T>>> {
+    pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, T, A>>> {
         let Some(x) = Typed::new(self, *key) else {
             return Ok(None);
         };
@@ -201,8 +208,8 @@ where
         Ok(())
     }
 
-    pub fn unmount(self) -> (T, io::Result<()>) {
-        (self.store.store, Ok(()))
+    pub fn unmount(self) -> (T, A, io::Result<()>) {
+        (self.store.store, self.store.accel, Ok(()))
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
@@ -306,7 +313,11 @@ where
         }
     }
 
-    fn load_at<S>(store: &mut MapStore<S>, dir: &str, domain: Domain) -> io::Result<Option<Self>>
+    fn load_at<S, A>(
+        store: &mut MapStore<S, A>,
+        dir: &str,
+        domain: Domain,
+    ) -> io::Result<Option<Self>>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -336,8 +347,8 @@ where
         }
     }
 
-    fn load_at_plain<S>(
-        store: &mut MapStore<S>,
+    fn load_at_plain<S, A>(
+        store: &mut MapStore<S, A>,
         dir: &str,
         domain: Domain,
     ) -> io::Result<Option<Self>>
@@ -363,7 +374,12 @@ where
         }
     }
 
-    fn add<S>(&mut self, store: &mut MapStore<S>, domain: Domain, data: &[u8]) -> io::Result<Hash>
+    fn add<S, A>(
+        &mut self,
+        store: &mut MapStore<S, A>,
+        domain: Domain,
+        data: &[u8],
+    ) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -403,9 +419,9 @@ where
         }
     }
 
-    fn add_chunk<S>(
+    fn add_chunk<S, A>(
         &mut self,
-        store: &mut MapStore<S>,
+        store: &mut MapStore<S, A>,
         domain: Domain,
         chunk: &[u8],
     ) -> io::Result<Hash>
@@ -419,9 +435,9 @@ where
         Ok(key)
     }
 
-    fn add_pair<S>(
+    fn add_pair<S, A>(
         &mut self,
-        store: &mut MapStore<S>,
+        store: &mut MapStore<S, A>,
         domain: Domain,
         x: &Hash,
         y: &Hash,
@@ -500,7 +516,7 @@ where
         Ok(FileRef::new_pair(domain, offt))
     }
 
-    fn load<S>(&mut self, store: &mut MapStore<S>, domain: Domain) -> io::Result<()>
+    fn load<S, A>(&mut self, store: &mut MapStore<S, A>, domain: Domain) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -510,11 +526,15 @@ where
         Ok(())
     }
 
-    fn load_chunks_full<S>(&mut self, store: &mut MapStore<S>, domain: Domain) -> io::Result<()>
+    fn load_chunks_full<S, A>(
+        &mut self,
+        store: &mut MapStore<S, A>,
+        domain: Domain,
+    ) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let MapStore { store, map } = store;
+        let MapStore { store, accel, map } = store;
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let mut offt = 0;
         while self
@@ -528,11 +548,15 @@ where
         Ok(())
     }
 
-    fn load_chunks_partial<S>(&mut self, store: &mut MapStore<S>, domain: Domain) -> io::Result<()>
+    fn load_chunks_partial<S, A>(
+        &mut self,
+        store: &mut MapStore<S, A>,
+        domain: Domain,
+    ) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let MapStore { store, map } = store;
+        let MapStore { store, accel, map } = store;
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = 0;
@@ -550,11 +574,11 @@ where
         Ok(())
     }
 
-    fn load_pairs<S>(&mut self, store: &mut MapStore<S>, domain: Domain) -> io::Result<()>
+    fn load_pairs<S, A>(&mut self, store: &mut MapStore<S, A>, domain: Domain) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
     {
-        let MapStore { store, map } = store;
+        let MapStore { store, accel, map } = store;
         let mut buf = [0; 80];
         let mut offt = 0;
         while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
@@ -604,26 +628,26 @@ impl FileRef {
     }
 }
 
-impl<'a, T> Object<'a, T>
+impl<'a, T, A> Object<'a, T, A>
 where
     T: BlobStore,
 {
-    pub fn into_data(self) -> Option<Data<'a, T>> {
+    pub fn into_data(self) -> Option<Data<'a, T, A>> {
         let Self::Data(x) = self else { return None };
         Some(x)
     }
 
-    pub fn into_refs(self) -> Option<Refs<'a, T>> {
+    pub fn into_refs(self) -> Option<Refs<'a, T, A>> {
         let Self::Refs(x) = self else { return None };
         Some(x)
     }
 }
 
-impl<'a, T> Typed<'a, T, AbstractBlob<T::BlobHandle>>
+impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
 where
     T: BlobStore,
 {
-    fn new(toa: &'a Toa<T>, key: Hash) -> Option<Self> {
+    fn new(toa: &'a Toa<T, A>, key: Hash) -> Option<Self> {
         let location = *toa.store.map.get(&key)?;
         let blobs = match location.ty().1 {
             Domain::Data => &toa.data,
@@ -644,7 +668,7 @@ where
     }
 }
 
-impl<'a, T> Data<'a, T>
+impl<'a, T, A> Data<'a, T, A>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
@@ -682,7 +706,7 @@ where
     }
 }
 
-impl<'a, T> Refs<'a, T>
+impl<'a, T, A> Refs<'a, T, A>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
@@ -727,7 +751,7 @@ where
     }
 }
 
-impl<'a, T> Typed<'a, T, AbstractBlob<T::BlobHandle>>
+impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
@@ -888,19 +912,19 @@ impl<T> From<ReadError<T>> for ReadExactError<T> {
     }
 }
 
-impl<T: BlobStore> Clone for Data<'_, T> {
+impl<T: BlobStore, A> Clone for Data<'_, T, A> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T: BlobStore> Clone for Refs<'_, T> {
+impl<T: BlobStore, A> Clone for Refs<'_, T, A> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T: BlobStore> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>> {
+impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
     fn clone(&self) -> Self {
         Self {
             store: self.store,
@@ -910,9 +934,9 @@ impl<T: BlobStore> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>> {
     }
 }
 
-impl<T: BlobStore> Copy for Data<'_, T> {}
-impl<T: BlobStore> Copy for Refs<'_, T> {}
-impl<T: BlobStore> Copy for Typed<'_, T, AbstractBlob<T::BlobHandle>> {}
+impl<T: BlobStore, A> Copy for Data<'_, T, A> {}
+impl<T: BlobStore, A> Copy for Refs<'_, T, A> {}
+impl<T: BlobStore, A> Copy for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {}
 
 macro_rules! abstract_blob_imp {
     ($(fn $fn:ident<S>(&self, store: &S, $($param:ident: $ty:ty),*) -> $ret:ty;)*) => {
@@ -1079,7 +1103,7 @@ mod test {
     use super::*;
     use toa_blob::{BlobStore, MemZones};
 
-    type Toa = super::Toa<BlobStore<MemZones<512>>>;
+    type Toa = super::Toa<BlobStore<MemZones<512>>, ()>;
 
     struct Test {
         toa: Toa,
@@ -1118,7 +1142,7 @@ mod test {
 
     fn init() -> Test {
         let store = BlobStore::init(MemZones::new(1 << 20, 20)).unwrap();
-        let toa = Toa::init(store, PageSize::K4, Compression::None, 0)
+        let toa = Toa::init(store, (), PageSize::K4, Compression::None, 0)
             .expect("toa init failed")
             .expect("duplicate toa store");
         Test { toa }
@@ -1212,9 +1236,9 @@ mod test {
         let b = s.add(b"Hello, planet!");
         let c = s.add(&vec![b'x'; 1 << 15]);
         let Test { toa } = s;
-        let (store, res) = toa.unmount();
+        let (store, accel, res) = toa.unmount();
         res.unwrap();
-        let toa = Toa::load(store)
+        let toa = Toa::load(store, accel)
             .expect("reload")
             .expect("toa store missing");
         let s = Test { toa };
