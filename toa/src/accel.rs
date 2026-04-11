@@ -89,7 +89,7 @@ where
                 .write_all(bytemuck::bytes_of(&IndexCookie::default()))?,
             Err(e) => return Err(e),
         }
-        let mut reader = io::BufReader::new(&mut s.file);
+        let mut reader = io::BufReader::with_capacity(1 << 17, &mut s.file);
         let mut entry = HashCacheEntry::default();
         while reader
             .read_exact(bytemuck::bytes_of_mut(&mut entry))

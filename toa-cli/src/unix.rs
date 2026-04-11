@@ -1,10 +1,6 @@
-use crate::{Object, Result, Stat, Toa, args_end, usage};
+use crate::{Object, Result, Stat, Toa, arg_store_accel, args_end, usage};
 use regex::Regex;
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{fs, io::Write, path::Path};
 use toa::Hash;
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
@@ -24,7 +20,7 @@ fn cmd_add<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
-    let store = args.next().ok_or_else(|| usage(procname))?;
+    let [store, accel] = arg_store_accel(procname, &mut args)?;
     let name = args.next().ok_or_else(|| usage(procname))?;
     let dir = args.next().ok_or_else(|| usage(procname))?;
 
@@ -46,9 +42,7 @@ where
 
     args_end(procname, args)?;
 
-    let store = PathBuf::from(store);
-
-    let mut dev = Toa::load(&store, true)?;
+    let mut dev = Toa::load(&store, &accel, true)?;
     let mut stat = Stat::new(&dev)?;
 
     let t_start = std::time::Instant::now();
@@ -70,14 +64,12 @@ fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
-    let store = args.next().ok_or_else(|| usage(procname))?;
+    let [store, accel] = arg_store_accel(procname, &mut args)?;
     let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let store = PathBuf::from(store);
-
-    let (dev, dir) = open(&store, &name, false)?;
+    let (dev, dir) = open(&store, &accel, &name, false)?;
     let file = traverse_path(&dev, &path, dir)?;
     crate::dump_object(&dev, &file)?;
 
@@ -88,15 +80,13 @@ fn cmd_ls<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
-    let store = args.next().ok_or_else(|| usage(procname))?;
+    let [store, accel] = arg_store_accel(procname, &mut args)?;
     let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next();
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
-    let store = PathBuf::from(store);
-
-    let (toa, dir) = open(&store, &name, false)?;
+    let (toa, dir) = open(&store, &accel, &name, false)?;
     let dir = traverse_path(&toa, path, dir)?;
     let dir = toa.toa.get(&dir)?;
     let Object::Refs(dir) = dir else {
@@ -199,8 +189,8 @@ fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
     Ok(key)
 }
 
-fn open(store: &Path, name: &str, write: bool) -> Result<(Toa, Hash)> {
-    let dev = Toa::load(store, write)?;
+fn open(store: &Path, accel: &Path, name: &str, write: bool) -> Result<(Toa, Hash)> {
+    let dev = Toa::load(store, accel, write)?;
     let key = dev.meta(name).ok_or("meta key \"unix.root\" not found")?;
     Ok((dev, key))
 }
