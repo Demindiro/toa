@@ -139,12 +139,14 @@ where
             }
         }
         let root = Hash::from_bytes(root);
-        Ok(Some(Self {
+        let mut s = Self {
             store,
             data,
             refs,
             root,
-        }))
+        };
+        s.accel_save_top()?; // ensure faster subsequent loads
+        Ok(Some(s))
     }
 
     pub fn contains_key(&self, key: &Hash) -> io::Result<bool> {
@@ -193,6 +195,11 @@ where
 
     pub fn flush(&mut self) -> io::Result<()> {
         self.store.store.flush()?;
+        self.accel_save_top()?;
+        Ok(())
+    }
+
+    fn accel_save_top(&mut self) -> io::Result<()> {
         let MapStore { store, accel } = &mut self.store;
         let cookie = accel::IndexCookie {
             data_offset_full: self.data.chunks_full.len(store)?,
