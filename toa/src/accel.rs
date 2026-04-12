@@ -1,3 +1,6 @@
+#[cfg(feature = "accel-sled")]
+pub use sled;
+
 use std::{
     collections::BTreeMap,
     io::{self, Read, Seek, Write},
@@ -130,6 +133,41 @@ where
         self.file.write_all(bytemuck::bytes_of(&new_top))?;
         self.file.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "accel-sled")]
+mod imp_sled {
+    use super::*;
+
+    const KEY_TOP_COOKIE: &[u8] = b"top-cookie";
+
+    impl Index for sled::Db {
+        fn top_cookie(&self) -> IndexCookie {
+            sled::Tree::get(self, KEY_TOP_COOKIE)
+                .unwrap()
+                .map_or_else(Default::default, |x| {
+                    bytemuck::pod_read_unaligned(&x)
+                })
+        }
+
+        fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
+            Ok(sled::Tree::get(self, bytemuck::bytes_of(key))
+                .unwrap()
+                .map(|x| bytemuck::pod_read_unaligned(&x)))
+        }
+
+        fn add(&mut self, key: &Hash, value: IndexEntry) -> io::Result<()> {
+            self.insert(bytemuck::bytes_of(key), &value.0.to_le_bytes())
+                .unwrap();
+            Ok(())
+        }
+
+        fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
+            self.insert(KEY_TOP_COOKIE, bytemuck::bytes_of(&new_top))
+                .unwrap();
+            Ok(())
+        }
     }
 }
 

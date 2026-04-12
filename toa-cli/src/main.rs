@@ -14,7 +14,7 @@ use toa_blob::{BlobStore, FileBlocks};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type Accel = toa::accel::HashCache<fs::File>;
+type Accel = toa::accel::sled::Db;
 type InnerToa = toa::Toa<Store, Accel>;
 type Object<'a> = toa::Object<'a, Store, Accel>;
 type Refs<'a> = toa::Refs<'a, Store, Accel>;
@@ -39,13 +39,8 @@ struct Stat {
 impl ToaToa {
     fn load(path: &Path, accel: &Path, write: bool) -> Result<Self> {
         let store = load_store(path, write)?;
-        let accel = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(accel)
+        let accel = toa::accel::sled::open(accel)
             .map_err(|e| format!("failed to open accelerator: {e:?}"))?;
-        let accel = toa::accel::HashCache::load(accel)?;
         let inner = toa::Toa::load(store, accel)?.ok_or("no store initialized")?;
         Ok(Self { inner })
     }
