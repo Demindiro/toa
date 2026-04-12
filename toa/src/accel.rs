@@ -1,7 +1,10 @@
 #[cfg(feature = "accel-sled")]
 pub use sled;
 
-use std::{collections::BTreeMap, io};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+};
 use toa_hash::Hash;
 
 /// erated index.
@@ -37,6 +40,28 @@ pub struct IndexCookie {
 pub struct IndexEntry(pub u64);
 
 impl Index for BTreeMap<Hash, IndexEntry> {
+    fn top_cookie(&self) -> IndexCookie {
+        IndexCookie::default()
+    }
+
+    fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
+        Ok(self.get(key).copied())
+    }
+
+    fn add(&mut self, &key: &Hash, value: IndexEntry) -> io::Result<()> {
+        self.insert(key, value);
+        Ok(())
+    }
+
+    fn set_top(&mut self, _new_top: IndexCookie) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<H> Index for HashMap<Hash, IndexEntry, H>
+where
+    H: core::hash::BuildHasher,
+{
     fn top_cookie(&self) -> IndexCookie {
         IndexCookie::default()
     }

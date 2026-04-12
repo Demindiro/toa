@@ -1,7 +1,10 @@
 #![no_main]
 
-use core::cell::RefCell;
-use std::collections::BTreeMap;
+use core::{
+    cell::RefCell,
+    hash::{BuildHasher, Hasher},
+};
+use std::collections::HashMap;
 use toa::{Compression, Hash, Object, PageSize};
 use toa_blob::{BlobStore, MemZones};
 
@@ -33,8 +36,12 @@ struct Buffers {
     data: Vec<u8>,
     refs: Vec<Hash>,
     objs: Vec<(Vec<u8>, Hash)>,
-    accel: BTreeMap<Hash, toa::accel::IndexEntry>,
+    accel: HashMap<Hash, toa::accel::IndexEntry, NoopBuildHasher>,
 }
+
+#[derive(Default)]
+struct NoopBuildHasher;
+struct NoopHash(u64);
 
 thread_local! {
     static BUFFERS: RefCell<Buffers> = RefCell::new(Buffers {
@@ -49,6 +56,27 @@ impl<'a> arbitrary::Arbitrary<'a> for ShortSlice<'a> {
     fn arbitrary(s: &mut arbitrary::Unstructured<'a>) -> Result<Self, arbitrary::Error> {
         let n = s.arbitrary_len::<u8>()? % 256;
         s.bytes(n).map(Self)
+    }
+}
+
+impl BuildHasher for NoopBuildHasher {
+    type Hasher = NoopHash;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        NoopHash(0)
+    }
+}
+
+impl Hasher for NoopHash {
+    fn write(&mut self, bytes: &[u8]) {
+        let &[a, b, c, d, e, f, g, h, ..] = bytes else {
+            panic!("at least 32 bytes")
+        };
+        self.0 = u64::from_ne_bytes([a, b, c, d, e, f, g, h])
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
     }
 }
 
