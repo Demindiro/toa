@@ -16,7 +16,7 @@ const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type Accel = BTreeMap<Hash, toa::accel::IndexEntry>;
+type Accel = toa::accel::sled::Db;
 type InnerToa = toa::Toa<Store, Accel>;
 type Object<'a> = toa::Object<'a, Store, Accel>;
 type Data<'a> = toa::Data<'a, Store, Accel>;
@@ -49,7 +49,7 @@ struct Dir<'a> {
 }
 
 impl Toa {
-    fn new(path: &Path) -> Result<Self> {
+    fn new(path: &Path, accel: &Path) -> Result<Self> {
         let inner = {
             let mut hdr = [0; 32];
             let dev = fs::OpenOptions::new().read(true).open(path)?;
@@ -62,7 +62,7 @@ impl Toa {
             };
             let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
             let store = BlobStore::load(dev)?;
-            let accel = Default::default();
+            let accel = toa::accel::sled::open(accel)?;
             toa::Toa::load(store, accel)?.ok_or("no Toa store initialized")?
         };
         let mut meta = BTreeMap::default();
@@ -409,7 +409,7 @@ fn file_attr(ino: u64, kind: fuser::FileType, len: u64) -> fuser::FileAttr {
 }
 
 fn usage(procname: &str) -> Box<dyn Error> {
-    format!("usage: {procname} <store> <name> <mount> [--allow-other]").into()
+    format!("usage: {procname} <store> <accel> <name> <mount> [--allow-other]").into()
 }
 
 fn start() -> Result<()> {
@@ -421,7 +421,8 @@ fn start() -> Result<()> {
     let procname = args.next().map(|x| x.to_string_lossy().into_owned());
     let procname = procname.as_deref().unwrap_or("toa-fuse");
 
-    let pack = args.next().ok_or_else(|| usage(procname))?;
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let accel = args.next().ok_or_else(|| usage(procname))?;
     let name = args.next().ok_or_else(|| usage(procname))?;
     let mount = args.next().ok_or_else(|| usage(procname))?;
     while let Some(x) = args.next() {
@@ -435,8 +436,10 @@ fn start() -> Result<()> {
         .into_string()
         .map_err(|e| format!("name {e:?} is not valid UTF-8"))?;
 
-    let pack = PathBuf::from(pack);
-    let dev = Toa::new(&pack).map_err(|e| format!("failed to open pack {pack:?}: {e}"))?;
+    let store = PathBuf::from(store);
+    let accel = PathBuf::from(accel);
+    let dev =
+        Toa::new(&store, &accel).map_err(|e| format!("failed to open store {store:?}: {e}"))?;
     let root_key = *dev
         .meta
         .get(&*name)
@@ -466,7 +469,7 @@ fn start() -> Result<()> {
     if allow_other {
         opt.push(fuser::MountOption::AllowOther);
     }
-    fuser::mount2(fs, mount, &opt).map_err(|e| format!("failed to mount pack: {e}"))?;
+    fuser::mount2(fs, mount, &opt).map_err(|e| format!("failed to mount store: {e}"))?;
     Ok(())
 }
 
