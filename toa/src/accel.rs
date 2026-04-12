@@ -55,6 +55,24 @@ impl Index for BTreeMap<Hash, IndexEntry> {
     }
 }
 
+impl<T> Index for &mut T
+where
+    T: Index,
+{
+    fn top_cookie(&self) -> IndexCookie {
+        (**self).top_cookie()
+    }
+    fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
+        (**self).get(key)
+    }
+    fn add(&mut self, key: &Hash, value: IndexEntry) -> io::Result<()> {
+        (**self).add(key, value)
+    }
+    fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
+        (**self).set_top(new_top)
+    }
+}
+
 #[cfg(feature = "accel-sled")]
 mod imp_sled {
     use super::*;

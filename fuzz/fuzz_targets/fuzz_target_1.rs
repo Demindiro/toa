@@ -1,6 +1,7 @@
 #![no_main]
 
 use core::cell::RefCell;
+use std::collections::BTreeMap;
 use toa::{Compression, Hash, Object, PageSize};
 use toa_blob::{BlobStore, MemZones};
 
@@ -32,6 +33,7 @@ struct Buffers {
     data: Vec<u8>,
     refs: Vec<Hash>,
     objs: Vec<(Vec<u8>, Hash)>,
+    accel: BTreeMap<Hash, toa::accel::IndexEntry>,
 }
 
 thread_local! {
@@ -39,6 +41,7 @@ thread_local! {
         data: vec![0; 1 << 24],
         refs: vec![Hash::default(); 1 << 24],
         objs: vec![],
+        accel: Default::default(),
     });
 }
 
@@ -56,13 +59,14 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
             data: buf_data,
             refs: buf_refs,
             objs,
+            accel,
         } = buffers;
 
         let store = BlobStore::init(MemZones::<512>::new(1 << 20, 20)).unwrap();
 
         objs.clear();
+        accel.clear();
 
-        let accel = std::collections::BTreeMap::default();
         let mut toa = toa::Toa::init(store, accel, PageSize::K4, Compression::Lz4, 0)
             .unwrap()
             .unwrap();
