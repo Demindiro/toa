@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 
 [dependencies]
-toa = { path = "../toa", features = ["lz4", "zstd"] }
+toa = { path = "../toa", features = ["lz4", "zstd", "accel-sled"] }
 memmap2 = { version = "0.9.9", default-features = false }
 rand = { version = "0.8.0" }
 toa-blob = { path = "../toa-blob", features = ["std"] }

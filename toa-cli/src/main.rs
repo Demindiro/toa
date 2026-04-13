@@ -14,9 +14,10 @@ use toa_blob::{BlobStore, FileBlocks};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type InnerToa = toa::Toa<Store>;
-type Object<'a> = toa::Object<'a, Store>;
-type Refs<'a> = toa::Refs<'a, Store>;
+type Accel = toa::accel::sled::Db;
+type InnerToa = toa::Toa<Store, Accel>;
+type Object<'a> = toa::Object<'a, Store, Accel>;
+type Refs<'a> = toa::Refs<'a, Store, Accel>;
 
 // FIXME bro
 struct ToaToa {
@@ -36,9 +37,11 @@ struct Stat {
 }
 
 impl ToaToa {
-    fn load(path: &Path, write: bool) -> Result<Self> {
+    fn load(path: &Path, accel: &Path, write: bool) -> Result<Self> {
         let store = load_store(path, write)?;
-        let inner = toa::Toa::load(store)?.ok_or("no store initialized")?;
+        let accel = toa::accel::sled::open(accel)
+            .map_err(|e| format!("failed to open accelerator: {e:?}"))?;
+        let inner = toa::Toa::load(store, accel)?.ok_or("no store initialized")?;
         Ok(Self { inner })
     }
 
@@ -109,8 +112,8 @@ impl ToaToa {
 }
 
 impl Toa {
-    fn load(path: &Path, write: bool) -> Result<Self> {
-        let toa = ToaToa::load(path, write)?;
+    fn load(path: &Path, accel: &Path, write: bool) -> Result<Self> {
+        let toa = ToaToa::load(path, accel, write)?;
         let root = toa.inner.root();
         let root = (root != Hash::default())
             .then(|| toa.get(&root))
@@ -181,20 +184,18 @@ impl Stat {
 fn usage(procname: &str) -> Box<dyn Error> {
     let s = format!(
         "\
-usage: {procname} <add|get|list>
+usage: {procname} <cmd> [...]
     init <store>
         initialize a store
-    get <store> <key>
+    get <store> <accel> <key>
         dump object data to stdout (may contain raw bytes!)
-    list <store>
-        list all known objects
-    scrub <store>
+    scrub <store> <accel>
         verify store integrity
     blob ls <store>
         list all blobs
-    unix add <store> <name> <directory> [-e <skip>]
-    unix get <store> <name> <path>
-    unix ls <store> <name> [path]"
+    unix add <store> <accel> <name> <directory> [-e <skip>]
+    unix get <store> <accel> <name> <path>
+    unix ls <store> <accel> <name> [path]"
     );
     s.into()
 }
@@ -269,8 +270,6 @@ where
 
     eprintln!("continuing with formatting...");
 
-    let store = PathBuf::from(store);
-
     let dev = fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -337,7 +336,8 @@ where
     eprintln!("using {page_size} page size");
 
     let store = BlobStore::init(dev)?;
-    let mut toa = toa::Toa::init(store, page_size, Compression::Zstd, 200)?
+    let accel = BTreeMap::default();
+    let mut toa = toa::Toa::init(store, accel, page_size, Compression::Zstd, 200)?
         .map_err(|_| "store already initialized")?;
     toa.flush()?;
 
@@ -348,36 +348,13 @@ fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
-    let store = args.next().ok_or_else(|| usage(procname))?;
+    let [store, accel] = arg_store_accel(procname, &mut args)?;
     let key = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let store = PathBuf::from(store);
-
     let key = toa::Hash::from_bytes(parse_hex(&key)?);
-    let dev = Toa::load(&store, false)?;
+    let dev = Toa::load(&store, &accel, false)?;
     dump_object(&dev, &key)?;
-
-    Ok(())
-}
-
-fn cmd_list<A>(procname: &str, mut args: A) -> Result<()>
-where
-    A: Iterator<Item = String>,
-{
-    let store = args.next().ok_or_else(|| usage(procname))?;
-    args_end(procname, args)?;
-
-    let store = PathBuf::from(store);
-
-    let dev = Toa::load(&store, false)?;
-    dev.toa
-        .inner
-        .iter_with(|key| {
-            println!("{key:?}");
-            false
-        })
-        .map_err(|e| format!("failure during store iteration: {e:?}"))?;
 
     Ok(())
 }
@@ -386,12 +363,10 @@ fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
-    let store = args.next().ok_or_else(|| usage(procname))?;
+    let [store, accel] = arg_store_accel(procname, &mut args)?;
     args_end(procname, args)?;
 
-    let store = PathBuf::from(store);
-
-    let dev = Toa::load(&store, false)?;
+    let dev = Toa::load(&store, &accel, false)?;
     todo!("implement Toa::scrub");
 }
 
@@ -439,6 +414,15 @@ fn load_store(path: &Path, write: bool) -> Result<Store> {
     Ok(store)
 }
 
+fn arg_store_accel<A>(procname: &str, mut args: A) -> Result<[PathBuf; 2]>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let accel = args.next().ok_or_else(|| usage(procname))?;
+    Ok([store, accel].map(PathBuf::from))
+}
+
 fn start() -> Result<()> {
     let mut args = std::env::args();
     let procname = args.next();
@@ -447,7 +431,6 @@ fn start() -> Result<()> {
     match &*cmd {
         "init" => cmd_init(procname, args),
         "get" => cmd_get(procname, args),
-        "list" => cmd_list(procname, args),
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
         "blob" => blob::cmd(procname, args),

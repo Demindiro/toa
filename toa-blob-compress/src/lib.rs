@@ -391,7 +391,7 @@ where
         Ok(n)
     }
 
-    fn len(&self) -> io::Result<u64> {
+    pub fn len(&self) -> io::Result<u64> {
         Ok(self.compressed_len()? + self.store.len(&self.blobs.tail)?)
     }
 
