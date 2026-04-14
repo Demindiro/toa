@@ -1,8 +1,9 @@
-use std::io;
+use std::io::{self, BufRead};
 use toa_hash::{Domain, Hash};
 
 #[derive(Default)]
 struct Program {
+    check: bool,
     verbose: bool,
 }
 
@@ -70,6 +71,26 @@ impl Program {
         Ok(hash)
     }
 
+    fn check_one(&self, path: &str) -> io::Result<u64> {
+        let mut num_fail = 0;
+        let x = std::fs::OpenOptions::new().read(true).open(path)?;
+        for x in io::BufReader::new(x).lines() {
+            let x = x?;
+            // require exactly 2 spaces as separator to ensure we don't fumble paths with spaces in them.
+            let (file, sep, expect_hash) = (&x[66..], &x[64..66], &x[..64]);
+            if sep != "  " {
+                todo!("malformed line");
+            }
+            let expect_hash = expect_hash.parse::<Hash>().unwrap();
+            let hash = self.hash_one(file)?;
+            let is_ok = hash == expect_hash;
+            let status = is_ok.then_some("OK").unwrap_or("FAILED");
+            num_fail += u64::from(!is_ok);
+            println!("{file}: {status}");
+        }
+        Ok(num_fail)
+    }
+
     fn cmd_hash<I>(&self, files: I) -> io::Result<()>
     where
         I: IntoIterator<Item = String>,
@@ -81,6 +102,33 @@ impl Program {
             }
         }
         Ok(())
+    }
+
+    fn cmd_check<I>(&self, files: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut num_fail = 0;
+        for x in files {
+            num_fail += self.check_one(&x)?;
+        }
+        if num_fail != 0 {
+            let s = (num_fail == 1).then_some("").unwrap_or("s");
+            eprintln!("{num_fail} check{s} failed");
+            std::process::exit(1);
+        }
+        Ok(())
+    }
+
+    fn run<I>(&self, files: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        if self.check {
+            self.cmd_check(files)
+        } else {
+            self.cmd_hash(files)
+        }
     }
 }
 
@@ -98,14 +146,15 @@ fn main() -> io::Result<()> {
         }
         match args.next().expect("peek").as_ref() {
             "-v" => program.verbose = true,
+            "-c" => program.check = true,
             _ => usage(progname),
         }
     }
 
     if args.peek().is_none() {
-        program.cmd_hash(["-".to_string()])?
+        program.run(["-".to_string()])?
     } else {
-        program.cmd_hash(args)?
+        program.run(args)?
     }
 
     Ok(())

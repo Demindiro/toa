@@ -33,6 +33,9 @@ pub struct TreeHasher {
     len: u128,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct InvalidHashString;
+
 impl TreeHasher {
     fn new(domain: Domain) -> Self {
         Self {
@@ -158,6 +161,25 @@ impl Hash {
             w[1] = f(x & 15);
         }
         b
+    }
+}
+
+impl core::str::FromStr for Hash {
+    type Err = InvalidHashString;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = <&[u8; 64]>::try_from(s.as_bytes()).map_err(|_| InvalidHashString)?;
+        let mut b = [0; 32];
+        for (z, [x, y]) in b.iter_mut().zip(s.as_chunks::<2>().0) {
+            let f = |x| match x {
+                b'0'..=b'9' => Ok(x - b'0'),
+                b'a'..=b'f' => Ok(x - b'a' + 10),
+                b'A'..=b'F' => Ok(x - b'A' + 10),
+                _ => Err(InvalidHashString),
+            };
+            *z = f(*x)? << 4 | f(*y)?
+        }
+        Ok(Self(b))
     }
 }
 
