@@ -8,6 +8,6 @@ fuzz-toa-blob:
 	cargo fuzz run toa-blob-fuzz -s none -- -max_len=256
 
 fuzz-toa-blob-compress:
-	cargo fuzz run toa-blob-compress-fuzz -s none -- -max_len=256
+	cargo fuzz run toa-blob-compress-fuzz -s none -- -max_len=256 -len_control=1000
 
 .PHONY: build fuzz

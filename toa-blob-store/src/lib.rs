@@ -5,6 +5,9 @@ pub trait BlobStore {
 
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle>;
     fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>>;
+    fn transaction<F, R>(&self, f: F) -> io::Result<R>
+    where
+        F: FnOnce() -> io::Result<R>;
     fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>>;
     fn create_unzoned(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>>;
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()>;
@@ -73,6 +76,12 @@ where
     }
     fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>> {
         (**self).find(name)
+    }
+    fn transaction<F, R>(&self, f: F) -> io::Result<R>
+    where
+        F: FnOnce() -> io::Result<R>
+    {
+        (**self).transaction(f)
     }
     fn create(&self, name: &str) -> io::Result<Result<Self::BlobHandle, DuplicateBlob>> {
         (**self).create(name)

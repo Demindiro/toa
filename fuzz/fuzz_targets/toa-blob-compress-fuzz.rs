@@ -29,6 +29,9 @@ enum Op<'a> {
         offset: u32,
         len: u16,
     },
+    // Remounting tests if transactions work properly.
+    // As-is this test is incomplete however. A dedicated fuzzer would be appropriate.
+    Remount,
 }
 
 libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
@@ -42,7 +45,7 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
     // allocate plenty of zones as we don't care to test out-of-storage conditions here
     // (but also not too much, to speed up allocation a wee bit and hence the fuzzer)
     let dev = MemBlocks::new(toa_blob::BlockShift::N9, 200, 100);
-    let store = BlobStore::init(dev).unwrap();
+    let mut store = BlobStore::init(dev).unwrap();
 
     let mut blob_map = HashMap::<&str, u16>::with_capacity(1 << 16);
     let mut blobs = Vec::<Option<(&str, Vec<u8>, BlobSet<_>)>>::with_capacity(1 << 16);
@@ -102,6 +105,10 @@ libfuzzer_sys::fuzz_target!(|compr_ops: (bool, Vec<Op<'_>>)| {
                 let x = x.get(offset as usize..).unwrap_or(&[]);
                 let x = x.get(..len.into()).unwrap_or(x);
                 assert_eq!(x, &buf[..n]);
+            }
+            Op::Remount => {
+                let dev = store.unmount().unwrap_or_else(|_| panic!("unmount"));
+                store = BlobStore::load(dev).unwrap();
             }
         }
     }

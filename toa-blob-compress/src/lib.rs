@@ -114,43 +114,45 @@ where
         compression: Compression,
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
-        // TODO transactions (rollbacks!)
-        let descriptor = concat(name, DESCRIPTOR_SUFFIX);
-        let table = concat(name, TABLE_SUFFIX);
-        let pages = concat(name, PAGES_SUFFIX);
-        let tail = concat(name, TAIL_SUFFIX);
-        match (
-            store.create_unzoned(&descriptor)?,
-            store.create(&table)?,
-            store.create(&pages)?,
-            store.create_unzoned(&tail)?,
-        ) {
-            (Ok(descriptor), Ok(table), Ok(pages), Ok(tail)) => {
-                let hdr = Descriptor {
-                    magic: Descriptor::MAGIC,
-                    version: Descriptor::VERSION.into(),
-                    page_size: (page_size as u32).into(),
-                    compression: compression as u8,
-                    compression_level,
-                    _pad_0: Default::default(),
-                };
-                store.append(&descriptor, bytemuck::bytes_of(&hdr))?;
-                Ok(Ok(Self::blob(
-                    store,
-                    BlobSet {
-                        page_size,
-                        compression,
+        store.transaction(|| {
+            // TODO transactions (rollbacks!)
+            let descriptor = concat(name, DESCRIPTOR_SUFFIX);
+            let table = concat(name, TABLE_SUFFIX);
+            let pages = concat(name, PAGES_SUFFIX);
+            let tail = concat(name, TAIL_SUFFIX);
+            match (
+                store.create_unzoned(&descriptor)?,
+                store.create(&table)?,
+                store.create(&pages)?,
+                store.create_unzoned(&tail)?,
+            ) {
+                (Ok(descriptor), Ok(table), Ok(pages), Ok(tail)) => {
+                    let hdr = Descriptor {
+                        magic: Descriptor::MAGIC,
+                        version: Descriptor::VERSION.into(),
+                        page_size: (page_size as u32).into(),
+                        compression: compression as u8,
                         compression_level,
-                        descriptor,
-                        table,
-                        pages,
-                        tail,
-                    },
-                )))
+                        _pad_0: Default::default(),
+                    };
+                    store.append(&descriptor, bytemuck::bytes_of(&hdr))?;
+                    Ok(Ok(Self::blob(
+                        store,
+                        BlobSet {
+                            page_size,
+                            compression,
+                            compression_level,
+                            descriptor,
+                            table,
+                            pages,
+                            tail,
+                        },
+                    )))
+                }
+                (Err(e), Err(_), Err(_), Err(_)) => Ok(Err(e)),
+                _ => todo!("blob missing"),
             }
-            (Err(e), Err(_), Err(_), Err(_)) => Ok(Err(e)),
-            _ => todo!("blob missing"),
-        }
+        })
     }
 
     pub fn find(store: &'a T, name: &str) -> io::Result<Option<Self>> {
@@ -275,8 +277,11 @@ where
             let buf = &mut vec![0; page_size as usize];
             let n = self.store.read_at(tail, 0, buf)?;
             assert_eq!(n, buf.len());
-            self.append_page(buf)?;
-            self.store.clear(tail)?;
+            self.store.transaction(|| {
+                self.append_page(buf)?;
+                self.store.clear(tail)?;
+                Ok(())
+            })?;
         }
 
         let mut it = data.chunks_exact(page_size as usize);
@@ -299,14 +304,16 @@ where
     }
 
     pub fn delete(self) -> io::Result<()> {
-        [
-            self.blobs.descriptor,
-            self.blobs.table,
-            self.blobs.pages,
-            self.blobs.tail,
-        ]
-        .into_iter()
-        .try_for_each(|x| self.store.delete(x))
+        self.store.transaction(|| {
+            [
+                self.blobs.descriptor,
+                self.blobs.table,
+                self.blobs.pages,
+                self.blobs.tail,
+            ]
+            .into_iter()
+            .try_for_each(|x| self.store.delete(x))
+        })
     }
 
     fn read_compressed_partial(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
@@ -369,16 +376,18 @@ where
         let buf = &mut Vec::new();
         let (algorithm, clen) = self.blobs.compress(page, buf);
         let clen32 = u32::try_from(clen).expect("compressed len exceeds page size");
-        let offset = self.store.append(&self.blobs.pages, &buf[..clen])?;
-        let entry = TableEntry {
-            offset: offset.into(),
-            algorithm: algorithm as u8,
-            _pad_0: [0; 3],
-            compressed_len: clen32.into(),
-        };
-        self.store
-            .append(&self.blobs.table, bytemuck::bytes_of(&entry))?;
-        Ok(())
+        self.store.transaction(|| {
+            let offset = self.store.append(&self.blobs.pages, &buf[..clen])?;
+            let entry = TableEntry {
+                offset: offset.into(),
+                algorithm: algorithm as u8,
+                _pad_0: [0; 3],
+                compressed_len: clen32.into(),
+            };
+            self.store
+                .append(&self.blobs.table, bytemuck::bytes_of(&entry))?;
+            Ok(())
+        })
     }
 
     /// # Returns

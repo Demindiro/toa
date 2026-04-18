@@ -32,6 +32,8 @@ mod log {
             7 COMMIT_BLOB_TAIL
             8 CREATE_UNZONED_BLOB
             9 CLEAR_BLOB
+            10 TRANSACTION_BEGIN
+            11 TRANSACTION_END
             84 HEADER
         }
 
@@ -114,6 +116,20 @@ mod log {
             pub ty: u8,
             pub _pad_0: [u8; 3],
             pub zone_id: u32le,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        pub struct TransactionBegin {
+            pub ty: u8,
+            pub _pad_0: [u8; 7],
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        pub struct TransactionEnd {
+            pub ty: u8,
+            pub _pad_0: [u8; 7],
         }
 
         #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -203,6 +219,7 @@ struct BlobStoreData {
     /// Total size of the log in bytes.
     log_len: u64,
     allocated_zones: BitBox,
+    transaction_counter: usize,
 }
 
 pub struct MemZones<const B: usize> {
@@ -349,6 +366,8 @@ where
 
         let mut log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
 
+        let mut in_transaction = false;
+
         while store.log_zone_head < log_end {
             store.log_zone_head += block_size as u64;
 
@@ -432,6 +451,16 @@ where
                         log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
                         break;
                     }
+                    log::entry::ty::TRANSACTION_BEGIN => {
+                        assert!(!in_transaction);
+                        k += 1;
+                        in_transaction = true;
+                    }
+                    log::entry::ty::TRANSACTION_END => {
+                        assert!(in_transaction);
+                        k += 1;
+                        in_transaction = false;
+                    }
                     log::entry::ty::HEADER => k += 2,
                     ty => todo!("{ty}"),
                 }
@@ -453,6 +482,8 @@ where
                 zone_dev.read_at(log_zone_b, store.log_zone_head, block_b)?;
             }
         }
+
+        assert!(!in_transaction, "unterminated transaction");
 
         Ok(BlobStore {
             zone_dev,
@@ -477,6 +508,25 @@ where
             return Err((self, e));
         }
         Ok(self.zone_dev)
+    }
+
+    pub fn transaction<F, R>(&self, f: F) -> io::Result<R>
+    where
+        F: FnOnce() -> io::Result<R>
+    {
+        let mut data = self.data.borrow_mut();
+        if data.transaction_counter == 0 {
+            self.log_transaction_begin(&mut data)?;
+        }
+        data.transaction_counter += 1;
+        drop(data);
+        let ret = (f)()?; // TODO good idea or nah?
+        let mut data = self.data.borrow_mut();
+        data.transaction_counter -= 1;
+        if data.transaction_counter == 0 {
+            self.log_transaction_end(&mut data)?;
+        }
+        Ok(ret)
     }
 
     pub fn blob(&self, id: BlobId) -> BlobRef<'_, Self> {
@@ -638,6 +688,22 @@ where
         self.log_push(s, &[bytemuck::bytes_of(&hdr)])
     }
 
+    fn log_transaction_begin(&self, s: &mut BlobStoreData) -> io::Result<()> {
+        let hdr = log::entry::TransactionBegin {
+            ty: log::entry::ty::TRANSACTION_BEGIN,
+            _pad_0: [0; 7],
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_transaction_end(&self, s: &mut BlobStoreData) -> io::Result<()> {
+        let hdr = log::entry::TransactionEnd {
+            ty: log::entry::ty::TRANSACTION_END,
+            _pad_0: [0; 7],
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
+    }
+
     fn log_push(&self, s: &mut BlobStoreData, data: &[&[u8]]) -> io::Result<()> {
         let len = data.iter().fold(0, |s, x| s + x.len());
         self.log_reserve(s, len)?;
@@ -739,6 +805,7 @@ impl BlobStoreData {
             log_zone_head: 0,
             log_len: 0,
             allocated_zones: bitvec::bitbox![0; nr_zones as usize],
+            transaction_counter: 0,
         };
         s.allocated_zones.set(s.log_zone_a.0 as usize, true);
         s.allocated_zones.set(s.log_zone_b.0 as usize, true);
@@ -1483,6 +1550,12 @@ where
     }
     fn find(&self, name: &str) -> io::Result<Option<Self::BlobHandle>> {
         Ok(self.find(name.as_bytes())?.map(|x| x.id()))
+    }
+    fn transaction<F, R>(&self, f: F) -> io::Result<R>
+    where
+        F: FnOnce() -> io::Result<R>
+    {
+        self.transaction(f)
     }
     fn name(&self, blob: &Self::BlobHandle) -> io::Result<String> {
         Ok(String::from_utf8_lossy(&self.data.borrow().blobs[*blob].name).to_string())
