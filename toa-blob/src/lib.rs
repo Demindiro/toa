@@ -148,7 +148,7 @@ struct BlobTable {
 
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 #[repr(transparent)]
-struct ZoneId(u32);
+pub struct ZoneId(pub u32);
 
 impl<U> BlobStore<U>
 where
@@ -186,165 +186,44 @@ where
     }
 
     pub fn load(zone_dev: U) -> io::Result<Self> {
-        let block_size = usize::from(zone_dev.block_size());
-        let zone_blocks = u64::from(zone_dev.zone_blocks());
-        let zone_size = zone_blocks * block_size as u64;
-        let block_a = &mut *vec![0; block_size];
-        let block_b = &mut *vec![0; block_size];
-        let mut log_zone_a = 0;
-        let mut log_zone_b = u32::from(zone_dev.zone_count()) - 1;
-        // TODO check write pointer first
-        zone_dev.read_at(log_zone_a, 0, block_a)?;
-        zone_dev.read_at(log_zone_b, 0, block_b)?;
-
-        let mut gen_a @ mut gen_b = 0;
-        for (genn, blk) in [(&mut gen_a, &block_a), (&mut gen_b, &block_b)] {
-            let hdr = &blk[..core::mem::size_of::<log::entry::Header>()];
-            let hdr = bytemuck::from_bytes::<log::entry::Header>(hdr);
-
-            if hdr.magic != log::entry::Header::MAGIC {
-                todo!("bad magic");
-            }
-            if hdr.version != log::entry::Header::VERSION {
-                todo!("bad version");
-            }
-
-            if hdr.block_size != u32::from(zone_dev.block_size()) {
-                todo!("block size mismatch");
-            }
-            if hdr.zone_blocks != zone_dev.zone_blocks() {
-                todo!("zone blocks mismatch");
-            }
-            if hdr.zone_count != zone_dev.zone_count() {
-                todo!("zone count mismatch");
-            }
-
-            *genn = hdr.generation.into();
-        }
-        assert_eq!(gen_a, gen_b); // TODO don't panic, return error
-
-        let mut store = BlobStoreData::new(gen_a, zone_dev.zone_count());
-
-        let mut log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
+        let mut store = BlobStoreData::new(0, zone_dev.zone_count());
 
         let mut in_transaction = false;
 
-        while store.log_zone_head < log_end {
-            store.log_zone_head += block_size as u64;
-
-            let mut end_of_log = true;
-
-            let mut k = 0;
-            let (buf_a, []) = block_a.as_chunks_mut::<8>() else {
-                unreachable!()
-            };
-            let (buf_b, []) = block_b.as_chunks_mut::<8>() else {
-                unreachable!()
-            };
-            while let Some(x) = buf_a.get(k) {
-                let [ty, b, c, d, e, f, g, h] = *x;
-                end_of_log &= ty == log::entry::ty::LOG_BLOCK_END;
-                // FIXME ensure log entries are equal *except* NEXT_LOG_ZONE
-                // we should have a helper function which just returns an entry,
-                // that way we can do a simple (==) check
-                match ty {
-                    log::entry::ty::LOG_BLOCK_END => break,
-                    log::entry::ty::CREATE_BLOB | log::entry::ty::CREATE_UNZONED_BLOB => {
-                        let hdr = bytemuck::cast::<_, log::entry::CreateBlob>(*x);
-                        k += 1;
-                        let id = BlobId(hdr.blob_id.into());
-                        let name_len = usize::from(b);
-                        let name = &buf_a[k..].as_flattened()[..name_len];
-                        k += (name_len + 7) >> 3;
-                        let unzoned = ty == log::entry::ty::CREATE_UNZONED_BLOB;
-                        store.replay_create_blob(id, name, unzoned).unwrap();
-                    }
-                    log::entry::ty::CLEAR_BLOB => {
-                        k += 1;
-                        let id = u32::from_le_bytes([e, f, g, h]);
-                        store.replay_clear_blob(BlobId(id));
-                    }
-                    log::entry::ty::DELETE_BLOB => {
-                        k += 1;
-                        let id = u32::from_le_bytes([e, f, g, h]);
-                        store.replay_delete_blob(BlobId(id));
-                    }
-                    log::entry::ty::RENAME_BLOB => {
-                        k += 1;
-                        let name_len = usize::from(b);
-                        let id = u32::from_le_bytes([e, f, g, h]);
-                        let name = &buf_a[k..].as_flattened()[..usize::from(name_len)];
-                        store.replay_rename_blob(BlobId(id), name);
-                        k += (name_len + 7) >> 3;
-                    }
-                    log::entry::ty::APPEND_BLOB_TAIL => {
-                        k += 1;
-                        let len = usize::from(u16::from_le_bytes([c, d]));
-                        let id = u32::from_le_bytes([e, f, g, h]);
-                        let data = &buf_a[k..].as_flattened()[..usize::from(len)];
-                        store.replay_append_blob(BlobId(id), data);
-                        k += (len + 7) >> 3;
-                    }
-                    log::entry::ty::ADD_ZONE_TO_BLOB => {
-                        k += 1;
-                        let id = u32::from_le_bytes([e, f, g, h]);
-                        let [x, y, z, w, _, _, _, _] = buf_a[k];
-                        let zone = u32::from_le_bytes([x, y, z, w]);
-                        k += 1;
-                        store.replay_add_zone_to_blob(BlobId(id), ZoneId(zone));
-                    }
-                    log::entry::ty::COMMIT_BLOB_TAIL => {
-                        k += 1;
-                        let id = u32::from_le_bytes([e, f, g, h]);
-                        let len = u64::from_le_bytes(buf_a[k]);
-                        k += 1;
-                        store.replay_commit_blob(BlobId(id), len);
-                    }
-                    log::entry::ty::NEXT_LOG_ZONE => {
-                        let [_, _, _, _, x, y, z, w] = buf_b[k];
-                        log_zone_a = u32::from_le_bytes([e, f, g, h]);
-                        log_zone_b = u32::from_le_bytes([x, y, z, w]);
-                        store.log_zone_head = 0;
-                        store.log_zone_a = ZoneId(log_zone_a);
-                        store.log_zone_b = ZoneId(log_zone_b);
-                        store.mark_zone_allocated(store.log_zone_a);
-                        store.mark_zone_allocated(store.log_zone_b);
-                        log_end = zone_dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
-                        break;
-                    }
-                    log::entry::ty::TRANSACTION_BEGIN => {
-                        assert!(!in_transaction);
-                        k += 1;
-                        in_transaction = true;
-                    }
-                    log::entry::ty::TRANSACTION_END => {
-                        assert!(in_transaction);
-                        k += 1;
-                        in_transaction = false;
-                    }
-                    log::entry::ty::HEADER => k += 2,
-                    ty => todo!("{ty}"),
-                }
+        let log_end = log::iter_with(&zone_dev, |entry| match entry {
+            log::LogEntry::CreateBlob { id, name, unzoned } => {
+                store.replay_create_blob(id, name, unzoned).unwrap()
             }
-
-            if end_of_log {
-                assert!(
-                    zone_dev.zone_write_head(log_zone_a)?.is_none(),
-                    "zoned device should not contain end_of_log"
-                );
-                store.log_zone_head -= block_size as u64;
-                break;
+            log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
+            log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id),
+            log::LogEntry::RenameBlob { id, name } => {
+                store.replay_rename_blob(id, name);
             }
-
-            store.log_len += block_size as u64;
-
-            if store.log_zone_head < log_end {
-                zone_dev.read_at(log_zone_a, store.log_zone_head, block_a)?;
-                zone_dev.read_at(log_zone_b, store.log_zone_head, block_b)?;
+            log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data),
+            log::LogEntry::AddZoneToBlob { id, zone } => store.replay_add_zone_to_blob(id, zone),
+            log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len),
+            log::LogEntry::NextLogZone { zones } => {
+                [store.log_zone_a, store.log_zone_b] = zones;
+                store.mark_zone_allocated(store.log_zone_a);
+                store.mark_zone_allocated(store.log_zone_b);
             }
-        }
+            log::LogEntry::TransactionBegin => {
+                assert!(!in_transaction);
+                in_transaction = true;
+            }
+            log::LogEntry::TransactionEnd => {
+                assert!(in_transaction);
+                in_transaction = false;
+            }
+        })?;
 
         assert!(!in_transaction, "unterminated transaction");
+
+        log::LogEnd {
+            generation: store.generation,
+            len: store.log_len,
+            zone_head: store.log_zone_head,
+        } = log_end;
 
         Ok(BlobStore {
             zone_dev,
@@ -1485,17 +1364,24 @@ where
     }
 }
 
-impl fmt::Debug for BlobId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BlobId({})", self.0)
-    }
+macro_rules! fmt_id {
+    ($name:ident) => {
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, concat!(stringify!($name), "({})"), self.0)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
 }
 
-impl fmt::Display for BlobId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+fmt_id!(BlobId);
+fmt_id!(ZoneId);
 
 /// Try to extract information from the first few bytes of a blob store.
 ///
