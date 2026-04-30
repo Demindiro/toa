@@ -37,7 +37,11 @@ where
     let end = toa_blob::log::iter_with(&dev, |entry| {
         let mut s = format!("{entry}");
         if s.len() > 72 {
-            s.truncate(69);
+            let mut i = 69;
+            while !s.is_char_boundary(i) {
+                i -= 1;
+            }
+            s.truncate(i);
             s += "...";
         }
         println!("{s}")
