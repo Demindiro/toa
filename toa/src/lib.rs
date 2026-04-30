@@ -1075,7 +1075,7 @@ impl BlobStore for Dir {
     }
     fn transaction<F, R>(&self, _f: F) -> io::Result<R>
     where
-        F: FnOnce() -> io::Result<R>
+        F: FnOnce() -> io::Result<R>,
     {
         todo!()
     }

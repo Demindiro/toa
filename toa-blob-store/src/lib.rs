@@ -79,7 +79,7 @@ where
     }
     fn transaction<F, R>(&self, f: F) -> io::Result<R>
     where
-        F: FnOnce() -> io::Result<R>
+        F: FnOnce() -> io::Result<R>,
     {
         (**self).transaction(f)
     }

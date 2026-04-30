@@ -252,7 +252,7 @@ where
 
     pub fn transaction<F, R>(&self, f: F) -> io::Result<R>
     where
-        F: FnOnce() -> io::Result<R>
+        F: FnOnce() -> io::Result<R>,
     {
         let mut data = self.data.borrow_mut();
         if data.transaction_counter == 0 {
@@ -1293,7 +1293,7 @@ where
     }
     fn transaction<F, R>(&self, f: F) -> io::Result<R>
     where
-        F: FnOnce() -> io::Result<R>
+        F: FnOnce() -> io::Result<R>,
     {
         self.transaction(f)
     }

@@ -38,7 +38,10 @@ impl Program {
             let path = path.to_str().ok_or_else(e)?;
             let name = x.file_name().into_string().map_err(|_| e())?;
             if name.len() > usize::from(u8::MAX) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "filename is too long"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "filename is too long",
+                ));
             }
             let hash = self.hash_one(path)?;
             items.push((name, hash));
