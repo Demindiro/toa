@@ -139,7 +139,7 @@ impl Toa {
     }
 
     fn meta(&self, name: &str) -> Option<Hash> {
-        self.meta.get(name.into()).copied()
+        self.meta.get(name).copied()
     }
 
     fn set_meta(&mut self, name: &str, value: &Hash) {
@@ -193,6 +193,8 @@ usage: {procname} <cmd> [...]
         verify store integrity
     blob ls <store>
         list all blobs
+    blob debug log <store>
+        dump log
     unix add <store> <accel> <name> <directory> [-e <skip>]
     unix get <store> <accel> <name> <path>
     unix ls <store> <accel> <name> [path]"
@@ -399,7 +401,7 @@ fn parse_size_si(s: &str) -> Option<u64> {
     n.checked_mul(mul)
 }
 
-fn load_store(path: &Path, write: bool) -> Result<Store> {
+fn load_dev(path: &Path, write: bool) -> Result<FileBlocks> {
     let mut hdr = [0; 32];
     let dev = fs::OpenOptions::new().read(true).write(write).open(path)?;
     (&dev).read_exact(&mut hdr)?;
@@ -409,7 +411,11 @@ fn load_store(path: &Path, write: bool) -> Result<Store> {
         4096 => toa_blob::BlockShift::N12,
         x => todo!("block size {x}"),
     };
-    let dev = FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev);
+    Ok(FileBlocks::wrap(blk, hdr.zone_blocks, hdr.zone_count, dev))
+}
+
+fn load_store(path: &Path, write: bool) -> Result<Store> {
+    let dev = load_dev(path, write)?;
     let store = Store::load(dev)?;
     Ok(store)
 }

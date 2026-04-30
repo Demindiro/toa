@@ -1073,6 +1073,12 @@ impl BlobStore for Dir {
     fn open_clear(&self, name: &str) -> io::Result<Self::BlobHandle> {
         self.open_or_create(name, true, true)
     }
+    fn transaction<F, R>(&self, _f: F) -> io::Result<R>
+    where
+        F: FnOnce() -> io::Result<R>,
+    {
+        todo!()
+    }
     fn rename(&self, old_name: &str, new_name: &str) -> io::Result<()> {
         fs::rename(self.path(old_name), self.path(new_name))
     }

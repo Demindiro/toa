@@ -190,18 +190,27 @@ Unlike delete, the blob and its ID is kept.
 | u24   | (pad)                  |
 | u32   | blob ID                |
 
-##### 10. Transaction
+##### 10. Begin Transaction
 
-> **NOTE**: not implemented
+Apply the next entries until _End Transaction_ atomically.
 
-Apply the next N entries atomically.
-If any entries are missing, do not apply any of them.
+If no _End Transaction_ entry is encountered, abort.
 
 | type  | name                   |
 |:----- |:---------------------- |
 | u8    | (type)                 |
-| u24   | (pad)                  |
-| u32   | entry count            |
+| u56   | (pad)                  |
+
+##### 11. End Transaction
+
+End the current transaction.
+
+Must be preceded by _Begin Transaction_.
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u56   | (pad)                  |
 
 ##### 84. Header
 
@@ -262,3 +271,13 @@ adding at least one disk seek of latency.
 The main reason to handle tables was to avoid allocating a potentially
 huge zone for storing a small table, but it should be possible to mitigate
 this overhead using a tiered log.
+
+### Transactions
+
+For consistency it is sometimes necessary (or useful) to be able to commit
+multiple operations as a single unit. Transactions enable this.
+To keep the transaction mechanism simple, it is assumed the common path
+is that all transactions are always properly committed.
+Incomplete transactions are an uncommon case that can be repaired with fsck.
+Using this principle all that is necessary during log replay is to keep track
+when it is inside a transaction. No additional buffering is necessary.
