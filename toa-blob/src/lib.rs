@@ -254,18 +254,9 @@ where
     where
         F: FnOnce() -> io::Result<R>,
     {
-        let mut data = self.data.borrow_mut();
-        if data.transaction_counter == 0 {
-            self.log_transaction_begin(&mut data)?;
-        }
-        data.transaction_counter += 1;
-        drop(data);
+        self.transaction_begin(&mut self.data.borrow_mut())?;
         let ret = (f)()?; // TODO good idea or nah?
-        let mut data = self.data.borrow_mut();
-        data.transaction_counter -= 1;
-        if data.transaction_counter == 0 {
-            self.log_transaction_end(&mut data)?;
-        }
+        self.transaction_end(&mut self.data.borrow_mut())?;
         Ok(ret)
     }
 
@@ -293,6 +284,22 @@ where
         name: &[u8],
     ) -> io::Result<Result<BlobRef<'a, Self>, DuplicateBlob>> {
         self.create_blob_conf(name, true)
+    }
+
+    fn transaction_begin(&self, data: &mut BlobStoreData) -> io::Result<()> {
+        if data.transaction_counter == 0 {
+            self.log_transaction_begin(data)?;
+        }
+        data.transaction_counter += 1;
+        Ok(())
+    }
+
+    fn transaction_end(&self, data: &mut BlobStoreData) -> io::Result<()> {
+        data.transaction_counter -= 1;
+        if data.transaction_counter == 0 {
+            self.log_transaction_end(data)?;
+        }
+        Ok(())
     }
 
     fn create_blob_conf<'a>(
@@ -752,18 +759,22 @@ where
         let (head, data) = data.split_at(n);
         s.blobs[idx].tail.extend(head);
 
-        if s.blobs[idx].tail.len() >= block_size {
+        let flush_tail = s.blobs[idx].tail.len() >= block_size;
+        if flush_tail {
+            self.store.transaction_begin(s)?;
             let tail = core::mem::take(&mut s.blobs[idx].tail);
             self.append_blocks(s, &tail)?;
             s.blobs[idx].tail = tail;
             s.blobs[idx].tail.clear();
             s.blobs[idx].flushed = 0;
         }
-
         let n = data.len() & !(block_size - 1);
         let (blocks, tail) = data.split_at(n);
         self.append_blocks(s, blocks)?;
         s.blobs[idx].tail.extend(tail);
+        if flush_tail {
+            self.store.transaction_end(s)?;
+        }
 
         Ok(offt)
     }
