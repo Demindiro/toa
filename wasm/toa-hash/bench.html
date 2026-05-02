@@ -1,0 +1,19 @@
+<pre id=output></pre>
+<script>
+	const waitFrame = () => new Promise(f => setTimeout(f, 0));
+
+	fetch("toa-hash.js").then(x => x.text()).then(eval).then(x => x.new()).then(async hasher => {
+		const pre = document.getElementById('output');
+		const sizes = [0, 1, 10, 100, 1000, 10000, 100000, 1000000];
+		for (const n of sizes) {
+			const buf = new Uint8Array(n).buffer;
+			const t = performance.now();
+			let i = 0;
+			for (; performance.now() - t < 1000; i++)
+				hasher.hashData(buf);
+			const dt = performance.now() - t;
+			pre.innerText += `bytes: ${n}, iterations: ${i}, time: ${dt}ms, bytes/s: ${n * i * 1000 / dt}\n`;
+			await waitFrame();
+		}
+	})
+</script>
