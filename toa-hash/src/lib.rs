@@ -37,7 +37,7 @@ pub struct TreeHasher {
 pub struct InvalidHashString;
 
 impl TreeHasher {
-    fn new(domain: Domain) -> Self {
+    pub fn new(domain: Domain) -> Self {
         Self {
             stack: Default::default(),
             chunk: TurboShake128::from_core(TurboShake128Core::new(domain as u8)),
@@ -45,7 +45,7 @@ impl TreeHasher {
         }
     }
 
-    fn update(&mut self, mut data: &[u8]) {
+    pub fn update(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
             let (y, n) = self.chunk_update(data);
             data = &data[n..];
@@ -56,12 +56,12 @@ impl TreeHasher {
         }
     }
 
-    fn chain(mut self, data: &[u8]) -> Self {
+    pub fn chain(mut self, data: &[u8]) -> Self {
         self.update(data);
         self
     }
 
-    fn finalize(mut self) -> Hash {
+    pub fn finalize(mut self) -> Hash {
         let len = self.len << 3;
         let mut y = self.chunk_take();
         let mut mask = 0xffff;
@@ -142,7 +142,7 @@ impl Hash {
         &self.0
     }
 
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
