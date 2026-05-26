@@ -8,7 +8,9 @@ test -d work || ./init.sh
 
 mkdir -p work/target
 
-exec env -i HOME=/root TERM="$TERM" PATH=/bin:/usr/bin:/root/.cargo/bin ./work/bin/waddle \
+exec env -i HOME=/root TERM="$TERM" PATH=/bin:/usr/bin:/root/.cargo/bin \
+	RUSTFLAGS="-C target-feature=-crt-static" \
+	./work/bin/waddle \
 	--base work/alpine \
 	--net \
 	--mount-proc \
