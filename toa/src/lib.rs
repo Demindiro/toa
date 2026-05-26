@@ -16,6 +16,7 @@ use std::{
 };
 use toa_blob_compress::BlobSet;
 use toa_hash::Domain;
+use nora_endian::u128le;
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
@@ -54,6 +55,28 @@ where
 struct MapStore<T, A> {
     store: T,
     accel: A,
+}
+
+pub enum TypedNode<'a> {
+    Pair { pair: &'a Pair },
+    Chunk { len: usize },
+}
+
+pub enum DataNode<'a> {
+    Pair { pair: &'a Pair },
+    Chunk { len: usize },
+}
+
+pub enum RefsNode<'a> {
+    Pair { pair: &'a Pair },
+    Chunk { len: usize },
+}
+
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(C)]
+pub struct Pair {
+    keys: [Hash; 2],
+    len: u128le,
 }
 
 struct Typed<'a, T, CT, A>
@@ -739,6 +762,13 @@ where
     pub fn len(&self) -> io::Result<u128> {
         self.0.len_bits().map(|x| x >> 3)
     }
+
+    pub fn read_node<'x>(&self, buf: &'x mut [u8; CHUNK_SIZE as usize]) -> Result<DataNode<'x>, ReadError<io::Error>> {
+        match self.0.read_node(buf)? {
+            TypedNode::Chunk { len } => Ok(DataNode::Chunk { len }),
+            TypedNode::Pair { pair } => Ok(DataNode::Pair { pair }),
+        }
+    }
 }
 
 impl<'a, T, A> Refs<'a, T, A>
@@ -785,6 +815,13 @@ where
     pub fn len(&self) -> io::Result<u128> {
         self.0.len_bits().map(|x| x >> 8)
     }
+
+    pub fn read_node<'x>(&self, buf: &'x mut [u8; CHUNK_SIZE as usize]) -> Result<RefsNode<'x>, ReadError<io::Error>> {
+        match self.0.read_node(buf)? {
+            TypedNode::Chunk { len } => Ok(RefsNode::Chunk { len: len / mem::size_of::<Hash>() }),
+            TypedNode::Pair { pair } => Ok(RefsNode::Pair { pair }),
+        }
+    }
 }
 
 impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
@@ -823,6 +860,25 @@ where
         Ok(buf)
     }
 
+    pub fn read_node<'x>(&self, buf: &'x mut [u8; CHUNK_SIZE as usize]) -> Result<TypedNode<'x>, ReadError<io::Error>> {
+        match self.location.ty().0 {
+            FileRef::TY_CHUNK_FULL => {
+                let len = self.read_chunk_full(0, buf)?;
+                Ok(TypedNode::Chunk { len })
+            }
+            FileRef::TY_CHUNK_PARTIAL => {
+                let len = self.read_chunk_partial(0, buf)?;
+                Ok(TypedNode::Chunk { len })
+            }
+            FileRef::TY_PAIR => {
+                let pair = bytemuck::from_bytes_mut(&mut buf[..80]);
+                self.read_pair_only(pair)?;
+                Ok(TypedNode::Pair { pair })
+            }
+            _ => unreachable!("invalid FileRef type"),
+        }
+    }
+
     pub fn len_bits(&self) -> io::Result<u128> {
         let store = &self.store.store;
         match self.location.ty().0 {
@@ -838,6 +894,15 @@ where
                 .map(u128::from_le_bytes),
             _ => unreachable!("invalid FileRef type"),
         }
+    }
+
+    fn read_pair_only(&self, buf: &mut Pair) -> Result<(), ReadError<io::Error>> {
+        let buf = bytemuck::bytes_of_mut(buf);
+        self.store
+            .store
+            .read_at_exact(&self.blobs.pairs, self.location.offset(), buf)
+            .map_err(ReadError::Io)?;
+        Ok(())
     }
 
     fn read_pair(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
