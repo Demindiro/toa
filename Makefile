@@ -1,13 +1,11 @@
 build:
-	cargo b --release --bin toa-cli --bin toa-fuse
+	./waddle/build.sh
 
 fuzz:
-	cargo fuzz run fuzz_target_1 -s none
+	./waddle/fuzz.sh fuzz_target_1
 
 fuzz-toa-blob:
-	cargo fuzz run toa-blob-fuzz -s none -- -max_len=256
+	./waddle/fuzz.sh toa-blob-fuzz -- -max_len=256
 
 fuzz-toa-blob-compress:
-	cargo fuzz run toa-blob-compress-fuzz -s none -- -max_len=256 -len_control=1000
-
-.PHONY: build fuzz
+	./waddle/fuzz.sh toa-blob-compress-fuzz -- -max_len=256 -len_control=1000
