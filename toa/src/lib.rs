@@ -16,7 +16,6 @@ use std::{
 };
 use toa_blob_compress::BlobSet;
 use toa_hash::Domain;
-use nora_endian::u128le;
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
@@ -76,8 +75,13 @@ pub enum RefsNode<'a> {
 #[repr(C)]
 pub struct Pair {
     keys: [Hash; 2],
-    len: u128le,
+    // don't use u128 directly to avoid alignment constraints
+    len: UnalignedLen128,
 }
+
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(transparent)]
+struct UnalignedLen128([u8; 16]);
 
 struct Typed<'a, T, CT, A>
 where
