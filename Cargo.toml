@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["toa", "toa-blob", "toa-cli", "toa-fuse", "toa-hash", "fuzz", "toa-blob-compress", "toa-blob-store", "toasum"]
+members = ["toa", "toa-blob", "toa-cli", "toa-fuse", "toa-hash", "fuzz", "toa-blob-compress", "toa-blob-store", "toasum", "toa-server"]
 exclude = ["wasm-toa-hash"]
 
 [profile.dev]

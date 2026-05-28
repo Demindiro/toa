@@ -1,0 +1,13 @@
+[package]
+name = "toa-server"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+trace = []
+
+[dependencies]
+popol = "3.0.1"
+toa = { path = "../toa", features = ["lz4", "zstd"] }
+toa-blob = { path = "../toa-blob", features = ["std"] }
+toa-hash = { path = "../toa-hash" }
