@@ -138,6 +138,10 @@ impl Hash {
         bytemuck::cast_slice(slice)
     }
 
+    pub fn slice_from_bytes_mut(slice: &mut [[u8; 32]]) -> &mut [Self] {
+        bytemuck::cast_slice_mut(slice)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

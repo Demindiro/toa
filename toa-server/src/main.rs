@@ -10,7 +10,12 @@ use toa_blob::{BlobStore, FileBlocks};
 
 mod cmd {
     pub const STATUS: u8 = 1;
+    // Get the chunk or pair associated with a key
     pub const FETCH: u8 = 2;
+    // Get the chunk at an offset associated with a key.
+    //
+    // Offsets are in terms of chunks, with each offset being a `u112` (14 bytes).
+    pub const CHUNK: u8 = 3;
 }
 
 mod result {
@@ -82,6 +87,16 @@ impl Request<'_> {
                 let hash = data.try_into().map(Hash::from_bytes).unwrap();
                 self.handle_fetch(&hash)?;
             }
+            cmd::CHUNK => {
+                let (hash, data) = data.split_first_chunk::<32>().unwrap();
+                let (offset, data) = data.split_first_chunk::<14>().unwrap();
+                assert!(data.is_empty(), "trailing garbage {data:?}");
+                let hash = Hash::from_bytes(*hash);
+                let mut offt = [0; 16];
+                offt[..14].copy_from_slice(offset);
+                let offt = u128::from_le_bytes(offt);
+                self.handle_chunk(hash, offt)?;
+            }
             n => todo!("invalid command {n}"),
         }
         Ok(())
@@ -91,8 +106,7 @@ impl Request<'_> {
         trace!("fetch {hash}");
         let [ty, _, _, _, out @ ..] = &mut *self.server.buf;
         let Some(obj) = self.server.toa.get(hash).unwrap() else {
-            *ty = 0;
-            return self.send(0);
+            return self.send_error("");
         };
         assert!(out.len() == 8192); // TODO wrap in const {  }
         let n = match obj {
@@ -120,9 +134,38 @@ impl Request<'_> {
         self.send(n)
     }
 
+    fn handle_chunk(&mut self, key: Hash, offset: u128) -> Result<()> {
+        trace!("chunk {key} {offset}");
+        let [ty, _, _, _, out @ ..] = &mut *self.server.buf;
+        let Some(obj) = self.server.toa.get(&key).unwrap() else {
+            return self.send_error("");
+        };
+        assert!(out.len() == 8192); // TODO wrap in const {  }
+        match obj {
+            toa::Object::Data(x) => {
+                *ty = ty::IS_VALID;
+                let n = x.read(offset << 13, out).unwrap();
+                self.send(n)
+            }
+            toa::Object::Refs(x) => {
+                *ty = ty::IS_VALID | ty::IS_REFS;
+                let out = out.as_chunks_mut::<32>().0;
+                let out = Hash::slice_from_bytes_mut(out);
+                let n = x.read(offset << 8, out).unwrap();
+                self.send(32 * n)
+            }
+        }
+    }
+
     fn send(&mut self, n: usize) -> Result<()> {
         self.socket.send_to(&self.server.buf[..4 + n], self.addr)?;
         Ok(())
+    }
+
+    fn send_error(&mut self, msg: &str) -> Result<()> {
+        assert!(msg.is_empty(), "todo error msg");
+        self.server.buf[0] = 0;
+        self.send(0)
     }
 }
 

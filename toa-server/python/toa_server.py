@@ -21,7 +21,7 @@ class Hash:
     def from_hex(s):
         return Hash(bytes.fromhex(s))
 
-class Toa:
+class ToaRaw:
     def __init__(self, address):
         from socket import socket, AF_INET, SOCK_DGRAM
         addr, port = address.split(':')
@@ -43,9 +43,26 @@ class Toa:
             raise UnknownObject(key)
         if ty & _IS_PAIR:
             assert len(x) == 80
-            l, h, bitlen = Hash(x[:32]), Hash(x[32:64]), x[64:]
-            res = (RefsPair if (ty & _IS_REFS) else DataPair)(l, h)
+            l, h, bitlen = Hash(x[:32]), Hash(x[32:64]), int.from_bytes(x[64:], byteorder='little')
+            res = (RefsPair if (ty & _IS_REFS) else DataPair)(l, h, bitlen)
         elif ty & _IS_REFS:
+            res = RefsChunk([Hash(x[i:i+32]) for i in range(0, len(x), 32)])
+        else:
+            res = DataChunk(x)
+        if _DEBUG:
+            print('got', res)
+        return res
+
+    def chunk(self, key: Hash, offset: int):
+        if _DEBUG:
+            print('chunk', key, offset)
+        offset = offset.to_bytes(14, byteorder='little')
+        self._send(3, 0, key._value + offset)
+        ty, _, x = self._recv()
+        if not (ty & _IS_VALID):
+            raise UnknownObject(key)
+        assert not (ty & _IS_PAIR), "chunk doesn't return pairs"
+        if ty & _IS_REFS:
             res = RefsChunk([Hash(x[i:i+32]) for i in range(0, len(x), 32)])
         else:
             res = DataChunk(x)
@@ -69,10 +86,30 @@ class Toa:
             print(' ->', msg)
         self._socket.send(msg)
 
+class Toa:
+    __slots__ = '_raw',
+
+    def __init__(self, address):
+        self._raw = ToaRaw(address)
+
+    def root(self):
+        return self._raw.root()
+
+    def fetch(self, key: Hash, start = 0, num = -1):
+        if start != 0 or num != -1:
+            raise NotImplementedError('fetch ranges')
+        match self._raw.fetch(key):
+            case DataChunk(x) | RefsChunk(x):
+                return x
+            case DataPair(_, _, bitlen):
+                return b''.join(self._raw.chunk(key, i).data for i in range(bitlen >> 16))
+            case RefsPair(_, _, bitlen):
+                return [x for x in self._raw.chunk(key, i).refs for i in range(bitlen >> 16)]
+
 DataChunk = namedtuple('DataChunk', ['data'])
 RefsChunk = namedtuple('RefsChunk', ['refs'])
-DataPair = namedtuple('DataPair', ['l', 'h'])
-RefsPair = namedtuple('RefsPair', ['l', 'h'])
+DataPair = namedtuple('DataPair', ['l', 'h', 'bitlen'])
+RefsPair = namedtuple('RefsPair', ['l', 'h', 'bitlen'])
 
 class UnknownObject(Exception):
     __slots__ = 'key',
@@ -89,54 +126,30 @@ def main():
     toa = Toa('127.0.0.1:1234')
 
     def dump(x):
-        match toa.fetch(x):
-            case DataChunk(data):
-                lut = lambda x: chr(x) if 0x20 <= x <= 0x7e else '.'
-                N = 32
-                for i in range(0, len(data), N):
-                    s = ''.join(hex(c)[2:].rjust(2, '0') for c in data[i:i+N])
-                    t = ''.join(lut(c) for c in data[i:i+N])
-                    print(s.ljust(N * 2, ' ') + '  ' + t)
-            case RefsChunk(refs):
-                for x in refs:
-                    print(x)
-            case DataPair(l, h) | RefsPair(l, h):
-                dump(l)
-                dump(h)
-            case _ as x:
-                raise Exception(f'wtf is this {x!r}')
+        x = toa.fetch(x)
+        if type(x) is list:
+            for x in x:
+                print(x)
+            return
+        lut = lambda x: chr(x) if 0x20 <= x <= 0x7e else '.'
+        N = 32
+        for i in range(0, len(x), N):
+            s = ''.join(hex(c)[2:].rjust(2, '0') for c in x[i:i+N])
+            t = ''.join(lut(c) for c in x[i:i+N])
+            print(s.ljust(N * 2, ' ') + '  ' + t)
 
     def dump_text(x):
-        last_nl = False
-        def f(x):
-            nonlocal last_nl
-            match toa.fetch(x):
-                case DataChunk(data):
-                    print(data.decode('utf-8'), end='')
-                    last_nl = data and data[-1] == ord('\n')
-                case DataPair(l, h):
-                    f(l)
-                    f(h)
-                case RefsChunk() | RefsPair():
-                    raise Exception("can't dump refs")
-                case _ as x:
-                    raise Exception(f'wtf is this {x!r}')
-        f(x)
-        if not last_nl:
-            print('\x1b[7m%\x1b[0m')
+        import sys
+        sys.stdout.buffer.write(toa.fetch(x))
 
     def path(it, dump):
         cur = toa.root()
         for x in it:
-            while True:
-                match toa.fetch(cur):
-                    case DataChunk() | DataPair():
-                        raise Exception('encountered data')
-                    case RefsChunk(refs):
-                        cur = refs[x]
-                        break
-                    case RefsPair(l, h):
-                        assert 0, 'todo refs pair'
+            cur = toa.fetch(cur)
+            if type(cur) is list:
+                cur = cur[x]
+            else:
+                raise Exception('encountered data')
         dump(cur)
 
     COMMANDS = ('exit', 'get[-text] <key>', 'path[-text] [i/j/...]', 'root')
@@ -152,7 +165,7 @@ def main():
                 print()
                 continue
             match x.split():
-                case ['']:
+                case []:
                     pass
                 case ['help']:
                     print('\n'.join(COMMANDS))
