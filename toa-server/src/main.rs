@@ -10,7 +10,7 @@ use toa_blob::{BlobStore, FileBlocks};
 
 mod cmd {
     pub const STATUS: u8 = 1;
-    // Get the chunk or pair associated with a key
+    // Get the chunk if at or below 8KiB or the key and length of the root node.
     //
     // A path of 32-bit indices may follow immediately after the key.
     // Requires each path component to be a refs object.
@@ -26,7 +26,7 @@ mod result {
 }
 
 mod ty {
-    pub const IS_PAIR: u8 = 1 << 0;
+    pub const IS_PARENT: u8 = 1 << 0;
     pub const IS_REFS: u8 = 1 << 1;
     pub const IS_VALID: u8 = 1 << 2;
 }
@@ -119,26 +119,24 @@ impl Request<'_> {
             return self.send_error("");
         };
         assert!(out.len() == 8192); // TODO wrap in const {  }
+        let serialize_parent = |len_bits: u128, ty: &mut u8, out: &mut [_], is_refs| {
+            *ty = ty::IS_VALID | (u8::from(is_refs) * ty::IS_REFS) | ty::IS_PARENT;
+            out[..32].copy_from_slice(hash.as_bytes());
+            out[32..48].copy_from_slice(&len_bits.to_le_bytes());
+            48
+        };
+        let serialize_chunk = |ty: &mut u8, is_refs, len| {
+            *ty = ty::IS_VALID | (u8::from(is_refs) * ty::IS_REFS);
+            len
+        };
         let n = match obj {
             toa::Object::Data(x) => match x.read_node(out).unwrap() {
-                toa::DataNode::Chunk { len } => {
-                    *ty = ty::IS_VALID;
-                    len
-                }
-                toa::DataNode::Pair { .. } => {
-                    *ty = ty::IS_VALID | ty::IS_PAIR;
-                    80
-                }
+                toa::DataNode::Chunk { len } => serialize_chunk(ty, false, len),
+                toa::DataNode::Pair { pair } => serialize_parent(pair.len_bits(), ty, out, false),
             },
             toa::Object::Refs(x) => match x.read_node(out).unwrap() {
-                toa::RefsNode::Chunk { len } => {
-                    *ty = ty::IS_VALID | ty::IS_REFS;
-                    len * 32
-                }
-                toa::RefsNode::Pair { .. } => {
-                    *ty = ty::IS_VALID | ty::IS_REFS | ty::IS_PAIR;
-                    80
-                }
+                toa::RefsNode::Chunk { len } => serialize_chunk(ty, true, 32 * len),
+                toa::RefsNode::Pair { pair } => serialize_parent(pair.len_bits(), ty, out, true),
             },
         };
         self.send(n)

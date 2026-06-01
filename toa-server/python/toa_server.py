@@ -4,7 +4,7 @@ import os
 _DEBUG = os.getenv('TOA_SERVER_DEBUG') not in (None, '', '0')
 del os
 
-_IS_PAIR  = 1 << 0
+_IS_PARENT = 1 << 0
 _IS_REFS  = 1 << 1
 _IS_VALID = 1 << 2
 
@@ -43,10 +43,10 @@ class ToaRaw:
         ty, _, x = self._recv()
         if not (ty & _IS_VALID):
             raise UnknownObject(key)
-        if ty & _IS_PAIR:
-            assert len(x) == 80
-            l, h, bitlen = Hash(x[:32]), Hash(x[32:64]), int.from_bytes(x[64:], byteorder='little')
-            res = (RefsPair if (ty & _IS_REFS) else DataPair)(l, h, bitlen)
+        if ty & _IS_PARENT:
+            assert len(x) == 48
+            key, bitlen = Hash(x[:32]), int.from_bytes(x[32:], byteorder='little')
+            res = (RefsParent if (ty & _IS_REFS) else DataParent)(key, bitlen)
         elif ty & _IS_REFS:
             res = RefsChunk([Hash(x[i:i+32]) for i in range(0, len(x), 32)])
         else:
@@ -63,7 +63,7 @@ class ToaRaw:
         ty, _, x = self._recv()
         if not (ty & _IS_VALID):
             raise UnknownObject(key)
-        assert not (ty & _IS_PAIR), "chunk doesn't return pairs"
+        assert not (ty & _IS_PARENT), "chunk doesn't return parents"
         if ty & _IS_REFS:
             res = RefsChunk([Hash(x[i:i+32]) for i in range(0, len(x), 32)])
         else:
@@ -103,25 +103,19 @@ class Toa:
         match self._raw.fetch(key, path):
             case DataChunk(x) | RefsChunk(x):
                 return x
-            case DataPair(l, r, bitlen):
-                return b''.join(x.data for x in self._fetch_chunks_pair(l, r, bitlen))
-            case RefsPair(l, r, bitlen):
-                return [x for x in x.refs for x in self._fetch_chunks_pair(l, r, bitlen)]
+            case DataParent(key, bitlen):
+                return b''.join(x.data for x in self._fetch_chunks(key, bitlen))
+            case RefsParent(key, bitlen):
+                return [x for x in x.refs for x in self._fetch_chunks(key, bitlen)]
 
-    def _fetch_chunks_pair(self, l: Hash, r: Hash, bitlen: int) -> iter:
-        chunklen = bitlen >> 16
-        split = 1 << chunklen.bit_length() - 1
-        def f():
-            for i in range(split):
-                yield self._raw.chunk(l, i)
-            for i in range(chunklen - split):
-                yield self._raw.chunk(r, i)
-        return f()
+    def _fetch_chunks(self, key: Hash, bitlen: int) -> iter:
+        chunklen = (bitlen + 0xffff) >> 16
+        return (self._raw.chunk(key, i) for i in range(chunklen))
 
 DataChunk = namedtuple('DataChunk', ['data'])
 RefsChunk = namedtuple('RefsChunk', ['refs'])
-DataPair = namedtuple('DataPair', ['l', 'h', 'bitlen'])
-RefsPair = namedtuple('RefsPair', ['l', 'h', 'bitlen'])
+DataParent = namedtuple('DataParent', ['key', 'bitlen'])
+RefsParent = namedtuple('RefsParent', ['key', 'bitlen'])
 
 class UnknownObject(Exception):
     __slots__ = 'key',
@@ -160,11 +154,11 @@ def main():
     def dump_dir(x):
         i = n = 0
         while i < len(x):
+            n += 1
             l = x[i]
             i += 1
             print(n, x[i:i+l].decode('utf-8'))
             i += l
-            n += 1
         print(n, 'items')
 
     def path(it, dump):
