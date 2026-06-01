@@ -214,8 +214,9 @@ def main():
                     eprint(f'unknown command {x!r} (try help)')
         except KeyboardInterrupt:
             pass
-        except Exception as ex:
-            eprint(ex)
+        except Exception:
+            import traceback
+            eprint(traceback.format_exc())
 
 
 if __name__ == '__main__':
