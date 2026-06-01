@@ -11,6 +11,9 @@ use toa_blob::{BlobStore, FileBlocks};
 mod cmd {
     pub const STATUS: u8 = 1;
     // Get the chunk or pair associated with a key
+    //
+    // A path of 32-bit indices may follow immediately after the key.
+    // Requires each path component to be a refs object.
     pub const FETCH: u8 = 2;
     // Get the chunk at an offset associated with a key.
     //
@@ -84,8 +87,15 @@ impl Request<'_> {
                 self.send(32)?;
             }
             cmd::FETCH => {
-                let hash = data.try_into().map(Hash::from_bytes).unwrap();
-                self.handle_fetch(&hash)?;
+                let (hash, data) = data.split_first_chunk::<32>().unwrap();
+                let (path, data) = data.as_chunks::<4>();
+                assert!(data.is_empty(), "trailing garbage {data:?}");
+                let hash = Hash::from_bytes(*hash);
+                let path = path.iter().map(|x| u32::from_le_bytes(*x));
+                // TODO try to avoid clone
+                let path = path.collect::<Vec<_>>().into_iter();
+                let path = path.map(u128::from);
+                self.handle_fetch(&hash, path)?;
             }
             cmd::CHUNK => {
                 let (hash, data) = data.split_first_chunk::<32>().unwrap();
@@ -102,7 +112,7 @@ impl Request<'_> {
         Ok(())
     }
 
-    fn handle_fetch(&mut self, hash: &Hash) -> Result<()> {
+    fn send_node(&mut self, hash: &Hash) -> Result<()> {
         trace!("fetch {hash}");
         let [ty, _, _, _, out @ ..] = &mut *self.server.buf;
         let Some(obj) = self.server.toa.get(hash).unwrap() else {
@@ -155,6 +165,29 @@ impl Request<'_> {
                 self.send(32 * n)
             }
         }
+    }
+
+    fn handle_fetch<I>(&mut self, start: &Hash, path: I) -> Result<()>
+    where
+        I: IntoIterator<Item = u128>,
+    {
+        trace!("fetch {start}");
+        let [ty, _, _, _, out @ ..] = &mut *self.server.buf;
+        assert!(out.len() == 8192); // TODO wrap in const {  }
+
+        let mut key = *start;
+        for x in path {
+            trace!("  /{x}");
+            let Some(obj) = self.server.toa.get(&key).unwrap() else {
+                return self.send_error("");
+            };
+            match obj {
+                toa::Object::Data(_) => return self.send_error(""),
+                toa::Object::Refs(y) => [key] = y.read_array(x).unwrap(),
+            }
+        }
+
+        self.send_node(&key)
     }
 
     fn send(&mut self, n: usize) -> Result<()> {

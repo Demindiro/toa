@@ -36,8 +36,10 @@ class ToaRaw:
         x = self._socket.recv(4 + 32)
         return Hash(x[4:])
 
-    def fetch(self, key: Hash):
-        self._send(2, 0, key._value)
+    def fetch(self, key: Hash, path = ()):
+        if _DEBUG:
+            print('fetch', key, path)
+        self._send(2, 0, key._value + b''.join(x.to_bytes(4, byteorder='little') for x in path))
         ty, _, x = self._recv()
         if not (ty & _IS_VALID):
             raise UnknownObject(key)
@@ -95,16 +97,26 @@ class Toa:
     def root(self):
         return self._raw.root()
 
-    def fetch(self, key: Hash, start = 0, num = -1):
+    def fetch(self, key: Hash, path = (), start = 0, num = -1):
         if start != 0 or num != -1:
             raise NotImplementedError('fetch ranges')
-        match self._raw.fetch(key):
+        match self._raw.fetch(key, path):
             case DataChunk(x) | RefsChunk(x):
                 return x
-            case DataPair(_, _, bitlen):
-                return b''.join(self._raw.chunk(key, i).data for i in range(bitlen >> 16))
-            case RefsPair(_, _, bitlen):
-                return [x for x in self._raw.chunk(key, i).refs for i in range(bitlen >> 16)]
+            case DataPair(l, r, bitlen):
+                return b''.join(x.data for x in self._fetch_chunks_pair(l, r, bitlen))
+            case RefsPair(l, r, bitlen):
+                return [x for x in x.refs for x in self._fetch_chunks_pair(l, r, bitlen)]
+
+    def _fetch_chunks_pair(self, l: Hash, r: Hash, bitlen: int) -> iter:
+        chunklen = bitlen >> 16
+        split = 1 << chunklen.bit_length() - 1
+        def f():
+            for i in range(split):
+                yield self._raw.chunk(l, i)
+            for i in range(chunklen - split):
+                yield self._raw.chunk(r, i)
+        return f()
 
 DataChunk = namedtuple('DataChunk', ['data'])
 RefsChunk = namedtuple('RefsChunk', ['refs'])
