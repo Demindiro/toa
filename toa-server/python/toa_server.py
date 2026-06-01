@@ -157,10 +157,20 @@ def main():
     def dump_text(x):
         sys.stdout.buffer.write(x)
 
+    def dump_dir(x):
+        i = n = 0
+        while i < len(x):
+            l = x[i]
+            i += 1
+            print(n, x[i:i+l].decode('utf-8'))
+            i += l
+            n += 1
+        print(n, 'items')
+
     def path(it, dump):
         dump(toa.fetch(toa.root(), it))
 
-    COMMANDS = ('exit', 'get[-text] <key>', 'path[-text] [i/j/...]', 'root')
+    COMMANDS = ('exit', 'get[-text|-dir] <key>', 'path[-text|-dir] [i/j/...]', 'root')
 
     while True:
         try:
@@ -184,14 +194,20 @@ def main():
                     dump(toa.fetch(Hash.from_hex(x)))
                 case ['get-text', x]:
                     dump_text(toa.fetch(Hash.from_hex(x)))
+                case ['get-dir', x]:
+                    dump_dir(toa.fetch(Hash.from_hex(x)))
                 case ['path']:
                     path((), dump)
                 case ['path-text']:
                     path((), dump_text)
+                case ['path-dir']:
+                    path((), dump_dir)
                 case ['path', x]:
                     path((int(x) for x in x.split('/')), dump)
                 case ['path-text', x]:
                     path((int(x) for x in x.split('/')), dump_text)
+                case ['path-dir', x]:
+                    path((int(x) for x in x.split('/')), dump_dir)
                 case ['root']:
                     print(toa.root())
                 case _:
