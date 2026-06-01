@@ -143,7 +143,6 @@ def main():
     toa = Toa('127.0.0.1:1234')
 
     def dump(x):
-        x = toa.fetch(x)
         if type(x) is list:
             for x in x:
                 print(x)
@@ -156,18 +155,10 @@ def main():
             print(s.ljust(N * 2, ' ') + '  ' + t)
 
     def dump_text(x):
-        import sys
-        sys.stdout.buffer.write(toa.fetch(x))
+        sys.stdout.buffer.write(x)
 
     def path(it, dump):
-        cur = toa.root()
-        for x in it:
-            cur = toa.fetch(cur)
-            if type(cur) is list:
-                cur = cur[x]
-            else:
-                raise Exception('encountered data')
-        dump(cur)
+        dump(toa.fetch(toa.root(), it))
 
     COMMANDS = ('exit', 'get[-text] <key>', 'path[-text] [i/j/...]', 'root')
 
@@ -190,9 +181,9 @@ def main():
                 case ['exit']:
                     break
                 case ['get', x]:
-                    dump(Hash.from_hex(x))
-                case ['get', x]:
-                    dump_text(Hash.from_hex(x))
+                    dump(toa.fetch(Hash.from_hex(x)))
+                case ['get-text', x]:
+                    dump_text(toa.fetch(Hash.from_hex(x)))
                 case ['path']:
                     path((), dump)
                 case ['path-text']:
