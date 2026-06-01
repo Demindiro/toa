@@ -122,7 +122,12 @@ class UnknownObject(Exception):
 
 
 def main():
-    print('shell for exploring toa-server object tree')
+    import sys
+
+    def eprint(*a, **kw):
+        print(*a, **kw, file=sys.stderr)
+
+    eprint('shell for exploring toa-server object tree')
     toa = Toa('127.0.0.1:1234')
 
     def dump(x):
@@ -157,12 +162,13 @@ def main():
     while True:
         try:
             try:
-                x = input('>> ')
+                eprint('>> ', end='')
+                x = input()
             except EOFError:
-                print('exit')
+                eprint('exit')
                 break
             except KeyboardInterrupt:
-                print()
+                eprint()
                 continue
             match x.split():
                 case []:
@@ -186,11 +192,11 @@ def main():
                 case ['root']:
                     print(toa.root())
                 case _:
-                    print(f'unknown command {x!r} (try help)')
+                    eprint(f'unknown command {x!r} (try help)')
         except KeyboardInterrupt:
             pass
         except Exception as ex:
-            print(ex)
+            eprint(ex)
 
 
 if __name__ == '__main__':
