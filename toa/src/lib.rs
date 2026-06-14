@@ -16,7 +16,6 @@ use std::{
 };
 use toa_blob_compress::BlobSet;
 use toa_hash::Domain;
-use nora_endian::u128le;
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
@@ -76,8 +75,13 @@ pub enum RefsNode<'a> {
 #[repr(C)]
 pub struct Pair {
     keys: [Hash; 2],
-    len: u128le,
+    // don't use u128 directly to avoid alignment constraints
+    len: UnalignedLen128,
 }
+
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(transparent)]
+struct UnalignedLen128([u8; 16]);
 
 struct Typed<'a, T, CT, A>
 where
@@ -763,7 +767,10 @@ where
         self.0.len_bits().map(|x| x >> 3)
     }
 
-    pub fn read_node<'x>(&self, buf: &'x mut [u8; CHUNK_SIZE as usize]) -> Result<DataNode<'x>, ReadError<io::Error>> {
+    pub fn read_node<'x>(
+        &self,
+        buf: &'x mut [u8; CHUNK_SIZE as usize],
+    ) -> Result<DataNode<'x>, ReadError<io::Error>> {
         match self.0.read_node(buf)? {
             TypedNode::Chunk { len } => Ok(DataNode::Chunk { len }),
             TypedNode::Pair { pair } => Ok(DataNode::Pair { pair }),
@@ -816,11 +823,26 @@ where
         self.0.len_bits().map(|x| x >> 8)
     }
 
-    pub fn read_node<'x>(&self, buf: &'x mut [u8; CHUNK_SIZE as usize]) -> Result<RefsNode<'x>, ReadError<io::Error>> {
+    pub fn read_node<'x>(
+        &self,
+        buf: &'x mut [u8; CHUNK_SIZE as usize],
+    ) -> Result<RefsNode<'x>, ReadError<io::Error>> {
         match self.0.read_node(buf)? {
-            TypedNode::Chunk { len } => Ok(RefsNode::Chunk { len: len / mem::size_of::<Hash>() }),
+            TypedNode::Chunk { len } => Ok(RefsNode::Chunk {
+                len: len / mem::size_of::<Hash>(),
+            }),
             TypedNode::Pair { pair } => Ok(RefsNode::Pair { pair }),
         }
+    }
+}
+
+impl Pair {
+    pub fn len_bits(&self) -> u128 {
+        u128::from_le_bytes(self.len.0)
+    }
+
+    pub fn keys(&self) -> &[Hash; 2] {
+        &self.keys
     }
 }
 
@@ -860,7 +882,10 @@ where
         Ok(buf)
     }
 
-    pub fn read_node<'x>(&self, buf: &'x mut [u8; CHUNK_SIZE as usize]) -> Result<TypedNode<'x>, ReadError<io::Error>> {
+    pub fn read_node<'x>(
+        &self,
+        buf: &'x mut [u8; CHUNK_SIZE as usize],
+    ) -> Result<TypedNode<'x>, ReadError<io::Error>> {
         match self.location.ty().0 {
             FileRef::TY_CHUNK_FULL => {
                 let len = self.read_chunk_full(0, buf)?;
