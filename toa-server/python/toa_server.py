@@ -159,7 +159,6 @@ def main():
             i += 1
             print(n, x[i:i+l].decode('utf-8'))
             i += l
-        print(n, 'items')
 
     def path(it, dump):
         dump(toa.fetch(toa.root(), it))
