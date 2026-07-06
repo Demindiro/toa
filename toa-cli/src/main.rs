@@ -129,6 +129,10 @@ impl Toa {
         Ok(Self { toa, meta })
     }
 
+    fn root(&self) -> Hash {
+        self.toa.inner.root()
+    }
+
     fn save_root(&mut self) -> Result<()> {
         let root = self.toa.add_dir(self.meta.iter().map(|x| (&**x.0, *x.1)));
         self.toa
@@ -197,7 +201,7 @@ usage: {procname} <cmd> [...]
         dump log
     unix add <store> <accel> <name> <directory> [-e <skip>]
     unix get <store> <accel> <name> <path>
-    unix ls <store> <accel> <name> [path]"
+    unix ls <store> <accel> [path]"
     );
     s.into()
 }

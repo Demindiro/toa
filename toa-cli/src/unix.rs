@@ -81,12 +81,12 @@ where
     A: Iterator<Item = String>,
 {
     let [store, accel] = arg_store_accel(procname, &mut args)?;
-    let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next();
     let path = path.as_deref().unwrap_or("/");
     args_end(procname, args)?;
 
-    let (toa, dir) = open(&store, &accel, &name, false)?;
+    let toa = Toa::load(&store, &accel, false)?;
+    let dir = toa.root();
     let dir = traverse_path(&toa, path, dir)?;
     let dir = toa.toa.get(&dir)?;
     let Object::Refs(dir) = dir else {
