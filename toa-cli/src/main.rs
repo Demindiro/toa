@@ -142,10 +142,6 @@ impl Toa {
         Ok(())
     }
 
-    fn meta(&self, name: &str) -> Option<Hash> {
-        self.meta.get(name).copied()
-    }
-
     fn set_meta(&mut self, name: &str, value: &Hash) {
         self.meta.insert(name.into(), *value);
     }
@@ -200,7 +196,7 @@ usage: {procname} <cmd> [...]
     blob debug log <store>
         dump log
     unix add <store> <accel> <name> <directory> [-e <skip>]
-    unix get <store> <accel> <name> <path>
+    unix get <store> <accel> <path>
     unix ls <store> <accel> [path]"
     );
     s.into()

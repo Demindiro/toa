@@ -65,11 +65,11 @@ where
     A: Iterator<Item = String>,
 {
     let [store, accel] = arg_store_accel(procname, &mut args)?;
-    let name = args.next().ok_or_else(|| usage(procname))?;
     let path = args.next().ok_or_else(|| usage(procname))?;
     args_end(procname, args)?;
 
-    let (dev, dir) = open(&store, &accel, &name, false)?;
+    let dev = Toa::load(&store, &accel, false)?;
+    let dir = dev.root();
     let file = traverse_path(&dev, &path, dir)?;
     crate::dump_object(&dev, &file)?;
 
@@ -187,12 +187,6 @@ fn add_file(dev: &mut Toa, path: &str, stat: &mut Stat) -> Result<Hash> {
 
     println!("{key}");
     Ok(key)
-}
-
-fn open(store: &Path, accel: &Path, name: &str, write: bool) -> Result<(Toa, Hash)> {
-    let dev = Toa::load(store, accel, write)?;
-    let key = dev.meta(name).ok_or("meta key \"unix.root\" not found")?;
-    Ok((dev, key))
 }
 
 fn traverse_path(dev: &Toa, path: &str, mut start: Hash) -> Result<Hash> {
