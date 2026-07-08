@@ -6,7 +6,7 @@ pub use toa_blob_compress::{BlobRef, Compression, PageSize};
 pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
 
-use ::core::{fmt, mem, ops};
+use ::core::{fmt, ops};
 use accel::IndexEntry;
 use std::{
     cell::Cell,
@@ -46,9 +46,6 @@ where
 pub struct Data<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
 where
     T: BlobStore;
-pub struct Refs<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
-where
-    T: BlobStore;
 
 struct MapStore<T, A> {
     store: T,
@@ -61,11 +58,6 @@ pub enum TypedNode<'a> {
 }
 
 pub enum DataNode<'a> {
-    Pair { pair: &'a Pair },
-    Chunk { len: usize },
-}
-
-pub enum RefsNode<'a> {
     Pair { pair: &'a Pair },
     Chunk { len: usize },
 }
@@ -693,64 +685,6 @@ where
     }
 }
 
-impl<'a, T, A> Refs<'a, T, A>
-where
-    T: BlobStore,
-    T::BlobHandle: Copy, // TODO
-    A: accel::Index,
-{
-    /// # Note
-    ///
-    /// Offset is in *hashes*.
-    pub fn read(&self, offset: u128, buf: &mut [Hash]) -> Result<usize, ReadError<io::Error>> {
-        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
-        self.0
-            .read(offset, bytemuck::cast_slice_mut(buf))
-            .map(|x| x / mem::size_of::<Hash>())
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *hashes*.
-    pub fn read_exact(
-        &self,
-        offset: u128,
-        buf: &mut [Hash],
-    ) -> Result<(), ReadExactError<io::Error>> {
-        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
-        self.0.read_exact(offset, bytemuck::cast_slice_mut(buf))
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *hashes*.
-    pub fn read_array<const N: usize>(
-        &self,
-        offset: u128,
-    ) -> Result<[Hash; N], ReadExactError<io::Error>> {
-        // bytemuck is being annoying, so reimplement using read_exact
-        let mut buf = [Hash::default(); N];
-        self.read_exact(offset, &mut buf)?;
-        Ok(buf)
-    }
-
-    pub fn len(&self) -> io::Result<u128> {
-        self.0.len_bits().map(|x| x >> 8)
-    }
-
-    pub fn read_node<'x>(
-        &self,
-        buf: &'x mut [u8; CHUNK_SIZE as usize],
-    ) -> Result<RefsNode<'x>, ReadError<io::Error>> {
-        match self.0.read_node(buf)? {
-            TypedNode::Chunk { len } => Ok(RefsNode::Chunk {
-                len: len / mem::size_of::<Hash>(),
-            }),
-            TypedNode::Pair { pair } => Ok(RefsNode::Pair { pair }),
-        }
-    }
-}
-
 impl Pair {
     pub fn len_bits(&self) -> u128 {
         u128::from_le_bytes(self.len.0)
@@ -960,12 +894,6 @@ impl<T: BlobStore, A> Clone for Data<'_, T, A> {
     }
 }
 
-impl<T: BlobStore, A> Clone for Refs<'_, T, A> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
 impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
     fn clone(&self) -> Self {
         Self {
@@ -977,7 +905,6 @@ impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
 }
 
 impl<T: BlobStore, A> Copy for Data<'_, T, A> {}
-impl<T: BlobStore, A> Copy for Refs<'_, T, A> {}
 impl<T: BlobStore, A> Copy for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {}
 
 macro_rules! abstract_blob_imp {
