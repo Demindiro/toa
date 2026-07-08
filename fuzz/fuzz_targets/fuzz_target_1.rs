@@ -34,7 +34,6 @@ enum Op<'a> {
 
 struct Buffers {
     data: Vec<u8>,
-    refs: Vec<Hash>,
     objs: Vec<(Vec<u8>, Hash)>,
     accel: HashMap<Hash, toa::accel::IndexEntry, NoopBuildHasher>,
 }
@@ -46,7 +45,6 @@ struct NoopHash(u64);
 thread_local! {
     static BUFFERS: RefCell<Buffers> = RefCell::new(Buffers {
         data: vec![0; 1 << 24],
-        refs: vec![Hash::default(); 1 << 24],
         objs: vec![],
         accel: Default::default(),
     });
@@ -85,7 +83,6 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
         let buffers = &mut *buffers.borrow_mut();
         let Buffers {
             data: buf_data,
-            refs: buf_refs,
             objs,
             accel,
         } = buffers;
@@ -112,12 +109,6 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
         };
 
         for op in ops {
-            let collect_refs = |slots: &[u8]| -> Option<Vec<Hash>> {
-                slots
-                    .iter()
-                    .map(|&i| objs.get(usize::from(i)).map(|x: &(_, _)| x.1))
-                    .collect::<Option<Vec<_>>>()
-            };
             let rept = |x: &[u8], n: u16| (0..n).flat_map(|_| x).copied().collect::<Vec<_>>();
             match op {
                 Op::AddData { bytes, repeat } => {
