@@ -52,11 +52,6 @@ struct MapStore<T, A> {
     accel: A,
 }
 
-pub enum TypedNode<'a> {
-    Pair { pair: &'a Pair },
-    Chunk { len: usize },
-}
-
 pub enum DataNode<'a> {
     Pair { pair: &'a Pair },
     Chunk { len: usize },
@@ -678,10 +673,7 @@ where
         &self,
         buf: &'x mut [u8; CHUNK_SIZE as usize],
     ) -> Result<DataNode<'x>, ReadError<io::Error>> {
-        match self.0.read_node(buf)? {
-            TypedNode::Chunk { len } => Ok(DataNode::Chunk { len }),
-            TypedNode::Pair { pair } => Ok(DataNode::Pair { pair }),
-        }
+        self.0.read_node(buf)
     }
 }
 
@@ -734,20 +726,20 @@ where
     pub fn read_node<'x>(
         &self,
         buf: &'x mut [u8; CHUNK_SIZE as usize],
-    ) -> Result<TypedNode<'x>, ReadError<io::Error>> {
+    ) -> Result<DataNode<'x>, ReadError<io::Error>> {
         match self.location.ty() {
             FileRef::TY_CHUNK_FULL => {
                 let len = self.read_chunk_full(0, buf)?;
-                Ok(TypedNode::Chunk { len })
+                Ok(DataNode::Chunk { len })
             }
             FileRef::TY_CHUNK_PARTIAL => {
                 let len = self.read_chunk_partial(0, buf)?;
-                Ok(TypedNode::Chunk { len })
+                Ok(DataNode::Chunk { len })
             }
             FileRef::TY_PAIR => {
                 let pair = bytemuck::from_bytes_mut(&mut buf[..80]);
                 self.read_pair_only(pair)?;
-                Ok(TypedNode::Pair { pair })
+                Ok(DataNode::Pair { pair })
             }
             _ => unreachable!("invalid FileRef type"),
         }
