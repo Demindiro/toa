@@ -25,7 +25,7 @@ where
     T: BlobStore,
 {
     store: MapStore<T, A>,
-    data: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
+    data: BlobsTyped<T::BlobHandle>,
     refs: T::BlobHandle,
     root: Hash,
 }
@@ -42,10 +42,6 @@ where
     Data(Data<'a, T, A>),
     Refs([Hash; 2]),
 }
-
-pub struct Data<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
-where
-    T: BlobStore;
 
 struct MapStore<T, A> {
     store: T,
@@ -69,18 +65,18 @@ pub struct Pair {
 #[repr(transparent)]
 struct UnalignedLen128([u8; 16]);
 
-struct Typed<'a, T, CT, A>
+pub struct Data<'a, T, A>
 where
     T: BlobStore,
 {
-    blobs: &'a BlobsTyped<T::BlobHandle, CT>,
+    blobs: &'a BlobsTyped<T::BlobHandle>,
     store: &'a MapStore<T, A>,
     location: FileRef,
 }
 
-struct BlobsTyped<T, CT> {
-    chunks_full: CT,
-    chunks_partial: CT,
+struct BlobsTyped<T> {
+    chunks_full: AbstractBlob<T>,
+    chunks_partial: AbstractBlob<T>,
     pairs: T,
 }
 
@@ -177,10 +173,10 @@ where
             let x = bytemuck::cast(x);
             return Ok(Some(Object::Refs(x)));
         }
-        let Some(x) = Typed::new(self, *key)? else {
+        let Some(x) = Data::new(self, *key)? else {
             return Ok(None);
         };
-        let x = Object::Data(Data(x));
+        let x = Object::Data(x);
         Ok(Some(x))
     }
 
@@ -286,7 +282,7 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T, AbstractBlob<T>>
+impl<T> BlobsTyped<T>
 where
     T: Copy, // TODO do this properly
 {
@@ -606,7 +602,7 @@ where
     }
 }
 
-impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
+impl<'a, T, A> Data<'a, T, A>
 where
     T: BlobStore,
     A: accel::Index,
@@ -631,52 +627,6 @@ where
     }
 }
 
-impl<'a, T, A> Data<'a, T, A>
-where
-    T: BlobStore,
-    T::BlobHandle: Copy, // TODO
-    A: accel::Index,
-{
-    /// # Note
-    ///
-    /// Offset is in *bytes*.
-    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
-        self.0.read(offset, buf)
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *bytes*.
-    pub fn read_exact(
-        &self,
-        offset: u128,
-        buf: &mut [u8],
-    ) -> Result<(), ReadExactError<io::Error>> {
-        self.0.read_exact(offset, buf)
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *bytes*.
-    pub fn read_array<const N: usize>(
-        &self,
-        offset: u128,
-    ) -> Result<[u8; N], ReadExactError<io::Error>> {
-        self.0.read_array(offset)
-    }
-
-    pub fn len(&self) -> io::Result<u128> {
-        self.0.len_bits().map(|x| x >> 3)
-    }
-
-    pub fn read_node<'x>(
-        &self,
-        buf: &'x mut [u8; CHUNK_SIZE as usize],
-    ) -> Result<DataNode<'x>, ReadError<io::Error>> {
-        self.0.read_node(buf)
-    }
-}
-
 impl Pair {
     pub fn len_bits(&self) -> u128 {
         u128::from_le_bytes(self.len.0)
@@ -687,12 +637,15 @@ impl Pair {
     }
 }
 
-impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
+impl<'a, T, A> Data<'a, T, A>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
     A: accel::Index,
 {
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
     pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
         match self.location.ty() {
             FileRef::TY_CHUNK_FULL => self.read_chunk_full(offset, buf),
@@ -702,6 +655,9 @@ where
         }
     }
 
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
     pub fn read_exact(
         &self,
         offset: u128,
@@ -714,6 +670,9 @@ where
         Ok(())
     }
 
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
     pub fn read_array<const N: usize>(
         &self,
         offset: u128,
@@ -743,6 +702,10 @@ where
             }
             _ => unreachable!("invalid FileRef type"),
         }
+    }
+
+    pub fn len(&self) -> io::Result<u128> {
+        self.len_bits().map(|x| x >> 3)
     }
 
     pub fn len_bits(&self) -> io::Result<u128> {
@@ -882,12 +845,6 @@ impl<T> From<ReadError<T>> for ReadExactError<T> {
 
 impl<T: BlobStore, A> Clone for Data<'_, T, A> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
-    fn clone(&self) -> Self {
         Self {
             store: self.store,
             blobs: self.blobs,
@@ -897,7 +854,6 @@ impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
 }
 
 impl<T: BlobStore, A> Copy for Data<'_, T, A> {}
-impl<T: BlobStore, A> Copy for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {}
 
 macro_rules! abstract_blob_imp {
     ($(fn $fn:ident<S>(&self, store: &S $(, $param:ident: $ty:ty)*) -> $ret:ty;)*) => {
@@ -1096,14 +1052,14 @@ mod test {
                 Object::Data(o) => o,
                 Object::Refs(_) => panic!("expected data, got refs"),
             };
-            o.0.dump_tree(0);
+            o.dump_tree(0);
             assert_eq!(
-                o.0.len_bits().unwrap(),
+                o.len_bits().unwrap(),
                 (value.len() as u128) << 3,
                 "lengths do not match"
             );
             let x = &mut *vec![0; value.len()];
-            let n = o.0.read(0, x).expect("read failed");
+            let n = o.read(0, x).expect("read failed");
             assert_eq!(n, value.len(), "read unexpectedly truncated");
             let f = String::from_utf8_lossy;
             assert!(x == value, "{:?} <> {:?}", f(&x), f(value));
