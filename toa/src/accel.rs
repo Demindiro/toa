@@ -30,8 +30,6 @@ pub struct IndexCookie {
     pub data_offset_full: u64,
     pub data_offset_partial: u64,
     pub data_offset_pairs: u64,
-    pub refs_offset_full: u64,
-    pub refs_offset_partial: u64,
     pub refs_offset_pairs: u64,
 }
 

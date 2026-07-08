@@ -17,7 +17,6 @@ type Store = BlobStore<FileBlocks>;
 type Accel = toa::accel::sled::Db;
 type InnerToa = toa::Toa<Store, Accel>;
 type Object<'a> = toa::Object<'a, Store, Accel>;
-type Refs<'a> = toa::Refs<'a, Store, Accel>;
 
 // FIXME bro
 struct ToaToa {
@@ -54,36 +53,33 @@ impl ToaToa {
 
     fn add_dir<'a, I>(&mut self, items: I) -> Result<Hash>
     where
-        I: Iterator<Item = (&'a str, Hash)> + Clone,
+        I: DoubleEndedIterator<Item = (&'a str, Hash)> + Clone,
     {
         let e = |e| format!("failed to add dir: {e:?}");
+        let mut hash = Hash::NIL;
+        for (_, x) in items.clone().rev() {
+            hash = self.inner.add_refs(x, hash)?;
+        }
         let mut dir = Vec::new();
-        for (name, _) in items.clone() {
+        for (name, _) in items {
             dir.push(name.len() as u8);
             dir.extend(name.bytes());
         }
         let dir = self.inner.add_data(&dir).map_err(e)?;
-        let dir = [dir]
-            .into_iter()
-            .chain(items.map(|x| x.1))
-            .collect::<Vec<_>>();
-        let dir = self.inner.add_refs(&dir).map_err(e)?;
-        Ok(dir)
+        hash = self.inner.add_refs(dir, hash)?;
+        Ok(hash)
     }
 
     fn iter_dir(
         &self,
-        obj: Refs<'_>,
+        obj: [Hash; 2],
     ) -> Result<impl ExactSizeIterator<Item = Result<(String, Hash)>>> {
         self.dir_to_btree(obj)
             .map(|x| x.into_iter().map(|(k, v)| Ok((k.into(), v))))
     }
 
-    fn dir_to_btree(&self, refs: Refs<'_>) -> Result<BTreeMap<Box<str>, Hash>> {
+    fn dir_to_btree(&self, [data, refs]: [Hash; 2]) -> Result<BTreeMap<Box<str>, Hash>> {
         let mut map = BTreeMap::default();
-        let Ok([data]) = refs.read_array(0) else {
-            todo!()
-        };
         let Ok(Some(data)) = self.inner.get(&data) else {
             todo!()
         };
@@ -95,15 +91,21 @@ impl ToaToa {
             b
         };
         let mut offset = 0;
-        for i in 1..refs.len()? {
+        let mut next = refs;
+        while next != Hash::NIL {
             let kl = usize::from(data[offset]);
             offset += 1;
             let k = &data[offset..][..kl];
             let k = core::str::from_utf8(k).unwrap();
             offset += kl;
-            let [v] = refs
-                .read_array(i)
-                .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
+            let v;
+            [v, next] = self
+                .inner
+                .get(&next)
+                .map_err(|e| format!("root: failed to read ref: {e:?}"))?
+                .unwrap()
+                .into_refs()
+                .unwrap();
             map.insert(k.into(), v);
         }
 

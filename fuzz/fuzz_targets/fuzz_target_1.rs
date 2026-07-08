@@ -19,8 +19,8 @@ enum Op<'a> {
         repeat: u16,
     },
     AddRefs {
-        slots: ShortSlice<'a>,
-        repeat: u16,
+        head: u8,
+        tail: u8,
     },
     // use u24 instead of usize because 64-bit usize is excessive + not consistent between
     // 32/64-bit platforms
@@ -125,13 +125,13 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                     let key = toa.add_data(&bytes).unwrap();
                     objs.push((bytes, key));
                 }
-                Op::AddRefs { slots, repeat } => {
-                    let slots = rept(slots.0, repeat);
-                    let Some(refs) = collect_refs(&slots) else {
+                Op::AddRefs { head, tail } => {
+                    let xy = [head, tail].map(|x| objs.get(usize::from(x)));
+                    let [Some(x), Some(y)] = xy else {
                         continue;
                     };
-                    let key = toa.add_refs(&refs).unwrap();
-                    objs.push((slots, key));
+                    let key = toa.add_refs(x.1, y.1).unwrap();
+                    objs.push(([head, tail].into(), key));
                 }
                 Op::Read {
                     slot,
@@ -156,21 +156,11 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
                             let n = test.read(offset, &mut buf[..len]).unwrap();
                             assert_eq!(&buf[..n], expect, "object data mismatch");
                         }
-                        Object::Refs(test) => {
-                            let expect = {
-                                let offset =
-                                    offset.try_into().unwrap_or(usize::MAX).min(expect.len());
-                                let expect = &expect[offset..];
-                                let len = len.min(expect.len());
-                                &expect[..len]
-                            };
-                            let Some(expect) = collect_refs(expect) else {
-                                continue;
-                            };
-                            let buf = &mut *buf_refs;
-                            let n = test.read(offset, &mut buf[..len]).unwrap();
-                            assert_eq!(n, expect.len(), "object refs len mismatch");
-                            assert_eq!(&buf[..n], expect, "object refs mismatch");
+                        Object::Refs([head, tail]) => {
+                            let [x, y] =
+                                (&**expect).try_into().expect("refs has exactly 2 elements");
+                            assert_eq!(objs[usize::from(x)].1, head);
+                            assert_eq!(objs[usize::from(y)].1, tail);
                         }
                     }
                 }

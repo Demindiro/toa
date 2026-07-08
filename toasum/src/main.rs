@@ -1,5 +1,5 @@
 use std::io::{self, BufRead};
-use toa_hash::{Domain, Hash};
+use toa_hash::Hash;
 
 #[derive(Default)]
 struct Program {
@@ -23,7 +23,7 @@ impl Program {
                 .populate()
                 .map_copy_read_only(&data)?
         };
-        let hash = toa_hash::hash(Domain::Data, &data);
+        let hash = toa_hash::hash(&data);
         Ok(hash)
     }
 
@@ -49,16 +49,16 @@ impl Program {
 
         items.sort_by(|x, y| x.0.cmp(&y.0));
         let mut names = Vec::with_capacity(items.iter().fold(items.len(), |s, x| s + x.0.len()));
-        let mut hashes = Vec::with_capacity(1 + items.len());
-        hashes.push(Default::default());
+        let mut hash = Hash::NIL;
+        for (_, x) in items.iter().rev() {
+            hash = toa_hash::hash_refs(*x, hash);
+        }
         for x in items {
             names.push(x.0.len() as u8);
             names.extend(x.0.bytes());
-            hashes.push(x.1);
         }
 
-        hashes[0] = toa_hash::hash(Domain::Data, &names);
-        let hash = toa_hash::hash(Domain::Refs, bytemuck::cast_slice(&hashes));
+        hash = toa_hash::hash_refs(toa_hash::hash(&names), hash);
         Ok(hash)
     }
 

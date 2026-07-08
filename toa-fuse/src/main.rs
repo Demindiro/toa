@@ -20,7 +20,6 @@ type Accel = toa::accel::sled::Db;
 type InnerToa = toa::Toa<Store, Accel>;
 type Object<'a> = toa::Object<'a, Store, Accel>;
 type Data<'a> = toa::Data<'a, Store, Accel>;
-type Refs<'a> = toa::Refs<'a, Store, Accel>;
 
 struct Toa {
     inner: InnerToa,
@@ -41,9 +40,9 @@ struct Node {
     key: Hash,
 }
 
-struct Dir<'a> {
+struct Dir {
     data: Vec<u8>,
-    refs: Refs<'a>,
+    refs: Vec<Hash>,
     index: u32,
     name_offset: u32,
 }
@@ -73,12 +72,11 @@ impl Toa {
             .get(&root)
             .map_err(|e| format!("failed to get root from store: {e:?}"))?
             .ok_or("root is missing from store")?;
-        let Object::Refs(refs) = refs else { todo!() };
+        let Object::Refs([data, refs]) = refs else {
+            todo!()
+        };
 
         let data = {
-            let Ok([data]) = refs.read_array(0) else {
-                todo!()
-            };
             let Ok(Some(data)) = inner.get(&data) else {
                 todo!()
             };
@@ -89,15 +87,20 @@ impl Toa {
             b
         };
         let mut offset = 0;
-        for i in 1..refs.len()? {
+        let mut refs = refs;
+        while refs != Hash::NIL {
             let kl = usize::from(data[offset]);
             offset += 1;
             let k = &data[offset..][..kl];
             let k = core::str::from_utf8(k).unwrap();
             offset += kl;
-            let [v] = refs
-                .read_array(i)
-                .map_err(|e| format!("root: failed to read ref: {e:?}"))?;
+            let v;
+            [v, refs] = inner
+                .get(&refs)
+                .map_err(|e| format!("root: failed to read ref: {e:?}"))?
+                .unwrap()
+                .into_refs()
+                .unwrap();
             meta.insert(k.into(), v);
         }
 
@@ -127,7 +130,7 @@ impl Fs {
             .or_else(|| self.nodes.get(&ino))
     }
 
-    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, Refs<'_>)> {
+    fn get_ino_dir(&self, ino: u64) -> Option<(&Node, [Hash; 2])> {
         self.get_ino(ino)
             .and_then(|x| self.dev.get(&x.key).unwrap().into_refs().map(|y| (x, y)))
     }
@@ -179,17 +182,24 @@ impl Fs {
     fn get_len_ty(&self, key: &Hash) -> (u128, fuser::FileType) {
         match self.dev.get(key).unwrap() {
             Object::Data(x) => (x.len().unwrap(), fuser::FileType::RegularFile),
-            Object::Refs(x) => (x.len().unwrap(), fuser::FileType::Directory),
+            Object::Refs(_) => (64, fuser::FileType::Directory),
         }
     }
 
-    fn open_dir<'a>(&'a self, refs: Refs<'a>) -> Dir<'a> {
-        let [data] = refs.read_array(0).unwrap();
+    fn open_dir(&self, [data, refs]: [Hash; 2]) -> Dir {
         let data = self.dev.get(&data).unwrap();
         let Object::Data(data) = data else { todo!() };
 
         let mut names = vec![0; data.len().unwrap().try_into().unwrap()];
         data.read_exact(0, &mut names).unwrap();
+
+        let mut next = refs;
+        let mut refs = Vec::new();
+        while next != Hash::NIL {
+            let v;
+            [v, next] = self.dev.get(&next).unwrap().into_refs().unwrap();
+            refs.push(v);
+        }
 
         Dir {
             data: names,
@@ -366,13 +376,9 @@ impl fuser::Filesystem for Fs {
     }
 }
 
-impl<'a> Dir<'a> {
+impl Dir {
     fn get_key(&self) -> Option<Hash> {
-        let e = &mut [Hash::default()];
-        match self.refs.read((self.index + 1).into(), e).unwrap() {
-            0 => None,
-            _ => Some(e[0]),
-        }
+        self.refs.get(self.index as usize).copied()
     }
 
     fn get_name(&self) -> &str {
