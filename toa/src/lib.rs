@@ -99,7 +99,6 @@ struct BlobsTyped<T, CT> {
 
 // lol@names
 enum AbstractBlob<T> {
-    Plain(T),
     Compressed {
         set: BlobSet<T>,
         cache: Cell<toa_blob_compress::Cache>,
@@ -343,25 +342,6 @@ where
         }
     }
 
-    fn init_at_plain<S>(store: &S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
-    where
-        S: BlobStore<BlobHandle = T>,
-    {
-        let f = |name: &str| store.create(&format!("{dir}_{name}"));
-        match (
-            f("chunks_full.bin")?,
-            f("chunks_partial.bin")?,
-            f("pairs.bin")?,
-        ) {
-            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
-                chunks_full: AbstractBlob::Plain(chunks_full),
-                chunks_partial: AbstractBlob::Plain(chunks_partial),
-                pairs,
-            })),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
-        }
-    }
-
     fn load_at<S, A>(store: &mut MapStore<S, A>, dir: &str) -> io::Result<Option<Self>>
     where
         S: BlobStore<BlobHandle = T>,
@@ -384,30 +364,6 @@ where
                 let mut s = Self {
                     chunks_full: h(chunks_full),
                     chunks_partial: h(chunks_partial),
-                    pairs,
-                };
-                s.load(store)?;
-                Ok(Some(s))
-            }
-            (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
-        }
-    }
-
-    fn load_at_plain<S, A>(store: &mut MapStore<S, A>, dir: &str) -> io::Result<Option<Self>>
-    where
-        S: BlobStore<BlobHandle = T>,
-        A: accel::Index,
-    {
-        let f = |name: &str| store.store.find(&format!("{dir}_{name}"));
-        match (
-            f("chunks_full.bin")?,
-            f("chunks_partial.bin")?,
-            f("pairs.bin")?,
-        ) {
-            (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
-                let mut s = Self {
-                    chunks_full: AbstractBlob::Plain(chunks_full),
-                    chunks_partial: AbstractBlob::Plain(chunks_partial),
                     pairs,
                 };
                 s.load(store)?;
@@ -1032,7 +988,6 @@ macro_rules! abstract_blob_imp {
                 S: BlobStore<BlobHandle = T>,
             {
                 match self {
-                    Self::Plain(x) => store.$fn(x, $($param,)*),
                     Self::Compressed { set, cache } => {
                         let c = cache.take();
                         let blob = BlobRef::blob_with_cache(store, *set, c);
