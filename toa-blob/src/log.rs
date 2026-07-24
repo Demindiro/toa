@@ -247,7 +247,7 @@ where
             Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"))?;
         }
         if hdr.version != entry::Header::VERSION {
-            todo!("bad version");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad version"))?;
         }
 
         if hdr.block_size != u32::from(dev.block_size()) {
