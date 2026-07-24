@@ -157,8 +157,8 @@ impl Request<'_> {
                 let n = x.read(offset << 13, out).unwrap();
                 self.send(n)
             }
-            toa::Object::Refs(x) => {
-                todo!();
+            toa::Object::Refs(_) => {
+                self.send_error("refs_pair")
             }
         }
     }
