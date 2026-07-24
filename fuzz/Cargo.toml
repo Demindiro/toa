@@ -34,3 +34,10 @@ path = "fuzz_targets/toa-blob-compress-fuzz.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "toa-blob-invalid"
+path = "fuzz_targets/toa-blob-invalid.rs"
+test = false
+doc = false
+bench = false
