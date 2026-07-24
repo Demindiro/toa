@@ -244,7 +244,7 @@ where
         let hdr = bytemuck::from_bytes::<entry::Header>(hdr);
 
         if hdr.magic != entry::Header::MAGIC {
-            todo!("bad magic");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"))?;
         }
         if hdr.version != entry::Header::VERSION {
             todo!("bad version");
