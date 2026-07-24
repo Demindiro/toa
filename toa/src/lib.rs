@@ -6,7 +6,7 @@ pub use toa_blob_compress::{BlobRef, Compression, PageSize};
 pub use toa_blob_store::{BlobStore, BlobStoreExt, DuplicateBlob};
 pub use toa_hash::Hash;
 
-use ::core::{fmt, mem, ops};
+use ::core::{fmt, ops};
 use accel::IndexEntry;
 use std::{
     cell::Cell,
@@ -15,7 +15,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use toa_blob_compress::BlobSet;
-use toa_hash::Domain;
 
 const CHUNK_SIZE: u128 = 1 << 13;
 
@@ -26,8 +25,8 @@ where
     T: BlobStore,
 {
     store: MapStore<T, A>,
-    data: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
-    refs: BlobsTyped<T::BlobHandle, AbstractBlob<T::BlobHandle>>,
+    data: BlobsTyped<T::BlobHandle>,
+    refs: T::BlobHandle,
     root: Hash,
 }
 
@@ -41,32 +40,15 @@ where
     T: BlobStore,
 {
     Data(Data<'a, T, A>),
-    Refs(Refs<'a, T, A>),
+    Refs([Hash; 2]),
 }
-
-pub struct Data<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
-where
-    T: BlobStore;
-pub struct Refs<'a, T, A>(Typed<'a, T, AbstractBlob<T::BlobHandle>, A>)
-where
-    T: BlobStore;
 
 struct MapStore<T, A> {
     store: T,
     accel: A,
 }
 
-pub enum TypedNode<'a> {
-    Pair { pair: &'a Pair },
-    Chunk { len: usize },
-}
-
 pub enum DataNode<'a> {
-    Pair { pair: &'a Pair },
-    Chunk { len: usize },
-}
-
-pub enum RefsNode<'a> {
     Pair { pair: &'a Pair },
     Chunk { len: usize },
 }
@@ -83,24 +65,23 @@ pub struct Pair {
 #[repr(transparent)]
 struct UnalignedLen128([u8; 16]);
 
-struct Typed<'a, T, CT, A>
+pub struct Data<'a, T, A>
 where
     T: BlobStore,
 {
-    blobs: &'a BlobsTyped<T::BlobHandle, CT>,
+    blobs: &'a BlobsTyped<T::BlobHandle>,
     store: &'a MapStore<T, A>,
     location: FileRef,
 }
 
-struct BlobsTyped<T, CT> {
-    chunks_full: CT,
-    chunks_partial: CT,
+struct BlobsTyped<T> {
+    chunks_full: AbstractBlob<T>,
+    chunks_partial: AbstractBlob<T>,
     pairs: T,
 }
 
 // lol@names
 enum AbstractBlob<T> {
-    Plain(T),
     Compressed {
         set: BlobSet<T>,
         cache: Cell<toa_blob_compress::Cache>,
@@ -139,8 +120,8 @@ where
         compression_level: u8,
     ) -> io::Result<Result<Self, DuplicateBlob>> {
         let data = BlobsTyped::init_at(&store, "data", page_size, compression, compression_level)?;
-        let refs = BlobsTyped::init_at_plain(&store, "refs")?;
-        let [Ok(data), Ok(refs)] = [data, refs] else {
+        let refs = store.create("refs.bin")?;
+        let (Ok(data), Ok(refs)) = (data, refs) else {
             return Ok(Err(DuplicateBlob));
         };
         Ok(Ok(Self {
@@ -153,9 +134,9 @@ where
 
     pub fn load(store: T, accel: A) -> io::Result<Option<Self>> {
         let mut store = MapStore { store, accel };
-        let data = BlobsTyped::load_at(&mut store, "data", Domain::Data)?;
-        let refs = BlobsTyped::load_at_plain(&mut store, "refs", Domain::Refs)?;
-        let [Some(data), Some(refs)] = [data, refs] else {
+        let data = BlobsTyped::load_at(&mut store, "data")?;
+        let refs = store.store.find("refs.bin")?;
+        let (Some(data), Some(refs)) = (data, refs) else {
             return Ok(None);
         };
         let mut root = [0; 32];
@@ -181,23 +162,37 @@ where
     }
 
     pub fn get<'a>(&'a self, key: &Hash) -> io::Result<Option<Object<'a, T, A>>> {
-        let Some(x) = Typed::new(self, *key)? else {
+        let Some(x) = self.store.get(key)? else {
             return Ok(None);
         };
-        let x = match x.location.ty().1 {
-            Domain::Data => Object::Data(Data(x)),
-            Domain::Refs => Object::Refs(Refs(x)),
+        if x.ty() == FileRef::TY_REFS {
+            let x = self
+                .store
+                .store
+                .read_at_array::<64>(&self.refs, x.offset())?;
+            let x = bytemuck::cast(x);
+            return Ok(Some(Object::Refs(x)));
+        }
+        let Some(x) = Data::new(self, *key)? else {
+            return Ok(None);
         };
+        let x = Object::Data(x);
         Ok(Some(x))
     }
 
     pub fn add_data(&mut self, data: &[u8]) -> io::Result<Hash> {
-        self.data.add(&mut self.store, Domain::Data, data)
+        self.data.add(&mut self.store, data)
     }
 
-    pub fn add_refs(&mut self, refs: &[Hash]) -> io::Result<Hash> {
-        self.refs
-            .add(&mut self.store, Domain::Refs, bytemuck::cast_slice(refs))
+    pub fn add_refs(&mut self, head: Hash, tail: Hash) -> io::Result<Hash> {
+        let key = toa_hash::hash_refs(head, tail);
+        if self.store.get(&key)?.is_none() {
+            let buf = [head, tail];
+            let buf = bytemuck::bytes_of(&buf);
+            let offt = self.store.store.append(&mut self.refs, &buf)?;
+            self.store.add(&key, FileRef::new_refs(offt))?;
+        }
+        Ok(key)
     }
 
     pub fn size_on_disk(&self) -> io::Result<u64> {
@@ -232,9 +227,7 @@ where
             data_offset_full: self.data.chunks_full.len(store)?,
             data_offset_partial: self.data.chunks_partial.len(store)?,
             data_offset_pairs: store.len(&self.data.pairs)?,
-            refs_offset_full: self.refs.chunks_full.len(store)?,
-            refs_offset_partial: self.refs.chunks_partial.len(store)?,
-            refs_offset_pairs: store.len(&self.refs.pairs)?,
+            refs_offset_pairs: store.len(&self.refs)?,
         };
         accel.set_top(cookie)?;
         Ok(())
@@ -289,7 +282,7 @@ impl Blob<fs::File> {
     }
 }
 
-impl<T> BlobsTyped<T, AbstractBlob<T>>
+impl<T> BlobsTyped<T>
 where
     T: Copy, // TODO do this properly
 {
@@ -332,30 +325,7 @@ where
         }
     }
 
-    fn init_at_plain<S>(store: &S, dir: &str) -> io::Result<Result<Self, DuplicateBlob>>
-    where
-        S: BlobStore<BlobHandle = T>,
-    {
-        let f = |name: &str| store.create(&format!("{dir}_{name}"));
-        match (
-            f("chunks_full.bin")?,
-            f("chunks_partial.bin")?,
-            f("pairs.bin")?,
-        ) {
-            (Ok(chunks_full), Ok(chunks_partial), Ok(pairs)) => Ok(Ok(Self {
-                chunks_full: AbstractBlob::Plain(chunks_full),
-                chunks_partial: AbstractBlob::Plain(chunks_partial),
-                pairs,
-            })),
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => Ok(Err(e)),
-        }
-    }
-
-    fn load_at<S, A>(
-        store: &mut MapStore<S, A>,
-        dir: &str,
-        domain: Domain,
-    ) -> io::Result<Option<Self>>
+    fn load_at<S, A>(store: &mut MapStore<S, A>, dir: &str) -> io::Result<Option<Self>>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
@@ -379,70 +349,37 @@ where
                     chunks_partial: h(chunks_partial),
                     pairs,
                 };
-                s.load(store, domain)?;
+                s.load(store)?;
                 Ok(Some(s))
             }
             (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
         }
     }
 
-    fn load_at_plain<S, A>(
-        store: &mut MapStore<S, A>,
-        dir: &str,
-        domain: Domain,
-    ) -> io::Result<Option<Self>>
-    where
-        S: BlobStore<BlobHandle = T>,
-        A: accel::Index,
-    {
-        let f = |name: &str| store.store.find(&format!("{dir}_{name}"));
-        match (
-            f("chunks_full.bin")?,
-            f("chunks_partial.bin")?,
-            f("pairs.bin")?,
-        ) {
-            (Some(chunks_full), Some(chunks_partial), Some(pairs)) => {
-                let mut s = Self {
-                    chunks_full: AbstractBlob::Plain(chunks_full),
-                    chunks_partial: AbstractBlob::Plain(chunks_partial),
-                    pairs,
-                };
-                s.load(store, domain)?;
-                Ok(Some(s))
-            }
-            (None, _, _) | (_, None, _) | (_, _, None) => Ok(None),
-        }
-    }
-
-    fn add<S, A>(
-        &mut self,
-        store: &mut MapStore<S, A>,
-        domain: Domain,
-        data: &[u8],
-    ) -> io::Result<Hash>
+    fn add<S, A>(&mut self, store: &mut MapStore<S, A>, data: &[u8]) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
         if data.len() <= CHUNK_SIZE as usize {
-            self.add_chunk(store, domain, data)
+            self.add_chunk(store, data)
         } else {
             let mut stack = arrayvec::ArrayVec::<Hash, { 128 - 13 }>::new();
             let split_n = ((data.len() - 1) & 0x1fff) + 1;
             let (perfect, tail) = data.split_at(data.len() - split_n);
             for (i, y) in perfect.chunks_exact(CHUNK_SIZE as usize).enumerate() {
-                let mut y = self.add_chunk(store, domain, y)?;
+                let mut y = self.add_chunk(store, y)?;
                 let mut len = 1 << 16;
                 while stack.len() >= (i + 1).count_ones() as usize {
                     let x = stack.pop().expect("at least one element");
                     len <<= 1;
-                    y = self.add_pair(store, domain, &x, &y, len)?;
+                    y = self.add_pair(store, &x, &y, len)?;
                 }
                 stack.push(y);
             }
 
             let len = (data.len() as u128) << 3;
-            let mut y = self.add_chunk(store, domain, tail)?;
+            let mut y = self.add_chunk(store, tail)?;
             let mut mask = 0xffff;
             let top_i = len.wrapping_sub(1); // special-case for len=0
             while let Some(x) = stack.pop() {
@@ -454,25 +391,20 @@ where
                 let bits = (top_i & !mask).trailing_zeros();
                 mask = (1 << (bits + 1)) - 1;
                 let pair_len = (top_i & mask) + 1;
-                y = self.add_pair(store, domain, &x, &y, pair_len)?;
+                y = self.add_pair(store, &x, &y, pair_len)?;
             }
             Ok(y)
         }
     }
 
-    fn add_chunk<S, A>(
-        &mut self,
-        store: &mut MapStore<S, A>,
-        domain: Domain,
-        chunk: &[u8],
-    ) -> io::Result<Hash>
+    fn add_chunk<S, A>(&mut self, store: &mut MapStore<S, A>, chunk: &[u8]) -> io::Result<Hash>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
-        let key = toa_hash::hash_chunk(domain, chunk);
+        let key = toa_hash::hash_chunk(chunk);
         if store.get(&key)?.is_none() {
-            let x = self.store_chunk(&mut store.store, domain, chunk)?;
+            let x = self.store_chunk(&mut store.store, chunk)?;
             store.add(&key, x)?;
         }
         Ok(key)
@@ -481,7 +413,6 @@ where
     fn add_pair<S, A>(
         &mut self,
         store: &mut MapStore<S, A>,
-        domain: Domain,
         x: &Hash,
         y: &Hash,
         len: u128,
@@ -492,42 +423,36 @@ where
     {
         let key = toa_hash::hash_pair(*x, *y, len);
         if store.get(&key)?.is_none() {
-            let x = self.store_pair(&mut store.store, domain, x, y, len)?;
+            let x = self.store_pair(&mut store.store, x, y, len)?;
             store.add(&key, x)?;
         }
         Ok(key)
     }
 
-    fn store_chunk<S>(&mut self, store: &mut S, domain: Domain, bytes: &[u8]) -> io::Result<FileRef>
+    fn store_chunk<S>(&mut self, store: &mut S, bytes: &[u8]) -> io::Result<FileRef>
     where
         S: BlobStore<BlobHandle = T>,
     {
         if let Ok(bytes) = bytes.try_into() {
-            self.store_chunk_full(store, domain, bytes)
+            self.store_chunk_full(store, bytes)
         } else {
-            self.store_chunk_partial(store, domain, bytes)
+            self.store_chunk_partial(store, bytes)
         }
     }
 
     fn store_chunk_full<S>(
         &mut self,
         store: &mut S,
-        domain: Domain,
         bytes: &[u8; CHUNK_SIZE as usize],
     ) -> io::Result<FileRef>
     where
         S: BlobStore<BlobHandle = T>,
     {
         let offt = self.chunks_full.append(store, bytes)?;
-        Ok(FileRef::new_chunk_full(domain, offt))
+        Ok(FileRef::new_chunk_full(offt))
     }
 
-    fn store_chunk_partial<S>(
-        &mut self,
-        store: &mut S,
-        domain: Domain,
-        bytes: &[u8],
-    ) -> io::Result<FileRef>
+    fn store_chunk_partial<S>(&mut self, store: &mut S, bytes: &[u8]) -> io::Result<FileRef>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -539,17 +464,10 @@ where
         let offt = self
             .chunks_partial
             .append_many(store, &[&hdr.to_le_bytes(), bytes, pad])?;
-        Ok(FileRef::new_chunk_partial(domain, offt))
+        Ok(FileRef::new_chunk_partial(offt))
     }
 
-    fn store_pair<S>(
-        &mut self,
-        store: &mut S,
-        domain: Domain,
-        x: &Hash,
-        y: &Hash,
-        len: u128,
-    ) -> io::Result<FileRef>
+    fn store_pair<S>(&mut self, store: &mut S, x: &Hash, y: &Hash, len: u128) -> io::Result<FileRef>
     where
         S: BlobStore<BlobHandle = T>,
     {
@@ -558,51 +476,40 @@ where
         buf[32..64].copy_from_slice(y.as_bytes());
         buf[64..].copy_from_slice(&len.to_le_bytes());
         let offt = store.append(&mut self.pairs, &buf)?;
-        Ok(FileRef::new_pair(domain, offt))
+        Ok(FileRef::new_pair(offt))
     }
 
-    fn load<S, A>(&mut self, store: &mut MapStore<S, A>, domain: Domain) -> io::Result<()>
+    fn load<S, A>(&mut self, store: &mut MapStore<S, A>) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
-        self.load_chunks_full(store, domain)?;
-        self.load_chunks_partial(store, domain)?;
-        self.load_pairs(store, domain)?;
+        self.load_chunks_full(store)?;
+        self.load_chunks_partial(store)?;
+        self.load_pairs(store)?;
         Ok(())
     }
 
-    fn load_chunks_full<S, A>(
-        &mut self,
-        store: &mut MapStore<S, A>,
-        domain: Domain,
-    ) -> io::Result<()>
+    fn load_chunks_full<S, A>(&mut self, store: &mut MapStore<S, A>) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
         let MapStore { store, accel } = store;
         let mut buf = vec![0; CHUNK_SIZE as usize];
-        let mut offt = match domain {
-            Domain::Data => accel.top_cookie().data_offset_full,
-            Domain::Refs => accel.top_cookie().refs_offset_full,
-        };
+        let mut offt = accel.top_cookie().data_offset_full;
         while self
             .chunks_full
             .read_at_exact_or_none(store, offt, &mut buf)?
         {
-            let key = toa_hash::hash_chunk(domain, &buf);
-            accel.add(&key, IndexEntry(FileRef::new_chunk_full(domain, offt).0))?;
+            let key = toa_hash::hash_chunk(&buf);
+            accel.add(&key, IndexEntry(FileRef::new_chunk_full(offt).0))?;
             offt += buf.len() as u64;
         }
         Ok(())
     }
 
-    fn load_chunks_partial<S, A>(
-        &mut self,
-        store: &mut MapStore<S, A>,
-        domain: Domain,
-    ) -> io::Result<()>
+    fn load_chunks_partial<S, A>(&mut self, store: &mut MapStore<S, A>) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
@@ -610,10 +517,7 @@ where
         let MapStore { store, accel } = store;
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
-        let mut offt = match domain {
-            Domain::Data => accel.top_cookie().data_offset_partial,
-            Domain::Refs => accel.top_cookie().refs_offset_partial,
-        };
+        let mut offt = accel.top_cookie().data_offset_partial;
         while self
             .chunks_partial
             .read_at_exact_or_none(store, offt, len)?
@@ -621,28 +525,25 @@ where
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
             self.chunks_partial.read_at_exact(store, offt + 2, buf)?;
-            let key = toa_hash::hash_chunk(domain, buf);
-            accel.add(&key, IndexEntry(FileRef::new_chunk_partial(domain, offt).0))?;
+            let key = toa_hash::hash_chunk(buf);
+            accel.add(&key, IndexEntry(FileRef::new_chunk_partial(offt).0))?;
             offt += align8(2 + u64::from(len));
         }
         Ok(())
     }
 
-    fn load_pairs<S, A>(&mut self, store: &mut MapStore<S, A>, domain: Domain) -> io::Result<()>
+    fn load_pairs<S, A>(&mut self, store: &mut MapStore<S, A>) -> io::Result<()>
     where
         S: BlobStore<BlobHandle = T>,
         A: accel::Index,
     {
         let MapStore { store, accel } = store;
         let mut buf = [0; 80];
-        let mut offt = match domain {
-            Domain::Data => accel.top_cookie().data_offset_pairs,
-            Domain::Refs => accel.top_cookie().refs_offset_pairs,
-        };
+        let mut offt = accel.top_cookie().data_offset_pairs;
         while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
-            accel.add(&key, IndexEntry(FileRef::new_pair(domain, offt).0))?;
+            accel.add(&key, IndexEntry(FileRef::new_pair(offt).0))?;
             offt += buf.len() as u64;
         }
         Ok(())
@@ -653,32 +554,32 @@ impl FileRef {
     const TY_CHUNK_FULL: u64 = 2;
     const TY_CHUNK_PARTIAL: u64 = 4;
     const TY_PAIR: u64 = 6;
+    const TY_REFS: u64 = 7;
 
-    fn new(offset: u64, ty: u64, domain: Domain) -> Self {
+    fn new(offset: u64, ty: u64) -> Self {
         assert!(ty < 8);
         assert!(offset % 8 == 0);
-        Self(offset | ty | u64::from(domain == Domain::Refs))
+        Self(offset | ty)
     }
 
-    fn new_pair(domain: Domain, offset: u64) -> Self {
-        Self::new(offset, Self::TY_PAIR, domain)
+    fn new_pair(offset: u64) -> Self {
+        Self::new(offset, Self::TY_PAIR)
     }
 
-    fn new_chunk_full(domain: Domain, offset: u64) -> Self {
-        Self::new(offset, Self::TY_CHUNK_FULL, domain)
+    fn new_chunk_full(offset: u64) -> Self {
+        Self::new(offset, Self::TY_CHUNK_FULL)
     }
 
-    fn new_chunk_partial(domain: Domain, offset: u64) -> Self {
-        Self::new(offset, Self::TY_CHUNK_PARTIAL, domain)
+    fn new_chunk_partial(offset: u64) -> Self {
+        Self::new(offset, Self::TY_CHUNK_PARTIAL)
     }
 
-    fn ty(&self) -> (u64, Domain) {
-        let domain = if self.0 & 1 == 0 {
-            Domain::Data
-        } else {
-            Domain::Refs
-        };
-        (self.0 & 6, domain)
+    fn new_refs(offset: u64) -> Self {
+        Self::new(offset, Self::TY_REFS)
+    }
+
+    fn ty(&self) -> u64 {
+        self.0 & 7
     }
 
     fn offset(&self) -> u64 {
@@ -695,13 +596,13 @@ where
         Some(x)
     }
 
-    pub fn into_refs(self) -> Option<Refs<'a, T, A>> {
+    pub fn into_refs(self) -> Option<[Hash; 2]> {
         let Self::Refs(x) = self else { return None };
         Some(x)
     }
 }
 
-impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
+impl<'a, T, A> Data<'a, T, A>
 where
     T: BlobStore,
     A: accel::Index,
@@ -710,10 +611,7 @@ where
         let Some(location) = toa.store.get(&key)? else {
             return Ok(None);
         };
-        let blobs = match location.ty().1 {
-            Domain::Data => &toa.data,
-            Domain::Refs => &toa.refs,
-        };
+        let blobs = &toa.data;
         Ok(Some(Self {
             store: &toa.store,
             blobs,
@@ -729,113 +627,6 @@ where
     }
 }
 
-impl<'a, T, A> Data<'a, T, A>
-where
-    T: BlobStore,
-    T::BlobHandle: Copy, // TODO
-    A: accel::Index,
-{
-    /// # Note
-    ///
-    /// Offset is in *bytes*.
-    pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
-        self.0.read(offset, buf)
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *bytes*.
-    pub fn read_exact(
-        &self,
-        offset: u128,
-        buf: &mut [u8],
-    ) -> Result<(), ReadExactError<io::Error>> {
-        self.0.read_exact(offset, buf)
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *bytes*.
-    pub fn read_array<const N: usize>(
-        &self,
-        offset: u128,
-    ) -> Result<[u8; N], ReadExactError<io::Error>> {
-        self.0.read_array(offset)
-    }
-
-    pub fn len(&self) -> io::Result<u128> {
-        self.0.len_bits().map(|x| x >> 3)
-    }
-
-    pub fn read_node<'x>(
-        &self,
-        buf: &'x mut [u8; CHUNK_SIZE as usize],
-    ) -> Result<DataNode<'x>, ReadError<io::Error>> {
-        match self.0.read_node(buf)? {
-            TypedNode::Chunk { len } => Ok(DataNode::Chunk { len }),
-            TypedNode::Pair { pair } => Ok(DataNode::Pair { pair }),
-        }
-    }
-}
-
-impl<'a, T, A> Refs<'a, T, A>
-where
-    T: BlobStore,
-    T::BlobHandle: Copy, // TODO
-    A: accel::Index,
-{
-    /// # Note
-    ///
-    /// Offset is in *hashes*.
-    pub fn read(&self, offset: u128, buf: &mut [Hash]) -> Result<usize, ReadError<io::Error>> {
-        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
-        self.0
-            .read(offset, bytemuck::cast_slice_mut(buf))
-            .map(|x| x / mem::size_of::<Hash>())
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *hashes*.
-    pub fn read_exact(
-        &self,
-        offset: u128,
-        buf: &mut [Hash],
-    ) -> Result<(), ReadExactError<io::Error>> {
-        let offset = offset.saturating_mul(mem::size_of::<Hash>() as u128);
-        self.0.read_exact(offset, bytemuck::cast_slice_mut(buf))
-    }
-
-    /// # Note
-    ///
-    /// Offset is in *hashes*.
-    pub fn read_array<const N: usize>(
-        &self,
-        offset: u128,
-    ) -> Result<[Hash; N], ReadExactError<io::Error>> {
-        // bytemuck is being annoying, so reimplement using read_exact
-        let mut buf = [Hash::default(); N];
-        self.read_exact(offset, &mut buf)?;
-        Ok(buf)
-    }
-
-    pub fn len(&self) -> io::Result<u128> {
-        self.0.len_bits().map(|x| x >> 8)
-    }
-
-    pub fn read_node<'x>(
-        &self,
-        buf: &'x mut [u8; CHUNK_SIZE as usize],
-    ) -> Result<RefsNode<'x>, ReadError<io::Error>> {
-        match self.0.read_node(buf)? {
-            TypedNode::Chunk { len } => Ok(RefsNode::Chunk {
-                len: len / mem::size_of::<Hash>(),
-            }),
-            TypedNode::Pair { pair } => Ok(RefsNode::Pair { pair }),
-        }
-    }
-}
-
 impl Pair {
     pub fn len_bits(&self) -> u128 {
         u128::from_le_bytes(self.len.0)
@@ -846,14 +637,17 @@ impl Pair {
     }
 }
 
-impl<'a, T, A> Typed<'a, T, AbstractBlob<T::BlobHandle>, A>
+impl<'a, T, A> Data<'a, T, A>
 where
     T: BlobStore,
     T::BlobHandle: Copy, // TODO
     A: accel::Index,
 {
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
     pub fn read(&self, offset: u128, buf: &mut [u8]) -> Result<usize, ReadError<io::Error>> {
-        match self.location.ty().0 {
+        match self.location.ty() {
             FileRef::TY_CHUNK_FULL => self.read_chunk_full(offset, buf),
             FileRef::TY_CHUNK_PARTIAL => self.read_chunk_partial(offset, buf),
             FileRef::TY_PAIR => self.read_pair(offset, buf),
@@ -861,6 +655,9 @@ where
         }
     }
 
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
     pub fn read_exact(
         &self,
         offset: u128,
@@ -873,6 +670,9 @@ where
         Ok(())
     }
 
+    /// # Note
+    ///
+    /// Offset is in *bytes*.
     pub fn read_array<const N: usize>(
         &self,
         offset: u128,
@@ -885,28 +685,32 @@ where
     pub fn read_node<'x>(
         &self,
         buf: &'x mut [u8; CHUNK_SIZE as usize],
-    ) -> Result<TypedNode<'x>, ReadError<io::Error>> {
-        match self.location.ty().0 {
+    ) -> Result<DataNode<'x>, ReadError<io::Error>> {
+        match self.location.ty() {
             FileRef::TY_CHUNK_FULL => {
                 let len = self.read_chunk_full(0, buf)?;
-                Ok(TypedNode::Chunk { len })
+                Ok(DataNode::Chunk { len })
             }
             FileRef::TY_CHUNK_PARTIAL => {
                 let len = self.read_chunk_partial(0, buf)?;
-                Ok(TypedNode::Chunk { len })
+                Ok(DataNode::Chunk { len })
             }
             FileRef::TY_PAIR => {
                 let pair = bytemuck::from_bytes_mut(&mut buf[..80]);
                 self.read_pair_only(pair)?;
-                Ok(TypedNode::Pair { pair })
+                Ok(DataNode::Pair { pair })
             }
             _ => unreachable!("invalid FileRef type"),
         }
     }
 
+    pub fn len(&self) -> io::Result<u128> {
+        self.len_bits().map(|x| x >> 3)
+    }
+
     pub fn len_bits(&self) -> io::Result<u128> {
         let store = &self.store.store;
-        match self.location.ty().0 {
+        match self.location.ty() {
             FileRef::TY_CHUNK_FULL => Ok(CHUNK_SIZE << 3),
             FileRef::TY_CHUNK_PARTIAL => self
                 .blobs
@@ -1004,7 +808,7 @@ where
     fn dump_tree(&self, depth: usize) {
         print!("{:>depth$}    ", "");
         let store = &self.store.store;
-        match self.location.ty().0 {
+        match self.location.ty() {
             FileRef::TY_CHUNK_FULL => println!("F"),
             FileRef::TY_CHUNK_PARTIAL => {
                 let nb = self
@@ -1041,18 +845,6 @@ impl<T> From<ReadError<T>> for ReadExactError<T> {
 
 impl<T: BlobStore, A> Clone for Data<'_, T, A> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T: BlobStore, A> Clone for Refs<'_, T, A> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
-    fn clone(&self) -> Self {
         Self {
             store: self.store,
             blobs: self.blobs,
@@ -1062,8 +854,6 @@ impl<T: BlobStore, A> Clone for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {
 }
 
 impl<T: BlobStore, A> Copy for Data<'_, T, A> {}
-impl<T: BlobStore, A> Copy for Refs<'_, T, A> {}
-impl<T: BlobStore, A> Copy for Typed<'_, T, AbstractBlob<T::BlobHandle>, A> {}
 
 macro_rules! abstract_blob_imp {
     ($(fn $fn:ident<S>(&self, store: &S $(, $param:ident: $ty:ty)*) -> $ret:ty;)*) => {
@@ -1073,7 +863,6 @@ macro_rules! abstract_blob_imp {
                 S: BlobStore<BlobHandle = T>,
             {
                 match self {
-                    Self::Plain(x) => store.$fn(x, $($param,)*),
                     Self::Compressed { set, cache } => {
                         let c = cache.take();
                         let blob = BlobRef::blob_with_cache(store, *set, c);
@@ -1112,14 +901,14 @@ where
 
 impl fmt::Debug for FileRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (ty, domain) = self.ty();
+        let ty = self.ty();
         let ty = match ty {
             Self::TY_CHUNK_FULL => "full",
             Self::TY_CHUNK_PARTIAL => "part",
             Self::TY_PAIR => "pair",
             _ => "??",
         };
-        write!(f, "{ty}:{domain:?}:{}", self.offset())
+        write!(f, "{ty}:{}", self.offset())
     }
 }
 
@@ -1249,7 +1038,7 @@ mod test {
     {
         pub(crate) fn add(&mut self, data: &[u8]) -> Hash {
             let key = self.toa.add_data(data).expect("add_data failed");
-            assert_eq!(key, toa_hash::hash(Domain::Data, data));
+            assert_eq!(key, toa_hash::hash(data));
             key
         }
 
@@ -1263,14 +1052,14 @@ mod test {
                 Object::Data(o) => o,
                 Object::Refs(_) => panic!("expected data, got refs"),
             };
-            o.0.dump_tree(0);
+            o.dump_tree(0);
             assert_eq!(
-                o.0.len_bits().unwrap(),
+                o.len_bits().unwrap(),
                 (value.len() as u128) << 3,
                 "lengths do not match"
             );
             let x = &mut *vec![0; value.len()];
-            let n = o.0.read(0, x).expect("read failed");
+            let n = o.read(0, x).expect("read failed");
             assert_eq!(n, value.len(), "read unexpectedly truncated");
             let f = String::from_utf8_lossy;
             assert!(x == value, "{:?} <> {:?}", f(&x), f(value));
@@ -1402,18 +1191,6 @@ mod test {
             let mut s = init();
             let k = s.add(&bytes);
             s.assert_eq(&k, &bytes);
-        }
-
-        #[test]
-        fn refs_read_len() {
-            let Test { mut toa } = init();
-            let y = toa.add_refs(&[Hash::default()]).unwrap();
-            let Object::Refs(y) = toa.get(&y).unwrap().unwrap() else {
-                unreachable!()
-            };
-            let mut buf = [Hash::default()];
-            let n = y.read(0, &mut buf).unwrap();
-            assert_eq!(n, buf.len());
         }
     }
 }

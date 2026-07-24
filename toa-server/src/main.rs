@@ -134,10 +134,12 @@ impl Request<'_> {
                 toa::DataNode::Chunk { len } => serialize_chunk(ty, false, len),
                 toa::DataNode::Pair { pair } => serialize_parent(pair.len_bits(), ty, out, false),
             },
-            toa::Object::Refs(x) => match x.read_node(out).unwrap() {
-                toa::RefsNode::Chunk { len } => serialize_chunk(ty, true, 32 * len),
-                toa::RefsNode::Pair { pair } => serialize_parent(pair.len_bits(), ty, out, true),
-            },
+            toa::Object::Refs([head, tail]) => {
+                *ty = ty::IS_VALID | ty::IS_REFS;
+                out[00..32].copy_from_slice(head.as_bytes());
+                out[32..64].copy_from_slice(tail.as_bytes());
+                64
+            }
         };
         self.send(n)
     }
@@ -155,12 +157,8 @@ impl Request<'_> {
                 let n = x.read(offset << 13, out).unwrap();
                 self.send(n)
             }
-            toa::Object::Refs(x) => {
-                *ty = ty::IS_VALID | ty::IS_REFS;
-                let out = out.as_chunks_mut::<32>().0;
-                let out = Hash::slice_from_bytes_mut(out);
-                let n = x.read(offset << 8, out).unwrap();
-                self.send(32 * n)
+            toa::Object::Refs(_) => {
+                self.send_error("refs_pair")
             }
         }
     }
@@ -181,7 +179,7 @@ impl Request<'_> {
             };
             match obj {
                 toa::Object::Data(_) => return self.send_error(""),
-                toa::Object::Refs(y) => [key] = y.read_array(x).unwrap(),
+                toa::Object::Refs(y) => key = y[x as usize],
             }
         }
 
