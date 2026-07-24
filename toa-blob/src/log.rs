@@ -251,13 +251,13 @@ where
         }
 
         if hdr.block_size != u32::from(dev.block_size()) {
-            todo!("block size mismatch");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "block size mismatch"))?;
         }
         if hdr.zone_blocks != dev.zone_blocks() {
-            todo!("zone blocks mismatch");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "zone blocks mismatch"))?;
         }
         if hdr.zone_count != dev.zone_count() {
-            todo!("zone count mismatch");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "zone count mismatch"))?;
         }
 
         *genn = hdr.generation.into();
