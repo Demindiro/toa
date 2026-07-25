@@ -10,7 +10,7 @@ use std::os::unix::fs::FileExt;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
-    fmt, io,
+    error, fmt, io,
     num::NonZeroU32,
     ops,
     rc::Rc,
@@ -156,6 +156,9 @@ struct BlobTable {
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 #[repr(transparent)]
 pub struct ZoneId(pub u32);
+
+#[derive(Debug)]
+struct NoBlobWithId(BlobId);
 
 impl<U> BlobStore<U>
 where
@@ -659,9 +662,10 @@ impl BlobStoreData {
         id: BlobId,
         new_name: &[u8],
     ) -> io::Result<(bool, Option<Blob>)> {
-        let blob = self.blobs.get_mut(id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("no blob with id {id}"))
-        })?;
+        let blob = self
+            .blobs
+            .try_get_mut(id)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if &*blob.name == new_name {
             return Ok((false, None));
         }
@@ -941,6 +945,14 @@ impl BlobTable {
         self.table.get_mut(id.0 as usize).and_then(|x| x.as_mut())
     }
 
+    fn try_get(&self, id: BlobId) -> Result<&Blob, NoBlobWithId> {
+        self.get(id).ok_or(NoBlobWithId(id))
+    }
+
+    fn try_get_mut(&mut self, id: BlobId) -> Result<&mut Blob, NoBlobWithId> {
+        self.get_mut(id).ok_or(NoBlobWithId(id))
+    }
+
     fn insert(&mut self, blob: Blob) -> BlobId {
         for (i, x) in self.table.iter_mut().enumerate() {
             if x.is_none() {
@@ -980,20 +992,20 @@ impl ops::Index<BlobId> for BlobTable {
 
     #[track_caller]
     fn index(&self, id: BlobId) -> &Self::Output {
-        let Some(x) = self.get(id) else {
-            panic!("no blob with ID {id}")
-        };
-        x
+        match self.try_get(id) {
+            Ok(x) => x,
+            Err(e) => panic!("{e}"),
+        }
     }
 }
 
 impl ops::IndexMut<BlobId> for BlobTable {
     #[track_caller]
     fn index_mut(&mut self, id: BlobId) -> &mut Self::Output {
-        let Some(x) = self.get_mut(id) else {
-            panic!("no blob with ID {id}")
-        };
-        x
+        match self.try_get_mut(id) {
+            Ok(x) => x,
+            Err(e) => panic!("{e}"),
+        }
     }
 }
 
@@ -1407,6 +1419,14 @@ where
             data: &self.data,
             index: 0,
         })
+    }
+}
+
+impl error::Error for NoBlobWithId {}
+
+impl fmt::Display for NoBlobWithId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no blob with ID {}", self.0)
     }
 }
 
