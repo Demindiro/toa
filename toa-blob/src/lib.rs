@@ -212,7 +212,7 @@ where
                 log::LogEntry::RenameBlob { id, name } => {
                     store.replay_rename_blob(id, name)?;
                 }
-                log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data),
+                log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data)?,
                 log::LogEntry::AddZoneToBlob { id, zone } => {
                     store.replay_add_zone_to_blob(id, zone)
                 }
@@ -687,9 +687,11 @@ impl BlobStoreData {
         Ok((true, old))
     }
 
-    fn replay_append_blob(&mut self, id: BlobId, data: &[u8]) {
-        self.blobs[id].tail.extend(data);
-        self.blobs[id].flushed += data.len();
+    fn replay_append_blob(&mut self, id: BlobId, data: &[u8]) -> Result<(), NoBlobWithId> {
+        let blob = self.blobs.try_get_mut(id)?;
+        blob.tail.extend(data);
+        blob.flushed += data.len();
+        Ok(())
     }
 
     fn replay_add_zone_to_blob(&mut self, id: BlobId, zone: ZoneId) {
