@@ -1290,7 +1290,7 @@ impl ZoneDev for FileBlocks {
     fn zone_blocks(&self) -> u32 {
         self.zone_blocks
     }
-    fn zone_count(&self) -> NonZeruU32 {
+    fn zone_count(&self) -> NonZeroU32 {
         self.zone_count.try_into().unwrap()
     }
 

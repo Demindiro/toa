@@ -44,7 +44,8 @@ where
             s.truncate(i);
             s += "...";
         }
-        println!("{s}")
+        println!("{s}");
+        Ok(())
     })?;
     println!("{end}");
 
