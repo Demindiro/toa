@@ -214,7 +214,7 @@ where
                 }
                 log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data)?,
                 log::LogEntry::AddZoneToBlob { id, zone } => {
-                    store.replay_add_zone_to_blob(id, zone)
+                    store.replay_add_zone_to_blob(id, zone)?
                 }
                 log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len)?,
                 log::LogEntry::NextLogZone { zones } => {
@@ -700,13 +700,15 @@ impl BlobStoreData {
         Ok(())
     }
 
-    fn replay_add_zone_to_blob(&mut self, id: BlobId, zone: ZoneId) {
-        self.blobs[id]
+    fn replay_add_zone_to_blob(&mut self, id: BlobId, zone: ZoneId) -> Result<(), NoBlobWithId> {
+        self.blobs
+            .try_get_mut(id)?
             .zones
             .as_mut()
             .expect("todo: error: unzoned")
             .push(zone);
         self.mark_zone_allocated(zone);
+        Ok(())
     }
 
     fn replay_commit_blob(&mut self, id: BlobId, len: u64) -> Result<(), NoBlobWithId> {
@@ -919,7 +921,7 @@ where
                 None => {
                     [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                     self.store.log_add_zone_to_blob(s, self.id, zone)?;
-                    s.replay_add_zone_to_blob(self.id, zone);
+                    s.replay_add_zone_to_blob(self.id, zone)?;
                 }
                 Some(z) => zone = *z,
             };
@@ -927,7 +929,7 @@ where
             if n == s.blobs[self.id].len {
                 [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                 self.store.log_add_zone_to_blob(s, self.id, zone)?;
-                s.replay_add_zone_to_blob(self.id, zone);
+                s.replay_add_zone_to_blob(self.id, zone)?;
             }
             let n = zone_size - offset;
             let n = n.min(blocks.len() as u64) as usize;
