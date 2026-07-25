@@ -359,7 +359,12 @@ where
                 entry::ty::ADD_ZONE_TO_BLOB => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let [x, y, z, w, _, _, _, _] = buf_a[k];
+                    let [x, y, z, w, _, _, _, _] = *buf_a.get(k).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log entry: append zone to blob: missing data",
+                        )
+                    })?;
                     let zone = ZoneId(u32::from_le_bytes([x, y, z, w]));
                     k += 1;
                     (cb)(LogEntry::AddZoneToBlob { id, zone })?;
