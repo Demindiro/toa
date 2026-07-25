@@ -223,7 +223,7 @@ impl fmt::Display for LogEnd {
 pub fn iter_with<'a, T, F>(dev: &T, mut cb: F) -> io::Result<LogEnd>
 where
     T: ZoneDev,
-    F: FnMut(LogEntry),
+    F: FnMut(LogEntry) -> io::Result<()>,
 {
     let block_size = usize::from(dev.block_size());
     let zone_blocks = u64::from(dev.zone_blocks());
@@ -306,17 +306,17 @@ where
                     let name = &buf_a[k..].as_flattened()[..name_len];
                     k += (name_len + 7) >> 3;
                     let unzoned = ty == entry::ty::CREATE_UNZONED_BLOB;
-                    (cb)(LogEntry::CreateBlob { id, name, unzoned });
+                    (cb)(LogEntry::CreateBlob { id, name, unzoned })?;
                 }
                 entry::ty::CLEAR_BLOB => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    (cb)(LogEntry::ClearBlob { id });
+                    (cb)(LogEntry::ClearBlob { id })?;
                 }
                 entry::ty::DELETE_BLOB => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    (cb)(LogEntry::DeleteBlob { id });
+                    (cb)(LogEntry::DeleteBlob { id })?;
                 }
                 entry::ty::RENAME_BLOB => {
                     k += 1;
@@ -324,7 +324,7 @@ where
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
                     let name = &buf_a[k..].as_flattened()[..usize::from(name_len)];
                     k += (name_len + 7) >> 3;
-                    (cb)(LogEntry::RenameBlob { id, name });
+                    (cb)(LogEntry::RenameBlob { id, name })?;
                 }
                 entry::ty::APPEND_BLOB_TAIL => {
                     k += 1;
@@ -332,7 +332,7 @@ where
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
                     let data = &buf_a[k..].as_flattened()[..usize::from(len)];
                     k += (len + 7) >> 3;
-                    (cb)(LogEntry::AppendBlobTail { id, data });
+                    (cb)(LogEntry::AppendBlobTail { id, data })?;
                 }
                 entry::ty::ADD_ZONE_TO_BLOB => {
                     k += 1;
@@ -340,14 +340,14 @@ where
                     let [x, y, z, w, _, _, _, _] = buf_a[k];
                     let zone = ZoneId(u32::from_le_bytes([x, y, z, w]));
                     k += 1;
-                    (cb)(LogEntry::AddZoneToBlob { id, zone });
+                    (cb)(LogEntry::AddZoneToBlob { id, zone })?;
                 }
                 entry::ty::COMMIT_BLOB_TAIL => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
                     let len = u64::from_le_bytes(buf_a[k]);
                     k += 1;
-                    (cb)(LogEntry::CommitBlobTail { id, len });
+                    (cb)(LogEntry::CommitBlobTail { id, len })?;
                 }
                 entry::ty::NEXT_LOG_ZONE => {
                     let [_, _, _, _, x, y, z, w] = buf_b[k];
@@ -356,16 +356,16 @@ where
                     log_zone_head = 0;
                     log_end = dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
                     let zones = [log_zone_a, log_zone_b].map(ZoneId);
-                    (cb)(LogEntry::NextLogZone { zones });
+                    (cb)(LogEntry::NextLogZone { zones })?;
                     break;
                 }
                 entry::ty::TRANSACTION_BEGIN => {
                     k += 1;
-                    (cb)(LogEntry::TransactionBegin);
+                    (cb)(LogEntry::TransactionBegin)?;
                 }
                 entry::ty::TRANSACTION_END => {
                     k += 1;
-                    (cb)(LogEntry::TransactionEnd);
+                    (cb)(LogEntry::TransactionEnd)?;
                 }
                 entry::ty::HEADER => k += 2,
                 ty => {

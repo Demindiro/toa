@@ -10,6 +10,7 @@ mkdir -p work/target
 
 exec env -i HOME=/root TERM="$TERM" PATH=/bin:/usr/bin:/root/.cargo/bin \
 	RUSTFLAGS="$waddle_rustflags" \
+	RUST_BACKTRACE=1 \
 	./work/bin/waddle \
 	--base work/alpine \
 	--net \

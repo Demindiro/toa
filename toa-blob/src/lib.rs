@@ -1,3 +1,5 @@
+#![forbid(unused_must_use)]
+
 pub mod log;
 
 pub use toa_blob_store::DuplicateBlob;
@@ -195,31 +197,36 @@ where
 
         let mut in_transaction = false;
 
-        let log_end = log::iter_with(&zone_dev, |entry| match entry {
-            log::LogEntry::CreateBlob { id, name, unzoned } => {
-                store.replay_create_blob(id, name, unzoned).unwrap()
+        let log_end = log::iter_with(&zone_dev, |entry| {
+            match entry {
+                log::LogEntry::CreateBlob { id, name, unzoned } => {
+                    store.replay_create_blob(id, name, unzoned).unwrap()
+                }
+                log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
+                log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id),
+                log::LogEntry::RenameBlob { id, name } => {
+                    store.replay_rename_blob(id, name)?;
+                }
+                log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data),
+                log::LogEntry::AddZoneToBlob { id, zone } => {
+                    store.replay_add_zone_to_blob(id, zone)
+                }
+                log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len),
+                log::LogEntry::NextLogZone { zones } => {
+                    [store.log_zone_a, store.log_zone_b] = zones;
+                    store.mark_zone_allocated(store.log_zone_a);
+                    store.mark_zone_allocated(store.log_zone_b);
+                }
+                log::LogEntry::TransactionBegin => {
+                    assert!(!in_transaction);
+                    in_transaction = true;
+                }
+                log::LogEntry::TransactionEnd => {
+                    assert!(in_transaction);
+                    in_transaction = false;
+                }
             }
-            log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
-            log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id),
-            log::LogEntry::RenameBlob { id, name } => {
-                store.replay_rename_blob(id, name);
-            }
-            log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data),
-            log::LogEntry::AddZoneToBlob { id, zone } => store.replay_add_zone_to_blob(id, zone),
-            log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len),
-            log::LogEntry::NextLogZone { zones } => {
-                [store.log_zone_a, store.log_zone_b] = zones;
-                store.mark_zone_allocated(store.log_zone_a);
-                store.mark_zone_allocated(store.log_zone_b);
-            }
-            log::LogEntry::TransactionBegin => {
-                assert!(!in_transaction);
-                in_transaction = true;
-            }
-            log::LogEntry::TransactionEnd => {
-                assert!(in_transaction);
-                in_transaction = false;
-            }
+            Ok(())
         })?;
 
         assert!(!in_transaction, "unterminated transaction");
@@ -645,10 +652,16 @@ impl BlobStoreData {
     /// # Returns
     ///
     /// `true` if the blob actually got renamed, `false` if the operation is a no-op.
-    fn replay_rename_blob(&mut self, id: BlobId, new_name: &[u8]) -> (bool, Option<Blob>) {
-        let blob = &mut self.blobs[id];
+    fn replay_rename_blob(
+        &mut self,
+        id: BlobId,
+        new_name: &[u8],
+    ) -> io::Result<(bool, Option<Blob>)> {
+        let blob = self.blobs.get_mut(id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("no blob with id {id}"))
+        })?;
         if &*blob.name == new_name {
-            return (false, None);
+            return Ok((false, None));
         }
         self.blob_map.remove(&*blob.name);
         let mut old = match self.blob_map.entry(new_name.into()) {
@@ -668,7 +681,7 @@ impl BlobStoreData {
         if let Some(old) = old.as_mut().and_then(|x| x.zones.as_mut()) {
             self.free_zones(old);
         }
-        (true, old)
+        Ok((true, old))
     }
 
     fn replay_append_blob(&mut self, id: BlobId, data: &[u8]) {
@@ -803,7 +816,7 @@ where
 
     pub fn rename(&self, new_name: &[u8]) -> io::Result<()> {
         let s = &mut *self.store.data.borrow_mut();
-        let (renamed, old) = s.replay_rename_blob(self.id, new_name);
+        let (renamed, old) = s.replay_rename_blob(self.id, new_name)?;
         if renamed {
             if let Some(old) = old.and_then(|x| x.zones) {
                 self.store.zone_dev.reset_many(bytemuck::cast_slice(&old))?;
@@ -963,16 +976,22 @@ impl BlobTable {
 impl ops::Index<BlobId> for BlobTable {
     type Output = Blob;
 
+    #[track_caller]
     fn index(&self, id: BlobId) -> &Self::Output {
-        self.get(id)
-            .unwrap_or_else(|| panic!("no blob with ID {id}"))
+        let Some(x) = self.get(id) else {
+            panic!("no blob with ID {id}")
+        };
+        x
     }
 }
 
 impl ops::IndexMut<BlobId> for BlobTable {
+    #[track_caller]
     fn index_mut(&mut self, id: BlobId) -> &mut Self::Output {
-        self.get_mut(id)
-            .unwrap_or_else(|| panic!("no blob with ID {id}"))
+        let Some(x) = self.get_mut(id) else {
+            panic!("no blob with ID {id}")
+        };
+        x
     }
 }
 
