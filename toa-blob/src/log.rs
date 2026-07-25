@@ -331,7 +331,12 @@ where
                     k += 1;
                     let name_len = usize::from(b);
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let name = &buf_a[k..].as_flattened()[..usize::from(name_len)];
+                    let name = buf_a[k..].as_flattened().get(..name_len).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log entry: rename blob: missing name data",
+                        )
+                    })?;
                     k += (name_len + 7) >> 3;
                     (cb)(LogEntry::RenameBlob { id, name })?;
                 }
