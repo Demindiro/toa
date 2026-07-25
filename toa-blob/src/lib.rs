@@ -1,5 +1,13 @@
 #![forbid(unused_must_use)]
 
+macro_rules! trace {
+    ($($x:tt)*) => {};
+    ($($x:tt)*) => {{
+        eprint!("[TRACE] ");
+        eprintln!($($x)*)
+    }};
+}
+
 pub mod log;
 
 pub use toa_blob_store::DuplicateBlob;

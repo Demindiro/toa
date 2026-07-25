@@ -225,9 +225,12 @@ where
     T: ZoneDev,
     F: FnMut(LogEntry) -> io::Result<()>,
 {
+    trace!("parsing log...");
     let block_size = usize::from(dev.block_size());
     let zone_blocks = u64::from(dev.zone_blocks());
     let zone_size = zone_blocks * block_size as u64;
+
+    let mut visited_zones = bitvec::bitvec![0; dev.zone_count().get() as usize];
 
     let mut buf = vec![0; block_size * 2];
     let (block_a, block_b) = buf.split_at_mut(block_size);
@@ -292,6 +295,7 @@ where
         };
         while let Some(x) = buf_a.get(k) {
             let [ty, b, c, d, e, f, g, h] = *x;
+            trace!("log entry type={ty} zone={log_zone_a} offset={k}");
             end_of_log &= ty == entry::ty::LOG_BLOCK_END;
             // FIXME ensure log entries are equal *except* NEXT_LOG_ZONE
             // we should have a helper function which just returns an entry,
@@ -358,9 +362,23 @@ where
                     (cb)(LogEntry::CommitBlobTail { id, len })?;
                 }
                 entry::ty::NEXT_LOG_ZONE => {
+                    visited_zones.set(log_zone_a as usize, true);
+                    visited_zones.set(log_zone_b as usize, true);
                     let [_, _, _, _, x, y, z, w] = buf_b[k];
                     log_zone_a = u32::from_le_bytes([e, f, g, h]);
                     log_zone_b = u32::from_le_bytes([x, y, z, w]);
+                    if log_zone_a == log_zone_b {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "both logs point to same zone",
+                        ));
+                    }
+                    if visited_zones[log_zone_a as usize] || visited_zones[log_zone_b as usize] {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "zone already in use by log",
+                        ));
+                    }
                     log_zone_head = 0;
                     log_end = dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
                     let zones = [log_zone_a, log_zone_b].map(ZoneId);
@@ -402,6 +420,7 @@ where
         }
     }
 
+    trace!("finished parsing log");
     Ok(LogEnd {
         generation: gen_a,
         len: log_len,
