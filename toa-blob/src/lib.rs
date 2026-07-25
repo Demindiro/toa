@@ -208,7 +208,7 @@ where
                         .map_err(|x| io::Error::new(io::ErrorKind::InvalidData, x))?;
                 }
                 log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
-                log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id),
+                log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id)?,
                 log::LogEntry::RenameBlob { id, name } => {
                     store.replay_rename_blob(id, name)?;
                 }
@@ -646,12 +646,18 @@ impl BlobStoreData {
         self.blobs[id].len = 0;
     }
 
-    fn replay_delete_blob(&mut self, id: BlobId) {
-        let old = self.blobs.remove(id).expect("old blob missing");
+    fn replay_delete_blob(&mut self, id: BlobId) -> io::Result<()> {
+        let old = self.blobs.remove(id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("old blob with ID {id} missing"),
+            )
+        })?;
         if let Some(mut old) = old.zones {
             self.free_zones(&mut old);
         }
         self.blob_map.remove(&old.name);
+        Ok(())
     }
 
     /// # Returns
@@ -753,7 +759,7 @@ where
                 .zone_dev
                 .reset_many(bytemuck::cast_slice(zones))?;
         }
-        s.replay_delete_blob(self.id);
+        s.replay_delete_blob(self.id)?;
         self.store.log_delete_blob(s, self.id)?;
         Ok(())
     }
