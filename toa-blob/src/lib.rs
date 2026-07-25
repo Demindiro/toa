@@ -183,6 +183,7 @@ struct ZoneIdOutOfRange(ZoneId);
 enum AddZoneToBlobError {
     NoBlobWithId(BlobId),
     ZoneIdOutOfRange(ZoneId),
+    IsUnzonedBlob,
 }
 
 impl<U> BlobStore<U>
@@ -754,7 +755,7 @@ impl BlobStoreData {
             .try_get_mut(id)?
             .zones
             .as_mut()
-            .expect("todo: error: unzoned")
+            .ok_or(AddZoneToBlobError::IsUnzonedBlob)?
             .push(zone);
         self.mark_zone_allocated(zone)?;
         Ok(())
@@ -1493,6 +1494,7 @@ impl fmt::Display for AddZoneToBlobError {
         match self {
             Self::NoBlobWithId(x) => NoBlobWithId(*x).fmt(f),
             Self::ZoneIdOutOfRange(x) => ZoneIdOutOfRange(*x).fmt(f),
+            Self::IsUnzonedBlob => "blob is unzoned".fmt(f),
         }
     }
 }
