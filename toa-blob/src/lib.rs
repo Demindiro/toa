@@ -8,7 +8,9 @@ use std::os::unix::fs::FileExt;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
-    fmt, io, ops,
+    fmt, io,
+    num::NonZeroU32,
+    ops,
     rc::Rc,
 };
 
@@ -56,7 +58,7 @@ pub trait ZoneDev {
 
     fn block_size(&self) -> BlockShift;
     fn zone_blocks(&self) -> u32;
-    fn zone_count(&self) -> u32;
+    fn zone_count(&self) -> NonZeroU32;
 
     /// Wipe all zones. This may be a noop, but zones must be writeable
     /// from the start after this call.
@@ -125,6 +127,9 @@ pub struct BlobId(u32);
 #[derive(Debug)]
 pub struct OutOfZones;
 
+#[derive(Debug)]
+pub struct DataSmallerThanZone;
+
 /// # Note about zone data alignment
 ///
 /// Data is *not* aligned to block boundaries.
@@ -165,14 +170,14 @@ where
             generation: generation.into(),
             block_size: u32::from(zone_dev.block_size()).into(),
             zone_blocks: zone_dev.zone_blocks().into(),
-            zone_count: zone_dev.zone_count().into(),
+            zone_count: zone_dev.zone_count().get().into(),
             _pad_0: Default::default(),
         };
         let hdr = bytemuck::bytes_of(&hdr);
         let buf = &mut vec![0; usize::from(zone_dev.block_size())];
         buf[..hdr.len()].copy_from_slice(hdr);
         zone_dev.append(0, 0, buf)?;
-        zone_dev.append(nr_zones - 1, 0, buf)?;
+        zone_dev.append(nr_zones.get() - 1, 0, buf)?;
 
         let mut data = BlobStoreData::new(generation, nr_zones);
         data.log_zone_head = zone_dev.block_size().into();
@@ -541,17 +546,17 @@ where
 }
 
 impl BlobStoreData {
-    fn new(generation: u64, nr_zones: u32) -> Self {
+    fn new(generation: u64, nr_zones: NonZeroU32) -> Self {
         let mut s = Self {
             generation,
             blobs: Default::default(),
             blob_map: Default::default(),
             log: Vec::new(),
             log_zone_a: ZoneId(0),
-            log_zone_b: ZoneId(nr_zones - 1),
+            log_zone_b: ZoneId(nr_zones.get() - 1),
             log_zone_head: 0,
             log_len: 0,
-            allocated_zones: bitvec::bitbox![0; nr_zones as usize],
+            allocated_zones: bitvec::bitbox![0; nr_zones.get() as usize],
             transaction_counter: 0,
         };
         s.allocated_zones.set(s.log_zone_a.0 as usize, true);
@@ -1020,8 +1025,9 @@ impl<const B: usize> ZoneDev for MemZones<B> {
     fn zone_blocks(&self) -> u32 {
         self.zone_size
     }
-    fn zone_count(&self) -> u32 {
-        self.zones.borrow().len() as u32
+    fn zone_count(&self) -> NonZeroU32 {
+        let n = self.zones.borrow().len();
+        u32::try_from(n).unwrap().try_into().unwrap()
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1044,15 +1050,22 @@ impl<const B: usize> MemZones<B> {
 impl MemBlocks {
     pub fn new(block_size: BlockShift, zone_blocks: u32, zone_count: u32) -> Self {
         let n = zone_count as usize * zone_blocks as usize * usize::from(block_size);
-        Self::wrap(block_size, zone_blocks, vec![0; n].into())
+        Self::wrap(block_size, zone_blocks, vec![0; n].into()).expect("data large enough")
     }
 
-    pub fn wrap(block_size: BlockShift, zone_blocks: u32, data: Box<[u8]>) -> Self {
-        Self {
+    pub fn wrap(
+        block_size: BlockShift,
+        zone_blocks: u32,
+        data: Box<[u8]>,
+    ) -> Result<Self, DataSmallerThanZone> {
+        if (data.len() as u64) < u64::from(zone_blocks) * u64::from(block_size) {
+            return Err(DataSmallerThanZone);
+        }
+        Ok(Self {
             blocks: RefCell::new(data),
             block_size,
             zone_blocks,
-        }
+        })
     }
 
     fn zone_size(&self) -> u64 {
@@ -1106,8 +1119,9 @@ impl ZoneDev for MemBlocks {
     fn zone_blocks(&self) -> u32 {
         self.zone_blocks
     }
-    fn zone_count(&self) -> u32 {
-        (self.blocks.borrow().len() / self.zone_size() as usize) as u32
+    fn zone_count(&self) -> NonZeroU32 {
+        let n = self.blocks.borrow().len() / self.zone_size() as usize;
+        u32::try_from(n).unwrap().try_into().unwrap()
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1181,8 +1195,8 @@ impl ZoneDev for FileBlocks {
     fn zone_blocks(&self) -> u32 {
         self.zone_blocks
     }
-    fn zone_count(&self) -> u32 {
-        self.zone_count
+    fn zone_count(&self) -> NonZeruU32 {
+        self.zone_count.try_into().unwrap()
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1226,7 +1240,7 @@ macro_rules! proxy_zonedev {
                 (&**self).zone_blocks()
             }
             #[track_caller]
-            fn zone_count(&self) -> u32 {
+            fn zone_count(&self) -> NonZeroU32 {
                 (&**self).zone_count()
             }
 
