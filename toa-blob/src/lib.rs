@@ -200,7 +200,9 @@ where
         let log_end = log::iter_with(&zone_dev, |entry| {
             match entry {
                 log::LogEntry::CreateBlob { id, name, unzoned } => {
-                    store.replay_create_blob(id, name, unzoned).unwrap()
+                    store
+                        .replay_create_blob(id, name, unzoned)
+                        .map_err(|x| io::Error::new(io::ErrorKind::InvalidData, x))?;
                 }
                 log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
                 log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id),
