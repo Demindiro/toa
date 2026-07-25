@@ -16,6 +16,8 @@ use std::{
     rc::Rc,
 };
 
+const MAX_BLOB_ID: BlobId = BlobId(999_999);
+
 pub trait ZoneDev {
     /// # Note
     ///
@@ -159,6 +161,12 @@ pub struct ZoneId(pub u32);
 
 #[derive(Debug)]
 struct NoBlobWithId(BlobId);
+
+#[derive(Debug)]
+enum BlobInsertError {
+    DuplicateBlob(BlobId),
+    BlobIdOutOfRange(BlobId),
+}
 
 impl<U> BlobStore<U>
 where
@@ -626,10 +634,10 @@ impl BlobStoreData {
         id: BlobId,
         name: &[u8],
         unzoned: bool,
-    ) -> Result<(), DuplicateBlob> {
+    ) -> Result<(), BlobInsertError> {
         assert!(name.len() <= 255, "name too long");
         match self.blob_map.entry(name.into()) {
-            Entry::Occupied(_) => Err(DuplicateBlob),
+            Entry::Occupied(_) => Err(BlobInsertError::DuplicateBlob(id)),
             Entry::Vacant(e) => {
                 self.blobs
                     .insert_at(id, Blob::new(e.key().clone(), unzoned))?;
@@ -976,12 +984,15 @@ impl BlobTable {
         BlobId((self.table.len() - 1) as u32)
     }
 
-    fn insert_at(&mut self, id: BlobId, blob: Blob) -> Result<(), DuplicateBlob> {
+    fn insert_at(&mut self, id: BlobId, blob: Blob) -> Result<(), BlobInsertError> {
+        if id > MAX_BLOB_ID {
+            return Err(BlobInsertError::BlobIdOutOfRange(id));
+        }
         let n = self.table.len().max(id.0 as usize + 1);
         self.table.resize_with(n, || None);
         let x = &mut self.table[id.0 as usize];
         if x.is_some() {
-            return Err(DuplicateBlob);
+            return Err(BlobInsertError::DuplicateBlob(id));
         }
         *x = Some(blob);
         Ok(())
@@ -1432,10 +1443,20 @@ where
 }
 
 impl error::Error for NoBlobWithId {}
+impl error::Error for BlobInsertError {}
 
 impl fmt::Display for NoBlobWithId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "no blob with ID {}", self.0)
+    }
+}
+
+impl fmt::Display for BlobInsertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateBlob(x) => write!(f, "duplicate blob ID {x}"),
+            Self::BlobIdOutOfRange(x) => write!(f, "blob ID {x} out of range"),
+        }
     }
 }
 
