@@ -216,7 +216,7 @@ where
                 log::LogEntry::AddZoneToBlob { id, zone } => {
                     store.replay_add_zone_to_blob(id, zone)
                 }
-                log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len),
+                log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len)?,
                 log::LogEntry::NextLogZone { zones } => {
                     [store.log_zone_a, store.log_zone_b] = zones;
                     store.mark_zone_allocated(store.log_zone_a);
@@ -709,10 +709,12 @@ impl BlobStoreData {
         self.mark_zone_allocated(zone);
     }
 
-    fn replay_commit_blob(&mut self, id: BlobId, len: u64) {
-        self.blobs[id].tail.clear();
-        self.blobs[id].len = len;
-        self.blobs[id].flushed = 0;
+    fn replay_commit_blob(&mut self, id: BlobId, len: u64) -> Result<(), NoBlobWithId> {
+        let blob = self.blobs.try_get_mut(id)?;
+        blob.tail.clear();
+        blob.len = len;
+        blob.flushed = 0;
+        Ok(())
     }
 
     fn log_free(&self, block_size: BlockShift) -> usize {
@@ -935,7 +937,7 @@ where
             s.blobs[self.id].len += n as u64;
         }
         // TODO delay commit until explicit flush
-        s.replay_commit_blob(self.id, end);
+        s.replay_commit_blob(self.id, end)?;
         self.store.log_commit_blob_tail(s, self.id, end)?;
         Ok(())
     }
