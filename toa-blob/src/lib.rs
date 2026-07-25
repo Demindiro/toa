@@ -662,10 +662,7 @@ impl BlobStoreData {
         id: BlobId,
         new_name: &[u8],
     ) -> io::Result<(bool, Option<Blob>)> {
-        let blob = self
-            .blobs
-            .try_get_mut(id)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let blob = self.blobs.try_get_mut(id)?;
         if &*blob.name == new_name {
             return Ok((false, None));
         }
@@ -1427,6 +1424,12 @@ impl error::Error for NoBlobWithId {}
 impl fmt::Display for NoBlobWithId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "no blob with ID {}", self.0)
+    }
+}
+
+impl From<NoBlobWithId> for io::Error {
+    fn from(x: NoBlobWithId) -> Self {
+        io::Error::new(io::ErrorKind::InvalidData, x)
     }
 }
 
