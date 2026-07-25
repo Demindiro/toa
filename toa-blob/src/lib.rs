@@ -261,7 +261,13 @@ where
             Ok(())
         })?;
 
-        assert!(!in_transaction, "unterminated transaction");
+        if in_transaction {
+            // TODO should we attempt rollback? or leave that to fsck?
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unterminated transaction",
+            ));
+        }
 
         log::LogEnd {
             generation: store.generation,
