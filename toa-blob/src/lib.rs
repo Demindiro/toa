@@ -240,11 +240,21 @@ where
                     store.mark_zone_allocated(store.log_zone_b)?;
                 }
                 log::LogEntry::TransactionBegin => {
-                    assert!(!in_transaction);
+                    if in_transaction {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transaction_begin while already inside transaction",
+                        ));
+                    }
                     in_transaction = true;
                 }
                 log::LogEntry::TransactionEnd => {
-                    assert!(in_transaction);
+                    if !in_transaction {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transaction_end outside of transaction",
+                        ));
+                    }
                     in_transaction = false;
                 }
             }
