@@ -307,7 +307,12 @@ where
                     k += 1;
                     let id = BlobId(hdr.blob_id.into());
                     let name_len = usize::from(b);
-                    let name = &buf_a[k..].as_flattened()[..name_len];
+                    let name = buf_a[k..].as_flattened().get(..name_len).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log entry: create blob: missing name data",
+                        )
+                    })?;
                     k += (name_len + 7) >> 3;
                     let unzoned = ty == entry::ty::CREATE_UNZONED_BLOB;
                     (cb)(LogEntry::CreateBlob { id, name, unzoned })?;
