@@ -168,6 +168,15 @@ enum BlobInsertError {
     BlobIdOutOfRange(BlobId),
 }
 
+#[derive(Debug)]
+struct ZoneIdOutOfRange(ZoneId);
+
+#[derive(Debug)]
+enum AddZoneToBlobError {
+    NoBlobWithId(BlobId),
+    ZoneIdOutOfRange(ZoneId),
+}
+
 impl<U> BlobStore<U>
 where
     U: ZoneDev,
@@ -227,8 +236,8 @@ where
                 log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len)?,
                 log::LogEntry::NextLogZone { zones } => {
                     [store.log_zone_a, store.log_zone_b] = zones;
-                    store.mark_zone_allocated(store.log_zone_a);
-                    store.mark_zone_allocated(store.log_zone_b);
+                    store.mark_zone_allocated(store.log_zone_a)?;
+                    store.mark_zone_allocated(store.log_zone_b)?;
                 }
                 log::LogEntry::TransactionBegin => {
                     assert!(!in_transaction);
@@ -625,8 +634,10 @@ impl BlobStoreData {
         }
     }
 
-    fn mark_zone_allocated(&mut self, id: ZoneId) {
-        self.allocated_zones.set(id.0 as usize, true);
+    fn mark_zone_allocated(&mut self, id: ZoneId) -> Result<(), ZoneIdOutOfRange> {
+        ((id.0 as usize) < self.allocated_zones.len())
+            .then(|| self.allocated_zones.set(id.0 as usize, true))
+            .ok_or(ZoneIdOutOfRange(id))
     }
 
     fn replay_create_blob(
@@ -710,14 +721,18 @@ impl BlobStoreData {
         Ok(())
     }
 
-    fn replay_add_zone_to_blob(&mut self, id: BlobId, zone: ZoneId) -> Result<(), NoBlobWithId> {
+    fn replay_add_zone_to_blob(
+        &mut self,
+        id: BlobId,
+        zone: ZoneId,
+    ) -> Result<(), AddZoneToBlobError> {
         self.blobs
             .try_get_mut(id)?
             .zones
             .as_mut()
             .expect("todo: error: unzoned")
             .push(zone);
-        self.mark_zone_allocated(zone);
+        self.mark_zone_allocated(zone)?;
         Ok(())
     }
 
@@ -1444,8 +1459,19 @@ where
     }
 }
 
+impl error::Error for AddZoneToBlobError {}
 impl error::Error for NoBlobWithId {}
 impl error::Error for BlobInsertError {}
+impl error::Error for ZoneIdOutOfRange {}
+
+impl fmt::Display for AddZoneToBlobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoBlobWithId(x) => NoBlobWithId(*x).fmt(f),
+            Self::ZoneIdOutOfRange(x) => ZoneIdOutOfRange(*x).fmt(f),
+        }
+    }
+}
 
 impl fmt::Display for NoBlobWithId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1462,10 +1488,39 @@ impl fmt::Display for BlobInsertError {
     }
 }
 
-impl From<NoBlobWithId> for io::Error {
-    fn from(x: NoBlobWithId) -> Self {
-        io::Error::new(io::ErrorKind::InvalidData, x)
+impl fmt::Display for ZoneIdOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "zone ID {} out of range", self.0)
     }
+}
+
+impl From<NoBlobWithId> for AddZoneToBlobError {
+    fn from(x: NoBlobWithId) -> Self {
+        Self::NoBlobWithId(x.0)
+    }
+}
+
+impl From<ZoneIdOutOfRange> for AddZoneToBlobError {
+    fn from(x: ZoneIdOutOfRange) -> Self {
+        Self::ZoneIdOutOfRange(x.0)
+    }
+}
+
+macro_rules! err_to_ioerr {
+    ($($ty:ident)*) => {$(
+        impl From<$ty> for io::Error {
+            fn from(x: $ty) -> Self {
+                io::Error::new(io::ErrorKind::InvalidData, x)
+            }
+        }
+    )*};
+}
+
+err_to_ioerr! {
+    AddZoneToBlobError
+    BlobInsertError
+    NoBlobWithId
+    ZoneIdOutOfRange
 }
 
 macro_rules! fmt_id {
