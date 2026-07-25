@@ -368,7 +368,12 @@ where
                     (cb)(LogEntry::TransactionEnd);
                 }
                 entry::ty::HEADER => k += 2,
-                ty => todo!("{ty}"),
+                ty => {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unrecognized log entry type {ty}"),
+                    ))?;
+                }
             }
         }
 
