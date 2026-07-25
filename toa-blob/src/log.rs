@@ -330,7 +330,15 @@ where
                     k += 1;
                     let len = usize::from(u16::from_le_bytes([c, d]));
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let data = &buf_a[k..].as_flattened()[..usize::from(len)];
+                    let data = &buf_a[k..]
+                        .as_flattened()
+                        .get(..usize::from(len))
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "log entry: append blob tail: missing data",
+                            )
+                        })?;
                     k += (len + 7) >> 3;
                     (cb)(LogEntry::AppendBlobTail { id, data })?;
                 }

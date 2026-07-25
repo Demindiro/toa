@@ -215,7 +215,7 @@ where
                         .replay_create_blob(id, name, unzoned)
                         .map_err(|x| io::Error::new(io::ErrorKind::InvalidData, x))?;
                 }
-                log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
+                log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id)?,
                 log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id)?,
                 log::LogEntry::RenameBlob { id, name } => {
                     store.replay_rename_blob(id, name)?;
@@ -647,11 +647,13 @@ impl BlobStoreData {
         }
     }
 
-    fn replay_clear_blob(&mut self, id: BlobId) {
-        self.blobs[id].zones.as_mut().map(|x| x.clear());
-        self.blobs[id].tail.clear();
-        self.blobs[id].flushed = 0;
-        self.blobs[id].len = 0;
+    fn replay_clear_blob(&mut self, id: BlobId) -> Result<(), NoBlobWithId> {
+        let blob = self.blobs.try_get_mut(id)?;
+        blob.zones.as_mut().map(|x| x.clear());
+        blob.tail.clear();
+        blob.flushed = 0;
+        blob.len = 0;
+        Ok(())
     }
 
     fn replay_delete_blob(&mut self, id: BlobId) -> io::Result<()> {
@@ -759,7 +761,7 @@ where
                 .zone_dev
                 .reset_many(bytemuck::cast_slice(zones))?;
         }
-        s.replay_clear_blob(self.id);
+        s.replay_clear_blob(self.id)?;
         self.store.log_clear_blob(s, self.id)?;
         Ok(())
     }
