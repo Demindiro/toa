@@ -367,7 +367,15 @@ where
                 entry::ty::COMMIT_BLOB_TAIL => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let len = u64::from_le_bytes(buf_a[k]);
+                    let len = buf_a
+                        .get(k)
+                        .map(|x| u64::from_le_bytes(*x))
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "log entry: commit blob tail: missing length",
+                            )
+                        })?;
                     k += 1;
                     (cb)(LogEntry::CommitBlobTail { id, len })?;
                 }
