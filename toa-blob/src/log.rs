@@ -274,7 +274,12 @@ where
 
         *genn = hdr.generation.into();
     }
-    assert_eq!(gen_a, gen_b); // TODO don't panic, return error
+    if gen_a != gen_b {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "generation of backup log does not match",
+        ));
+    }
 
     let mut log_len = 0;
     let mut log_zone_head = 0;
