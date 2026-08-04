@@ -1,3 +1,13 @@
+#![forbid(unused_must_use)]
+
+macro_rules! trace {
+    ($($x:tt)*) => {};
+    ($($x:tt)*) => {{
+        eprint!("[TRACE] ");
+        eprintln!($($x)*)
+    }};
+}
+
 pub mod log;
 
 pub use toa_blob_store::DuplicateBlob;
@@ -8,9 +18,13 @@ use std::os::unix::fs::FileExt;
 use std::{
     cell::RefCell,
     collections::btree_map::{BTreeMap, Entry},
-    fmt, io, ops,
+    error, fmt, io,
+    num::NonZeroU32,
+    ops,
     rc::Rc,
 };
+
+const MAX_BLOB_ID: BlobId = BlobId(999_999);
 
 pub trait ZoneDev {
     /// # Note
@@ -56,7 +70,7 @@ pub trait ZoneDev {
 
     fn block_size(&self) -> BlockShift;
     fn zone_blocks(&self) -> u32;
-    fn zone_count(&self) -> u32;
+    fn zone_count(&self) -> NonZeroU32;
 
     /// Wipe all zones. This may be a noop, but zones must be writeable
     /// from the start after this call.
@@ -125,6 +139,9 @@ pub struct BlobId(u32);
 #[derive(Debug)]
 pub struct OutOfZones;
 
+#[derive(Debug)]
+pub struct DataSmallerThanZone;
+
 /// # Note about zone data alignment
 ///
 /// Data is *not* aligned to block boundaries.
@@ -150,6 +167,25 @@ struct BlobTable {
 #[repr(transparent)]
 pub struct ZoneId(pub u32);
 
+#[derive(Debug)]
+struct NoBlobWithId(BlobId);
+
+#[derive(Debug)]
+enum BlobInsertError {
+    DuplicateBlob(BlobId),
+    BlobIdOutOfRange(BlobId),
+}
+
+#[derive(Debug)]
+struct ZoneIdOutOfRange(ZoneId);
+
+#[derive(Debug)]
+enum AddZoneToBlobError {
+    NoBlobWithId(BlobId),
+    ZoneIdOutOfRange(ZoneId),
+    IsUnzonedBlob,
+}
+
 impl<U> BlobStore<U>
 where
     U: ZoneDev,
@@ -165,14 +201,14 @@ where
             generation: generation.into(),
             block_size: u32::from(zone_dev.block_size()).into(),
             zone_blocks: zone_dev.zone_blocks().into(),
-            zone_count: zone_dev.zone_count().into(),
+            zone_count: zone_dev.zone_count().get().into(),
             _pad_0: Default::default(),
         };
         let hdr = bytemuck::bytes_of(&hdr);
         let buf = &mut vec![0; usize::from(zone_dev.block_size())];
         buf[..hdr.len()].copy_from_slice(hdr);
         zone_dev.append(0, 0, buf)?;
-        zone_dev.append(nr_zones - 1, 0, buf)?;
+        zone_dev.append(nr_zones.get() - 1, 0, buf)?;
 
         let mut data = BlobStoreData::new(generation, nr_zones);
         data.log_zone_head = zone_dev.block_size().into();
@@ -190,34 +226,57 @@ where
 
         let mut in_transaction = false;
 
-        let log_end = log::iter_with(&zone_dev, |entry| match entry {
-            log::LogEntry::CreateBlob { id, name, unzoned } => {
-                store.replay_create_blob(id, name, unzoned).unwrap()
+        let log_end = log::iter_with(&zone_dev, |entry| {
+            match entry {
+                log::LogEntry::CreateBlob { id, name, unzoned } => {
+                    store
+                        .replay_create_blob(id, name, unzoned)
+                        .map_err(|x| io::Error::new(io::ErrorKind::InvalidData, x))?;
+                }
+                log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id)?,
+                log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id)?,
+                log::LogEntry::RenameBlob { id, name } => {
+                    store.replay_rename_blob(id, name)?;
+                }
+                log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data)?,
+                log::LogEntry::AddZoneToBlob { id, zone } => {
+                    store.replay_add_zone_to_blob(id, zone)?
+                }
+                log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len)?,
+                log::LogEntry::NextLogZone { zones } => {
+                    [store.log_zone_a, store.log_zone_b] = zones;
+                    store.mark_zone_allocated(store.log_zone_a)?;
+                    store.mark_zone_allocated(store.log_zone_b)?;
+                }
+                log::LogEntry::TransactionBegin => {
+                    if in_transaction {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transaction_begin while already inside transaction",
+                        ));
+                    }
+                    in_transaction = true;
+                }
+                log::LogEntry::TransactionEnd => {
+                    if !in_transaction {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transaction_end outside of transaction",
+                        ));
+                    }
+                    in_transaction = false;
+                }
             }
-            log::LogEntry::ClearBlob { id } => store.replay_clear_blob(id),
-            log::LogEntry::DeleteBlob { id } => store.replay_delete_blob(id),
-            log::LogEntry::RenameBlob { id, name } => {
-                store.replay_rename_blob(id, name);
-            }
-            log::LogEntry::AppendBlobTail { id, data } => store.replay_append_blob(id, data),
-            log::LogEntry::AddZoneToBlob { id, zone } => store.replay_add_zone_to_blob(id, zone),
-            log::LogEntry::CommitBlobTail { id, len } => store.replay_commit_blob(id, len),
-            log::LogEntry::NextLogZone { zones } => {
-                [store.log_zone_a, store.log_zone_b] = zones;
-                store.mark_zone_allocated(store.log_zone_a);
-                store.mark_zone_allocated(store.log_zone_b);
-            }
-            log::LogEntry::TransactionBegin => {
-                assert!(!in_transaction);
-                in_transaction = true;
-            }
-            log::LogEntry::TransactionEnd => {
-                assert!(in_transaction);
-                in_transaction = false;
-            }
+            Ok(())
         })?;
 
-        assert!(!in_transaction, "unterminated transaction");
+        if in_transaction {
+            // TODO should we attempt rollback? or leave that to fsck?
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unterminated transaction",
+            ));
+        }
 
         log::LogEnd {
             generation: store.generation,
@@ -541,17 +600,17 @@ where
 }
 
 impl BlobStoreData {
-    fn new(generation: u64, nr_zones: u32) -> Self {
+    fn new(generation: u64, nr_zones: NonZeroU32) -> Self {
         let mut s = Self {
             generation,
             blobs: Default::default(),
             blob_map: Default::default(),
             log: Vec::new(),
             log_zone_a: ZoneId(0),
-            log_zone_b: ZoneId(nr_zones - 1),
+            log_zone_b: ZoneId(nr_zones.get() - 1),
             log_zone_head: 0,
             log_len: 0,
-            allocated_zones: bitvec::bitbox![0; nr_zones as usize],
+            allocated_zones: bitvec::bitbox![0; nr_zones.get() as usize],
             transaction_counter: 0,
         };
         s.allocated_zones.set(s.log_zone_a.0 as usize, true);
@@ -600,8 +659,10 @@ impl BlobStoreData {
         }
     }
 
-    fn mark_zone_allocated(&mut self, id: ZoneId) {
-        self.allocated_zones.set(id.0 as usize, true);
+    fn mark_zone_allocated(&mut self, id: ZoneId) -> Result<(), ZoneIdOutOfRange> {
+        ((id.0 as usize) < self.allocated_zones.len())
+            .then(|| self.allocated_zones.set(id.0 as usize, true))
+            .ok_or(ZoneIdOutOfRange(id))
     }
 
     fn replay_create_blob(
@@ -609,10 +670,10 @@ impl BlobStoreData {
         id: BlobId,
         name: &[u8],
         unzoned: bool,
-    ) -> Result<(), DuplicateBlob> {
+    ) -> Result<(), BlobInsertError> {
         assert!(name.len() <= 255, "name too long");
         match self.blob_map.entry(name.into()) {
-            Entry::Occupied(_) => Err(DuplicateBlob),
+            Entry::Occupied(_) => Err(BlobInsertError::DuplicateBlob(id)),
             Entry::Vacant(e) => {
                 self.blobs
                     .insert_at(id, Blob::new(e.key().clone(), unzoned))?;
@@ -622,28 +683,40 @@ impl BlobStoreData {
         }
     }
 
-    fn replay_clear_blob(&mut self, id: BlobId) {
-        self.blobs[id].zones.as_mut().map(|x| x.clear());
-        self.blobs[id].tail.clear();
-        self.blobs[id].flushed = 0;
-        self.blobs[id].len = 0;
+    fn replay_clear_blob(&mut self, id: BlobId) -> Result<(), NoBlobWithId> {
+        let blob = self.blobs.try_get_mut(id)?;
+        blob.zones.as_mut().map(|x| x.clear());
+        blob.tail.clear();
+        blob.flushed = 0;
+        blob.len = 0;
+        Ok(())
     }
 
-    fn replay_delete_blob(&mut self, id: BlobId) {
-        let old = self.blobs.remove(id).expect("old blob missing");
+    fn replay_delete_blob(&mut self, id: BlobId) -> io::Result<()> {
+        let old = self.blobs.remove(id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("old blob with ID {id} missing"),
+            )
+        })?;
         if let Some(mut old) = old.zones {
             self.free_zones(&mut old);
         }
         self.blob_map.remove(&old.name);
+        Ok(())
     }
 
     /// # Returns
     ///
     /// `true` if the blob actually got renamed, `false` if the operation is a no-op.
-    fn replay_rename_blob(&mut self, id: BlobId, new_name: &[u8]) -> (bool, Option<Blob>) {
-        let blob = &mut self.blobs[id];
+    fn replay_rename_blob(
+        &mut self,
+        id: BlobId,
+        new_name: &[u8],
+    ) -> io::Result<(bool, Option<Blob>)> {
+        let blob = self.blobs.try_get_mut(id)?;
         if &*blob.name == new_name {
-            return (false, None);
+            return Ok((false, None));
         }
         self.blob_map.remove(&*blob.name);
         let mut old = match self.blob_map.entry(new_name.into()) {
@@ -663,27 +736,37 @@ impl BlobStoreData {
         if let Some(old) = old.as_mut().and_then(|x| x.zones.as_mut()) {
             self.free_zones(old);
         }
-        (true, old)
+        Ok((true, old))
     }
 
-    fn replay_append_blob(&mut self, id: BlobId, data: &[u8]) {
-        self.blobs[id].tail.extend(data);
-        self.blobs[id].flushed += data.len();
+    fn replay_append_blob(&mut self, id: BlobId, data: &[u8]) -> Result<(), NoBlobWithId> {
+        let blob = self.blobs.try_get_mut(id)?;
+        blob.tail.extend(data);
+        blob.flushed += data.len();
+        Ok(())
     }
 
-    fn replay_add_zone_to_blob(&mut self, id: BlobId, zone: ZoneId) {
-        self.blobs[id]
+    fn replay_add_zone_to_blob(
+        &mut self,
+        id: BlobId,
+        zone: ZoneId,
+    ) -> Result<(), AddZoneToBlobError> {
+        self.blobs
+            .try_get_mut(id)?
             .zones
             .as_mut()
-            .expect("todo: error: unzoned")
+            .ok_or(AddZoneToBlobError::IsUnzonedBlob)?
             .push(zone);
-        self.mark_zone_allocated(zone);
+        self.mark_zone_allocated(zone)?;
+        Ok(())
     }
 
-    fn replay_commit_blob(&mut self, id: BlobId, len: u64) {
-        self.blobs[id].tail.clear();
-        self.blobs[id].len = len;
-        self.blobs[id].flushed = 0;
+    fn replay_commit_blob(&mut self, id: BlobId, len: u64) -> Result<(), NoBlobWithId> {
+        let blob = self.blobs.try_get_mut(id)?;
+        blob.tail.clear();
+        blob.len = len;
+        blob.flushed = 0;
+        Ok(())
     }
 
     fn log_free(&self, block_size: BlockShift) -> usize {
@@ -718,7 +801,7 @@ where
                 .zone_dev
                 .reset_many(bytemuck::cast_slice(zones))?;
         }
-        s.replay_clear_blob(self.id);
+        s.replay_clear_blob(self.id)?;
         self.store.log_clear_blob(s, self.id)?;
         Ok(())
     }
@@ -730,7 +813,7 @@ where
                 .zone_dev
                 .reset_many(bytemuck::cast_slice(zones))?;
         }
-        s.replay_delete_blob(self.id);
+        s.replay_delete_blob(self.id)?;
         self.store.log_delete_blob(s, self.id)?;
         Ok(())
     }
@@ -798,7 +881,7 @@ where
 
     pub fn rename(&self, new_name: &[u8]) -> io::Result<()> {
         let s = &mut *self.store.data.borrow_mut();
-        let (renamed, old) = s.replay_rename_blob(self.id, new_name);
+        let (renamed, old) = s.replay_rename_blob(self.id, new_name)?;
         if renamed {
             if let Some(old) = old.and_then(|x| x.zones) {
                 self.store.zone_dev.reset_many(bytemuck::cast_slice(&old))?;
@@ -888,7 +971,7 @@ where
                 None => {
                     [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                     self.store.log_add_zone_to_blob(s, self.id, zone)?;
-                    s.replay_add_zone_to_blob(self.id, zone);
+                    s.replay_add_zone_to_blob(self.id, zone)?;
                 }
                 Some(z) => zone = *z,
             };
@@ -896,7 +979,7 @@ where
             if n == s.blobs[self.id].len {
                 [zone] = s.alloc_zones_array().unwrap(); // TODO don't panic
                 self.store.log_add_zone_to_blob(s, self.id, zone)?;
-                s.replay_add_zone_to_blob(self.id, zone);
+                s.replay_add_zone_to_blob(self.id, zone)?;
             }
             let n = zone_size - offset;
             let n = n.min(blocks.len() as u64) as usize;
@@ -906,7 +989,7 @@ where
             s.blobs[self.id].len += n as u64;
         }
         // TODO delay commit until explicit flush
-        s.replay_commit_blob(self.id, end);
+        s.replay_commit_blob(self.id, end)?;
         self.store.log_commit_blob_tail(s, self.id, end)?;
         Ok(())
     }
@@ -919,6 +1002,14 @@ impl BlobTable {
 
     fn get_mut(&mut self, id: BlobId) -> Option<&mut Blob> {
         self.table.get_mut(id.0 as usize).and_then(|x| x.as_mut())
+    }
+
+    fn try_get(&self, id: BlobId) -> Result<&Blob, NoBlobWithId> {
+        self.get(id).ok_or(NoBlobWithId(id))
+    }
+
+    fn try_get_mut(&mut self, id: BlobId) -> Result<&mut Blob, NoBlobWithId> {
+        self.get_mut(id).ok_or(NoBlobWithId(id))
     }
 
     fn insert(&mut self, blob: Blob) -> BlobId {
@@ -935,12 +1026,15 @@ impl BlobTable {
         BlobId((self.table.len() - 1) as u32)
     }
 
-    fn insert_at(&mut self, id: BlobId, blob: Blob) -> Result<(), DuplicateBlob> {
+    fn insert_at(&mut self, id: BlobId, blob: Blob) -> Result<(), BlobInsertError> {
+        if id > MAX_BLOB_ID {
+            return Err(BlobInsertError::BlobIdOutOfRange(id));
+        }
         let n = self.table.len().max(id.0 as usize + 1);
         self.table.resize_with(n, || None);
         let x = &mut self.table[id.0 as usize];
         if x.is_some() {
-            return Err(DuplicateBlob);
+            return Err(BlobInsertError::DuplicateBlob(id));
         }
         *x = Some(blob);
         Ok(())
@@ -958,16 +1052,22 @@ impl BlobTable {
 impl ops::Index<BlobId> for BlobTable {
     type Output = Blob;
 
+    #[track_caller]
     fn index(&self, id: BlobId) -> &Self::Output {
-        self.get(id)
-            .unwrap_or_else(|| panic!("no blob with ID {id}"))
+        match self.try_get(id) {
+            Ok(x) => x,
+            Err(e) => panic!("{e}"),
+        }
     }
 }
 
 impl ops::IndexMut<BlobId> for BlobTable {
+    #[track_caller]
     fn index_mut(&mut self, id: BlobId) -> &mut Self::Output {
-        self.get_mut(id)
-            .unwrap_or_else(|| panic!("no blob with ID {id}"))
+        match self.try_get_mut(id) {
+            Ok(x) => x,
+            Err(e) => panic!("{e}"),
+        }
     }
 }
 
@@ -1020,8 +1120,9 @@ impl<const B: usize> ZoneDev for MemZones<B> {
     fn zone_blocks(&self) -> u32 {
         self.zone_size
     }
-    fn zone_count(&self) -> u32 {
-        self.zones.borrow().len() as u32
+    fn zone_count(&self) -> NonZeroU32 {
+        let n = self.zones.borrow().len();
+        u32::try_from(n).unwrap().try_into().unwrap()
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1044,15 +1145,22 @@ impl<const B: usize> MemZones<B> {
 impl MemBlocks {
     pub fn new(block_size: BlockShift, zone_blocks: u32, zone_count: u32) -> Self {
         let n = zone_count as usize * zone_blocks as usize * usize::from(block_size);
-        Self::wrap(block_size, zone_blocks, vec![0; n].into())
+        Self::wrap(block_size, zone_blocks, vec![0; n].into()).expect("data large enough")
     }
 
-    pub fn wrap(block_size: BlockShift, zone_blocks: u32, data: Box<[u8]>) -> Self {
-        Self {
+    pub fn wrap(
+        block_size: BlockShift,
+        zone_blocks: u32,
+        data: Box<[u8]>,
+    ) -> Result<Self, DataSmallerThanZone> {
+        if (data.len() as u64) < u64::from(zone_blocks) * u64::from(block_size) {
+            return Err(DataSmallerThanZone);
+        }
+        Ok(Self {
             blocks: RefCell::new(data),
             block_size,
             zone_blocks,
-        }
+        })
     }
 
     fn zone_size(&self) -> u64 {
@@ -1106,8 +1214,9 @@ impl ZoneDev for MemBlocks {
     fn zone_blocks(&self) -> u32 {
         self.zone_blocks
     }
-    fn zone_count(&self) -> u32 {
-        (self.blocks.borrow().len() / self.zone_size() as usize) as u32
+    fn zone_count(&self) -> NonZeroU32 {
+        let n = self.blocks.borrow().len() / self.zone_size() as usize;
+        u32::try_from(n).unwrap().try_into().unwrap()
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1181,8 +1290,8 @@ impl ZoneDev for FileBlocks {
     fn zone_blocks(&self) -> u32 {
         self.zone_blocks
     }
-    fn zone_count(&self) -> u32 {
-        self.zone_count
+    fn zone_count(&self) -> NonZeroU32 {
+        self.zone_count.try_into().unwrap()
     }
 
     fn clear(&mut self) -> io::Result<()> {
@@ -1226,7 +1335,7 @@ macro_rules! proxy_zonedev {
                 (&**self).zone_blocks()
             }
             #[track_caller]
-            fn zone_count(&self) -> u32 {
+            fn zone_count(&self) -> NonZeroU32 {
                 (&**self).zone_count()
             }
 
@@ -1373,6 +1482,71 @@ where
             index: 0,
         })
     }
+}
+
+impl error::Error for AddZoneToBlobError {}
+impl error::Error for NoBlobWithId {}
+impl error::Error for BlobInsertError {}
+impl error::Error for ZoneIdOutOfRange {}
+
+impl fmt::Display for AddZoneToBlobError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoBlobWithId(x) => NoBlobWithId(*x).fmt(f),
+            Self::ZoneIdOutOfRange(x) => ZoneIdOutOfRange(*x).fmt(f),
+            Self::IsUnzonedBlob => "blob is unzoned".fmt(f),
+        }
+    }
+}
+
+impl fmt::Display for NoBlobWithId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no blob with ID {}", self.0)
+    }
+}
+
+impl fmt::Display for BlobInsertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateBlob(x) => write!(f, "duplicate blob ID {x}"),
+            Self::BlobIdOutOfRange(x) => write!(f, "blob ID {x} out of range"),
+        }
+    }
+}
+
+impl fmt::Display for ZoneIdOutOfRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "zone ID {} out of range", self.0)
+    }
+}
+
+impl From<NoBlobWithId> for AddZoneToBlobError {
+    fn from(x: NoBlobWithId) -> Self {
+        Self::NoBlobWithId(x.0)
+    }
+}
+
+impl From<ZoneIdOutOfRange> for AddZoneToBlobError {
+    fn from(x: ZoneIdOutOfRange) -> Self {
+        Self::ZoneIdOutOfRange(x.0)
+    }
+}
+
+macro_rules! err_to_ioerr {
+    ($($ty:ident)*) => {$(
+        impl From<$ty> for io::Error {
+            fn from(x: $ty) -> Self {
+                io::Error::new(io::ErrorKind::InvalidData, x)
+            }
+        }
+    )*};
+}
+
+err_to_ioerr! {
+    AddZoneToBlobError
+    BlobInsertError
+    NoBlobWithId
+    ZoneIdOutOfRange
 }
 
 macro_rules! fmt_id {

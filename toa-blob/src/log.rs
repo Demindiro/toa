@@ -223,11 +223,14 @@ impl fmt::Display for LogEnd {
 pub fn iter_with<'a, T, F>(dev: &T, mut cb: F) -> io::Result<LogEnd>
 where
     T: ZoneDev,
-    F: FnMut(LogEntry),
+    F: FnMut(LogEntry) -> io::Result<()>,
 {
+    trace!("parsing log...");
     let block_size = usize::from(dev.block_size());
     let zone_blocks = u64::from(dev.zone_blocks());
     let zone_size = zone_blocks * block_size as u64;
+
+    let mut visited_zones = bitvec::bitvec![0; dev.zone_count().get() as usize];
 
     let mut buf = vec![0; block_size * 2];
     let (block_a, block_b) = buf.split_at_mut(block_size);
@@ -244,25 +247,39 @@ where
         let hdr = bytemuck::from_bytes::<entry::Header>(hdr);
 
         if hdr.magic != entry::Header::MAGIC {
-            todo!("bad magic");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"))?;
         }
         if hdr.version != entry::Header::VERSION {
-            todo!("bad version");
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad version"))?;
         }
 
         if hdr.block_size != u32::from(dev.block_size()) {
-            todo!("block size mismatch");
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "block size mismatch",
+            ))?;
         }
         if hdr.zone_blocks != dev.zone_blocks() {
-            todo!("zone blocks mismatch");
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zone blocks mismatch",
+            ))?;
         }
-        if hdr.zone_count != dev.zone_count() {
-            todo!("zone count mismatch");
+        if hdr.zone_count != dev.zone_count().get() {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zone count mismatch",
+            ))?;
         }
 
         *genn = hdr.generation.into();
     }
-    assert_eq!(gen_a, gen_b); // TODO don't panic, return error
+    if gen_a != gen_b {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "generation of backup log does not match",
+        ));
+    }
 
     let mut log_len = 0;
     let mut log_zone_head = 0;
@@ -283,6 +300,7 @@ where
         };
         while let Some(x) = buf_a.get(k) {
             let [ty, b, c, d, e, f, g, h] = *x;
+            trace!("log entry type={ty} zone={log_zone_a} offset={k}");
             end_of_log &= ty == entry::ty::LOG_BLOCK_END;
             // FIXME ensure log entries are equal *except* NEXT_LOG_ZONE
             // we should have a helper function which just returns an entry,
@@ -294,72 +312,122 @@ where
                     k += 1;
                     let id = BlobId(hdr.blob_id.into());
                     let name_len = usize::from(b);
-                    let name = &buf_a[k..].as_flattened()[..name_len];
+                    let name = buf_a[k..].as_flattened().get(..name_len).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log entry: create blob: missing name data",
+                        )
+                    })?;
                     k += (name_len + 7) >> 3;
                     let unzoned = ty == entry::ty::CREATE_UNZONED_BLOB;
-                    (cb)(LogEntry::CreateBlob { id, name, unzoned });
+                    (cb)(LogEntry::CreateBlob { id, name, unzoned })?;
                 }
                 entry::ty::CLEAR_BLOB => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    (cb)(LogEntry::ClearBlob { id });
+                    (cb)(LogEntry::ClearBlob { id })?;
                 }
                 entry::ty::DELETE_BLOB => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    (cb)(LogEntry::DeleteBlob { id });
+                    (cb)(LogEntry::DeleteBlob { id })?;
                 }
                 entry::ty::RENAME_BLOB => {
                     k += 1;
                     let name_len = usize::from(b);
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let name = &buf_a[k..].as_flattened()[..usize::from(name_len)];
+                    let name = buf_a[k..].as_flattened().get(..name_len).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log entry: rename blob: missing name data",
+                        )
+                    })?;
                     k += (name_len + 7) >> 3;
-                    (cb)(LogEntry::RenameBlob { id, name });
+                    (cb)(LogEntry::RenameBlob { id, name })?;
                 }
                 entry::ty::APPEND_BLOB_TAIL => {
                     k += 1;
                     let len = usize::from(u16::from_le_bytes([c, d]));
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let data = &buf_a[k..].as_flattened()[..usize::from(len)];
+                    let data = &buf_a[k..]
+                        .as_flattened()
+                        .get(..usize::from(len))
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "log entry: append blob tail: missing data",
+                            )
+                        })?;
                     k += (len + 7) >> 3;
-                    (cb)(LogEntry::AppendBlobTail { id, data });
+                    (cb)(LogEntry::AppendBlobTail { id, data })?;
                 }
                 entry::ty::ADD_ZONE_TO_BLOB => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let [x, y, z, w, _, _, _, _] = buf_a[k];
+                    let [x, y, z, w, _, _, _, _] = *buf_a.get(k).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log entry: append zone to blob: missing data",
+                        )
+                    })?;
                     let zone = ZoneId(u32::from_le_bytes([x, y, z, w]));
                     k += 1;
-                    (cb)(LogEntry::AddZoneToBlob { id, zone });
+                    (cb)(LogEntry::AddZoneToBlob { id, zone })?;
                 }
                 entry::ty::COMMIT_BLOB_TAIL => {
                     k += 1;
                     let id = BlobId(u32::from_le_bytes([e, f, g, h]));
-                    let len = u64::from_le_bytes(buf_a[k]);
+                    let len = buf_a
+                        .get(k)
+                        .map(|x| u64::from_le_bytes(*x))
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "log entry: commit blob tail: missing length",
+                            )
+                        })?;
                     k += 1;
-                    (cb)(LogEntry::CommitBlobTail { id, len });
+                    (cb)(LogEntry::CommitBlobTail { id, len })?;
                 }
                 entry::ty::NEXT_LOG_ZONE => {
+                    visited_zones.set(log_zone_a as usize, true);
+                    visited_zones.set(log_zone_b as usize, true);
                     let [_, _, _, _, x, y, z, w] = buf_b[k];
                     log_zone_a = u32::from_le_bytes([e, f, g, h]);
                     log_zone_b = u32::from_le_bytes([x, y, z, w]);
+                    if log_zone_a == log_zone_b {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "both logs point to same zone",
+                        ));
+                    }
+                    if visited_zones[log_zone_a as usize] || visited_zones[log_zone_b as usize] {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "zone already in use by log",
+                        ));
+                    }
                     log_zone_head = 0;
                     log_end = dev.zone_write_head(log_zone_a)?.unwrap_or(zone_size);
                     let zones = [log_zone_a, log_zone_b].map(ZoneId);
-                    (cb)(LogEntry::NextLogZone { zones });
+                    (cb)(LogEntry::NextLogZone { zones })?;
                     break;
                 }
                 entry::ty::TRANSACTION_BEGIN => {
                     k += 1;
-                    (cb)(LogEntry::TransactionBegin);
+                    (cb)(LogEntry::TransactionBegin)?;
                 }
                 entry::ty::TRANSACTION_END => {
                     k += 1;
-                    (cb)(LogEntry::TransactionEnd);
+                    (cb)(LogEntry::TransactionEnd)?;
                 }
                 entry::ty::HEADER => k += 2,
-                ty => todo!("{ty}"),
+                ty => {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unrecognized log entry type {ty}"),
+                    ))?;
+                }
             }
         }
 
@@ -380,6 +448,7 @@ where
         }
     }
 
+    trace!("finished parsing log");
     Ok(LogEnd {
         generation: gen_a,
         len: log_len,

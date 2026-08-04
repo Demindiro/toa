@@ -1,3 +1,4 @@
+use core::{error, fmt};
 use std::io;
 
 pub trait BlobStore {
@@ -121,5 +122,13 @@ where
     }
     fn blobs<'a>(&'a self) -> io::Result<impl Iterator<Item = io::Result<Self::BlobHandle>> + 'a> {
         (**self).blobs()
+    }
+}
+
+impl error::Error for DuplicateBlob {}
+
+impl fmt::Display for DuplicateBlob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        "duplicate blob".fmt(f)
     }
 }
