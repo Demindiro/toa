@@ -12,6 +12,8 @@ use std::{
 use toa::{Compression, Hash, PageSize};
 use toa_blob::{BlobStore, FileBlocks};
 
+const TYPE_ID_DIR: [u8; 16] = [0; 16];
+
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
 type Accel = toa::accel::sled::Db;
@@ -61,6 +63,7 @@ impl ToaToa {
             hash = self.inner.add_refs(x, hash)?;
         }
         let mut dir = Vec::new();
+        dir.extend(TYPE_ID_DIR);
         for (name, _) in items {
             dir.push(name.len() as u8);
             dir.extend(name.bytes());
@@ -84,10 +87,12 @@ impl ToaToa {
             todo!()
         };
         let Object::Data(data) = data else { todo!() };
+        let type_id = data.read_array::<16>(0).unwrap();
+        assert_eq!(type_id, TYPE_ID_DIR);
         let data = {
-            let mut b = vec![0; data.len()? as usize];
-            data.read_exact(0, &mut b)
-                .map_err(|e| format!("root: failed to read data: {e:?}"))?;
+            let mut b = vec![0; data.len()? as usize - 16];
+            data.read_exact(16, &mut b)
+                .map_err(|e| format!("root: failed to read directory data: {e:?}"))?;
             b
         };
         let mut offset = 0;
@@ -102,7 +107,7 @@ impl ToaToa {
             [v, next] = self
                 .inner
                 .get(&next)
-                .map_err(|e| format!("root: failed to read ref: {e:?}"))?
+                .map_err(|e| format!("root: failed to read directory ref: {e:?}"))?
                 .unwrap()
                 .into_refs()
                 .unwrap();

@@ -13,6 +13,7 @@ use toa_blob::{BlobStore, FileBlocks};
 
 const XATTR_NAME_LIST: &[u8] = b"user.hash.toa\0";
 const XATTR_NAME_HASH_TOA: &[u8] = b"user.hash.toa";
+const TYPE_ID_DIR: [u8; 16] = *b"\xfd\x9c\x0d\xfb\x1e\x94\x63\xc1\x81\xaf\xf7\x31\x58\x20\xc4\xea";
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
@@ -190,8 +191,14 @@ impl Fs {
         let data = self.dev.get(&data).unwrap();
         let Object::Data(data) = data else { todo!() };
 
-        let mut names = vec![0; data.len().unwrap().try_into().unwrap()];
-        data.read_exact(0, &mut names).unwrap();
+        let type_id = data.read_array::<16>(0).unwrap();
+        assert_eq!(
+            type_id, TYPE_ID_DIR,
+            "unexpected object type (expected directory)"
+        );
+
+        let mut names = vec![0; (data.len().unwrap() - 16).try_into().unwrap()];
+        data.read_exact(16, &mut names).unwrap();
 
         let mut next = refs;
         let mut refs = Vec::new();
