@@ -13,6 +13,8 @@ use toa::{Compression, Hash, PageSize};
 use toa_blob::{BlobStore, FileBlocks};
 
 const TYPE_ID_DIR: [u8; 16] = [0; 16];
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const REVISION: &str = env!("GIT_HASH");
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
@@ -190,7 +192,7 @@ impl Stat {
 
 fn usage(procname: &str) -> Box<dyn Error> {
     let s = format!(
-        "\
+        "toa-cli, version {VERSION}, revision {REVISION}
 usage: {procname} <cmd> [...]
     init <store>
         initialize a store
