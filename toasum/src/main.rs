@@ -1,6 +1,8 @@
 use std::io::{self, BufRead};
 use toa_hash::Hash;
 
+const TYPE_ID_DIR: [u8; 16] = *b"\xfd\x9c\x0d\xfb\x1e\x94\x63\xc1\x81\xaf\xf7\x31\x58\x20\xc4\xea";
+
 #[derive(Default)]
 struct Program {
     check: bool,
@@ -48,11 +50,13 @@ impl Program {
         }
 
         items.sort_by(|x, y| x.0.cmp(&y.0));
-        let mut names = Vec::with_capacity(items.iter().fold(items.len(), |s, x| s + x.0.len()));
+        let mut names =
+            Vec::with_capacity(items.iter().fold(16 + items.len(), |s, x| s + x.0.len()));
         let mut hash = Hash::NIL;
         for (_, x) in items.iter().rev() {
             hash = toa_hash::hash_refs(*x, hash);
         }
+        names.extend(TYPE_ID_DIR);
         for x in items {
             names.push(x.0.len() as u8);
             names.extend(x.0.bytes());
