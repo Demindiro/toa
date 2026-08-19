@@ -12,7 +12,7 @@ use std::{
 use toa::{Compression, Hash, PageSize};
 use toa_blob::{BlobStore, FileBlocks};
 
-const TYPE_ID_DIR: [u8; 16] = [0; 16];
+const TYPE_ID_DIR: [u8; 16] = *b"\xfd\x9c\x0d\xfb\x1e\x94\x63\xc1\x81\xaf\xf7\x31\x58\x20\xc4\xea";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REVISION: &str = env!("GIT_HASH");
 
