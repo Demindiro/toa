@@ -3,12 +3,10 @@ name = "toa-cli"
 version.workspace = true
 edition.workspace = true
 
-[features]
-
 [dependencies]
-toa = { path = "../toa", features = ["lz4", "zstd", "accel-sled"] }
-memmap2 = { version = "0.9.9", default-features = false }
-rand = { version = "0.8.0" }
-toa-blob = { path = "../toa-blob", features = ["std"] }
-toa-hash = { path = "../toa-hash" }
-regex = "1.12.3"
+memmap2.workspace = true
+rand.workspace = true
+regex.workspace = true
+toa-blob.workspace = true
+toa-hash.workspace = true
+toa.workspace = true

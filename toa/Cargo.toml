@@ -9,11 +9,11 @@ zstd = ["toa-blob-compress/zstd"]
 accel-sled = ["dep:sled"]
 
 [dependencies]
-toa-blob = { path = "../toa-blob" }
-toa-blob-store = { path = "../toa-blob-store" }
-toa-blob-compress = { path = "../toa-blob-compress" }
-toa-hash = { path = "../toa-hash" }
-arrayvec = { version = "0.7.6", default-features = false }
-bytemuck = "1.25.0"
-sled = { version = "0.34.7", optional = true }
-nora_endian = "0.1.3"
+arrayvec.workspace = true
+bytemuck.workspace = true
+nora_endian.workspace = true
+sled = { workspace = true, optional = true }
+toa-blob-compress.workspace = true
+toa-blob-store.workspace = true
+toa-blob.workspace = true
+toa-hash.workspace = true

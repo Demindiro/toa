@@ -4,6 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-bytemuck = "1.25.0"
-memmap2 = { version = "0.9.9", default-features = false }
-toa-hash = { path = "../toa-hash" }
+bytemuck.workspace = true
+memmap2.workspace = true
+toa-hash.workspace = true

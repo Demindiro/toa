@@ -7,7 +7,7 @@ edition.workspace = true
 trace = []
 
 [dependencies]
-popol = "3.0.1"
-toa = { path = "../toa", features = ["lz4", "zstd"] }
-toa-blob = { path = "../toa-blob", features = ["std"] }
-toa-hash = { path = "../toa-hash" }
+popol.workspace = true
+toa.workspace = true
+toa-blob.workspace = true
+toa-hash.workspace = true

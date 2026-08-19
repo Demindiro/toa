@@ -2,5 +2,3 @@
 name = "toa-blob-store"
 version.workspace = true
 edition.workspace = true
-
-[dependencies]

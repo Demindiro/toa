@@ -7,8 +7,8 @@ edition.workspace = true
 std = []
 
 [dependencies]
-bitvec = { version = "1.0.1", default-features = false, features = ["alloc"] }
-bstr = { version = "1.12.1", default-features = false }
-bytemuck = { version = "1.25.0", features = ["derive", "min_const_generics"] }
-nora_endian = "0.1.3"
-toa-blob-store = { path = "../toa-blob-store" }
+bitvec.workspace = true
+bstr.workspace = true
+bytemuck.workspace = true
+nora_endian.workspace = true
+toa-blob-store.workspace = true
