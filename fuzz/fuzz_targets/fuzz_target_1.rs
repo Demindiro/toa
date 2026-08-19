@@ -92,7 +92,8 @@ libfuzzer_sys::fuzz_target!(|ops: Vec<Op>| {
         objs.clear();
         accel.clear();
 
-        let mut toa = toa::Toa::init(store, accel, PageSize::K4, Compression::Lz4, 0)
+        let id = [0; 16];
+        let mut toa = toa::Toa::init(store, accel, id, PageSize::K4, Compression::Lz4, 0)
             .unwrap()
             .unwrap();
 

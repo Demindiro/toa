@@ -22,6 +22,10 @@ pub trait Index {
     fn add(&mut self, key: &Hash, value: IndexEntry) -> io::Result<()>;
 
     fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()>;
+
+    fn store_id(&self) -> Option<[u8; 16]>;
+
+    fn set_store_id(&mut self, id: [u8; 16]) -> io::Result<()>;
 }
 
 #[derive(Clone, Copy, Default, bytemuck::Zeroable, bytemuck::Pod)]
@@ -54,6 +58,14 @@ impl Index for BTreeMap<Hash, IndexEntry> {
     fn set_top(&mut self, _new_top: IndexCookie) -> io::Result<()> {
         Ok(())
     }
+
+    fn store_id(&self) -> Option<[u8; 16]> {
+        None
+    }
+
+    fn set_store_id(&mut self, _id: [u8; 16]) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<H> Index for HashMap<Hash, IndexEntry, H>
@@ -76,6 +88,14 @@ where
     fn set_top(&mut self, _new_top: IndexCookie) -> io::Result<()> {
         Ok(())
     }
+
+    fn store_id(&self) -> Option<[u8; 16]> {
+        None
+    }
+
+    fn set_store_id(&mut self, _id: [u8; 16]) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl<T> Index for &mut T
@@ -94,6 +114,12 @@ where
     fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
         (**self).set_top(new_top)
     }
+    fn store_id(&self) -> Option<[u8; 16]> {
+        (**self).store_id()
+    }
+    fn set_store_id(&mut self, id: [u8; 16]) -> io::Result<()> {
+        (**self).set_store_id(id)
+    }
 }
 
 #[cfg(feature = "accel-sled")]
@@ -101,6 +127,7 @@ mod imp_sled {
     use super::*;
 
     const KEY_TOP_COOKIE: &[u8] = b"top-cookie";
+    const KEY_STORE_ID: &[u8] = b"store-id";
 
     impl Index for sled::Db {
         fn top_cookie(&self) -> IndexCookie {
@@ -124,6 +151,21 @@ mod imp_sled {
         fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
             self.insert(KEY_TOP_COOKIE, bytemuck::bytes_of(&new_top))
                 .unwrap();
+            Ok(())
+        }
+
+        fn store_id(&self) -> Option<[u8; 16]> {
+            Some(
+                sled::Tree::get(self, KEY_STORE_ID)
+                    .unwrap()?
+                    .as_ref()
+                    .try_into()
+                    .unwrap(),
+            )
+        }
+
+        fn set_store_id(&mut self, id: [u8; 16]) -> io::Result<()> {
+            self.insert(KEY_STORE_ID, &id).unwrap();
             Ok(())
         }
     }

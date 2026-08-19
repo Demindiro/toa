@@ -27,7 +27,7 @@ where
     store: MapStore<T, A>,
     data: BlobsTyped<T::BlobHandle>,
     refs: T::BlobHandle,
-    root: Hash,
+    meta: Meta,
 }
 
 pub struct Blob<T> {
@@ -106,6 +106,17 @@ pub enum ReadExactError<S> {
     Io(S),
 }
 
+#[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(C)]
+struct Meta {
+    /// UUID to distinguish between stores.
+    ///
+    /// Mainly used to detect mismatched accelerators.
+    id: [u8; 16],
+    /// Current root object.
+    root: Hash,
+}
+
 impl<T, A> Toa<T, A>
 where
     T: BlobStore,
@@ -115,6 +126,7 @@ where
     pub fn init(
         store: T,
         accel: A,
+        store_id: [u8; 16],
         page_size: PageSize,
         compression: Compression,
         compression_level: u8,
@@ -124,12 +136,17 @@ where
         let (Ok(data), Ok(refs)) = (data, refs) else {
             return Ok(Err(DuplicateBlob));
         };
-        Ok(Ok(Self {
+        let mut s = Self {
             store: MapStore { store, accel },
             data,
             refs,
-            root: Default::default(),
-        }))
+            meta: Meta {
+                id: store_id,
+                root: Default::default(),
+            },
+        };
+        s.set_root(Default::default())?;
+        Ok(Ok(s))
     }
 
     pub fn load(store: T, accel: A) -> io::Result<Option<Self>> {
@@ -139,19 +156,26 @@ where
         let (Some(data), Some(refs)) = (data, refs) else {
             return Ok(None);
         };
-        let mut root = [0; 32];
-        if let Some(x) = store.store.find("root.bin")? {
-            let n = store.store.read_at(&x, 0, &mut root)?;
-            if n != 32 && n != 0 {
-                todo!()
+        let meta = store
+            .store
+            .find("meta.bin")?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "meta.bin not found"))?;
+        let meta: Meta = bytemuck::cast(store.store.read_at_array::<48>(&meta, 0)?);
+        match store.accel.store_id() {
+            Some(x) if x == meta.id => {}
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "accelerator ID does not match store ID",
+                ));
             }
+            None => store.accel.set_store_id(meta.id)?,
         }
-        let root = Hash::from_bytes(root);
         let mut s = Self {
             store,
             data,
             refs,
-            root,
+            meta,
         };
         s.accel_save_top()?; // ensure faster subsequent loads
         Ok(Some(s))
@@ -200,15 +224,22 @@ where
     }
 
     pub fn root(&self) -> Hash {
-        self.root
+        self.meta.root
     }
 
     pub fn set_root(&mut self, new_root: Hash) -> io::Result<()> {
-        let mut x = self.store.store.open_clear("new_root.bin")?;
-        self.store.store.append(&mut x, new_root.as_bytes())?;
-        self.store.store.rename("new_root.bin", "root.bin")?;
-        self.root = new_root;
-        Ok(())
+        self.store.store.transaction(|| {
+            let new_meta = Meta {
+                root: new_root,
+                ..self.meta
+            };
+            let mut x = self.store.store.open_clear("meta.bin")?;
+            self.store
+                .store
+                .append(&mut x, bytemuck::bytes_of(&new_meta))?;
+            self.meta = new_meta;
+            Ok(())
+        })
     }
 
     pub fn unmount(self) -> (T, A, io::Result<()>) {

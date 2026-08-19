@@ -349,7 +349,8 @@ where
 
     let store = BlobStore::init(dev)?;
     let accel = BTreeMap::default();
-    let mut toa = toa::Toa::init(store, accel, page_size, Compression::Zstd, 200)?
+    let id = rand::random();
+    let mut toa = toa::Toa::init(store, accel, id, page_size, Compression::Zstd, 200)?
         .map_err(|_| "store already initialized")?;
     toa.flush()?;
 
