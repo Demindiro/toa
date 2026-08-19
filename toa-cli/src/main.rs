@@ -200,8 +200,9 @@ usage: {procname} <cmd> [...]
         dump object data to stdout (may contain raw bytes!)
     scrub <store> <accel>
         verify store integrity
-    blob ls <store>
+    blob ls <store> [--iec]
         list all blobs
+        --iec     print sizes in IEC units.
     blob debug log <store>
         dump log
     unix add <store> <accel> <name> <directory> [-e <skip>]
@@ -382,12 +383,22 @@ where
 }
 
 fn fmt_size_iec(n: u64) -> String {
+    fmt_size_iec_opt(n, 3, false, 1)
+}
+
+fn fmt_size_iec_short(n: u64) -> String {
+    fmt_size_iec_opt(n, 0, true, 10)
+}
+
+fn fmt_size_iec_opt(n: u64, round_digits: u8, short_units: bool, cutoff: u64) -> String {
+    let round = 10f64.powi(round_digits.into());
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     for (i, suffix) in units.into_iter().enumerate().rev() {
         let shift = 1 << (i * 10);
-        if n >= shift {
+        if n >= (cutoff * shift) {
             let n = n as f64 / shift as f64;
-            let n = (n * 1e3).round() / 1e3;
+            let n = (n * round).round() / round;
+            let suffix = if short_units { &suffix[..1] } else { suffix };
             return format!("{n}{suffix}");
         }
     }

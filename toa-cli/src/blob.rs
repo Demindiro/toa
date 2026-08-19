@@ -56,7 +56,15 @@ pub fn cmd_ls<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
 {
+    let mut fmt_iec = false;
+
     let store = args.next().ok_or_else(|| usage(procname))?;
+    while let Some(x) = args.next() {
+        match &*x {
+            "--iec" => fmt_iec = true,
+            _ => return Err(usage(procname)),
+        }
+    }
     args_end(procname, args)?;
 
     let store = PathBuf::from(store);
@@ -66,7 +74,12 @@ where
         let blob = blob?;
         let name = store.name(&blob)?;
         let len = store.len(&blob)?;
-        println!("{len:>12} {name}");
+        if fmt_iec {
+            let len = crate::fmt_size_iec_short(len);
+            println!("{len:>12} {name}");
+        } else {
+            println!("{len:>12} {name}");
+        }
     }
 
     Ok(())
