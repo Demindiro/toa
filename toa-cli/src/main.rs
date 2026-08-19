@@ -180,7 +180,7 @@ impl Stat {
         let toa_size = toa.toa.inner.size_on_disk().unwrap();
         let added = toa_size - original_disk_size;
         let ratio = size_sum as f64 / added as f64;
-        let f = |s, x| println!("{s}: {x} ({})", fmt_size_si(x));
+        let f = |s, x| println!("{s}: {x} ({})", fmt_size_iec(x));
         f("store size", toa_size);
         f("added", added);
         f("files size", size_sum);
@@ -295,7 +295,7 @@ where
             "unsupported block size {x}. Please report a bug along with filesystem and disk information."
         ),
     };
-    eprintln!("using {} blocks", fmt_size_si(block_size.into()));
+    eprintln!("using {} blocks", fmt_size_iec(block_size.into()));
 
     // len() doesn't work because Linux reports 0 for block devices
     //
@@ -307,7 +307,7 @@ where
         eprintln!("file appears to be empty");
         eprint!("Please enter the desired file size (suffixes: K, M, G, T, P, E): ");
         let n = std::io::stdin().lines().next().transpose()?.unwrap();
-        len = parse_size_si(&n).ok_or("invalid size")?;
+        len = parse_size_iec(&n).ok_or("invalid size")?;
         dev.set_len(len)?;
     }
 
@@ -328,7 +328,7 @@ where
     let zone_blocks = u32::try_from(zone_size / u64::from(block_size)).unwrap();
     eprintln!(
         "using {} zones ({zone_blocks} blocks)",
-        fmt_size_si(zone_size.into())
+        fmt_size_iec(zone_size.into())
     );
 
     let zone_count = u32::try_from(len / zone_size).unwrap();
@@ -336,7 +336,7 @@ where
 
     eprintln!(
         "{} of slack at end of file",
-        fmt_size_si(len - u64::from(zone_count) * zone_size)
+        fmt_size_iec(len - u64::from(zone_count) * zone_size)
     );
 
     let dev = toa_blob::FileBlocks::wrap(block_size, zone_blocks, zone_count, dev);
@@ -381,7 +381,7 @@ where
     todo!("implement Toa::scrub");
 }
 
-fn fmt_size_si(n: u64) -> String {
+fn fmt_size_iec(n: u64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     for (i, suffix) in units.into_iter().enumerate().rev() {
         let shift = 1 << (i * 10);
@@ -394,7 +394,7 @@ fn fmt_size_si(n: u64) -> String {
     "0B".into()
 }
 
-fn parse_size_si(s: &str) -> Option<u64> {
+fn parse_size_iec(s: &str) -> Option<u64> {
     let (s, mul) = match s.chars().last()? {
         '0'..='9' => (s, 0),
         'K' => (&s[..s.len() - 1], 1),
