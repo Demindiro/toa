@@ -397,7 +397,7 @@ fn fmt_size_iec_short(n: u64) -> String {
 
 fn fmt_size_iec_opt(n: u64, round_digits: u8, short_units: bool, cutoff: u64) -> String {
     let round = 10f64.powi(round_digits.into());
-    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let units = [" ", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     for (i, suffix) in units.into_iter().enumerate().rev() {
         let shift = 1 << (i * 10);
         if n >= (cutoff * shift) {
