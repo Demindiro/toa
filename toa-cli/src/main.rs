@@ -14,7 +14,11 @@ use toa_blob::{BlobStore, FileBlocks};
 
 const TYPE_ID_DIR: [u8; 16] = *b"\xfd\x9c\x0d\xfb\x1e\x94\x63\xc1\x81\xaf\xf7\x31\x58\x20\xc4\xea";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const REVISION: &str = env!("GIT_HASH");
+const REVISION: &str = match env!("GIT_DIFF").as_bytes() {
+    b"0" => env!("GIT_HASH"),
+    b"1" => concat!(env!("GIT_HASH"), " (modified)"),
+    _ => panic!("GIT_DIFF must be 0 or 1"),
+};
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
