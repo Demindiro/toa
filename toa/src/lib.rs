@@ -1102,6 +1102,7 @@ mod test {
         let toa = Toa::init(
             store,
             Default::default(),
+            *b"0123456789abcdef",
             PageSize::K4,
             Compression::None,
             0,
