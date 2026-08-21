@@ -232,9 +232,16 @@ where
     }
 
     pub fn read_at_exact(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        match self.read_at(offset, buf) {
-            Ok(n) if n == buf.len() => Ok(()),
-            Ok(n) => todo!("want {}, got {n}", buf.len()),
+        match self.read_at_exact_or_none(offset, buf) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "read_at_exact: no data (offset {}, wanted {})",
+                    offset,
+                    buf.len(),
+                ),
+            )),
             Err(e) => Err(e),
         }
     }
@@ -243,7 +250,15 @@ where
         match self.read_at(offset, buf) {
             Ok(n) if n == buf.len() => Ok(true),
             Ok(0) => Ok(false),
-            Ok(_) => todo!(),
+            Ok(n) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "read_at_exact_or_none: partial data (offset {}, wanted {}, got {})",
+                    offset,
+                    buf.len(),
+                    n
+                ),
+            )),
             Err(e) => Err(e),
         }
     }
