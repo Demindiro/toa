@@ -22,7 +22,7 @@ const REVISION: &str = match env!("GIT_DIFF").as_bytes() {
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type Accel = toa::accel::sled::Db;
+type Accel = Box<dyn toa::accel::Index>;
 type InnerToa = toa::Toa<Store, Accel>;
 type Object<'a> = toa::Object<'a, Store, Accel>;
 
@@ -46,8 +46,14 @@ struct Stat {
 impl ToaToa {
     fn load(path: &Path, accel: &Path, write: bool) -> Result<Self> {
         let store = load_store(path, write)?;
-        let accel = toa::accel::sled::open(accel)
-            .map_err(|e| format!("failed to open accelerator: {e:?}"))?;
+        let accel: Box<dyn toa::accel::Index> = match accel.to_str() {
+            Some(":memory:") => Box::new(BTreeMap::default()),
+            Some(_) | None => {
+                let accel = toa::accel::sled::open(accel)
+                    .map_err(|e| format!("failed to open accelerator: {e:?}"))?;
+                Box::new(accel)
+            }
+        };
         let inner = toa::Toa::load(store, accel)?.ok_or("no store initialized")?;
         Ok(Self { inner })
     }

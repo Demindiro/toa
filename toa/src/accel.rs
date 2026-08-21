@@ -98,29 +98,36 @@ where
     }
 }
 
-impl<T> Index for &mut T
-where
-    T: Index,
-{
-    fn top_cookie(&self) -> IndexCookie {
-        (**self).top_cookie()
-    }
-    fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
-        (**self).get(key)
-    }
-    fn add(&mut self, key: &Hash, value: IndexEntry) -> io::Result<()> {
-        (**self).add(key, value)
-    }
-    fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
-        (**self).set_top(new_top)
-    }
-    fn store_id(&self) -> Option<[u8; 16]> {
-        (**self).store_id()
-    }
-    fn set_store_id(&mut self, id: [u8; 16]) -> io::Result<()> {
-        (**self).set_store_id(id)
-    }
+macro_rules! impl_ref {
+    ($ty:ty) => {
+        impl<T> Index for $ty
+        where
+            T: Index + ?Sized,
+        {
+            fn top_cookie(&self) -> IndexCookie {
+                (**self).top_cookie()
+            }
+            fn get(&self, key: &Hash) -> io::Result<Option<IndexEntry>> {
+                (**self).get(key)
+            }
+            fn add(&mut self, key: &Hash, value: IndexEntry) -> io::Result<()> {
+                (**self).add(key, value)
+            }
+            fn set_top(&mut self, new_top: IndexCookie) -> io::Result<()> {
+                (**self).set_top(new_top)
+            }
+            fn store_id(&self) -> Option<[u8; 16]> {
+                (**self).store_id()
+            }
+            fn set_store_id(&mut self, id: [u8; 16]) -> io::Result<()> {
+                (**self).set_store_id(id)
+            }
+        }
+    };
 }
+
+impl_ref!(&mut T);
+impl_ref!(Box<T>);
 
 #[cfg(feature = "accel-sled")]
 mod imp_sled {
