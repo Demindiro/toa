@@ -213,6 +213,8 @@ usage: {procname} <cmd> [...]
     blob ls <store> [--iec]
         list all blobs
         --iec     print sizes in IEC units.
+    blob fsck pad-blob <store> <blob> <num>
+        append the given number of (all-zero) bytes to a blob
     blob debug log <store>
         dump log
     unix add <store> <accel> <name> <directory> [-e <skip>]

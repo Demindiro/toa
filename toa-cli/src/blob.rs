@@ -9,6 +9,7 @@ where
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
         "debug" => cmd_debug(procname, args),
+        "fsck" => cmd_fsck(procname, args),
         "ls" => cmd_ls(procname, args),
         _ => Err(usage(procname)),
     }
@@ -21,6 +22,17 @@ where
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
         "log" => cmd_debug_log(procname, args),
+        _ => Err(usage(procname)),
+    }
+}
+
+pub fn cmd_fsck<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let cmd = args.next().ok_or_else(|| usage(procname))?;
+    match &*cmd {
+        "pad-blob" => cmd_fsck_pad_blob(procname, args),
         _ => Err(usage(procname)),
     }
 }
@@ -48,6 +60,30 @@ where
         Ok(())
     })?;
     println!("{end}");
+
+    Ok(())
+}
+
+pub fn cmd_fsck_pad_blob<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let blob = args.next().ok_or_else(|| usage(procname))?;
+    let len = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let len = len.parse::<u64>()?;
+
+    let store = PathBuf::from(store);
+    let store = load_store(&store, true)?;
+    let blob = store
+        .find(blob.as_bytes())?
+        .ok_or_else(|| "blob not found")?;
+
+    blob.append(&vec![0; usize::try_from(len).unwrap()])?;
+
+    store.flush()?;
 
     Ok(())
 }
