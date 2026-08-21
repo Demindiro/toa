@@ -1,5 +1,11 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
+macro_rules! trace {
+    () => {
+        |e| $crate::trace_err(e, std::panic::Location::caller())
+    };
+}
+
 pub mod accel;
 
 pub use toa_blob_compress::{BlobRef, Compression, PageSize};
@@ -531,7 +537,8 @@ where
         let mut offt = accel.top_cookie().data_offset_full;
         while self
             .chunks_full
-            .read_at_exact_or_none(store, offt, &mut buf)?
+            .read_at_exact_or_none(store, offt, &mut buf)
+            .map_err(trace!())?
         {
             let key = toa_hash::hash_chunk(&buf);
             accel.add(&key, IndexEntry(FileRef::new_chunk_full(offt).0))?;
@@ -551,11 +558,14 @@ where
         let mut offt = accel.top_cookie().data_offset_partial;
         while self
             .chunks_partial
-            .read_at_exact_or_none(store, offt, len)?
+            .read_at_exact_or_none(store, offt, len)
+            .map_err(trace!())?
         {
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
-            self.chunks_partial.read_at_exact(store, offt + 2, buf)?;
+            self.chunks_partial
+                .read_at_exact(store, offt + 2, buf)
+                .map_err(trace!())?;
             let key = toa_hash::hash_chunk(buf);
             accel.add(&key, IndexEntry(FileRef::new_chunk_partial(offt).0))?;
             offt += align8(2 + u64::from(len));
@@ -571,7 +581,10 @@ where
         let MapStore { store, accel } = store;
         let mut buf = [0; 80];
         let mut offt = accel.top_cookie().data_offset_pairs;
-        while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
+        while store
+            .read_at_exact_or_none(&self.pairs, offt, &mut buf)
+            .map_err(trace!())?
+        {
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
             accel.add(&key, IndexEntry(FileRef::new_pair(offt).0))?;
@@ -1050,6 +1063,10 @@ fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
     let y = Hash::from_slice(&bytes[32..64]);
     let len = u128::from_le_bytes(bytes[64..].try_into().expect("16 bytes"));
     ([x, y], len)
+}
+
+fn trace_err(err: io::Error, loc: &std::panic::Location<'_>) -> io::Error {
+    io::Error::new(err.kind(), format!("{err}\nat {loc}"))
 }
 
 #[cfg(test)]
