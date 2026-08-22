@@ -112,9 +112,9 @@ where
         let len = store.len(&blob)?;
         if fmt_iec {
             let len = crate::fmt_size_iec_short(len);
-            println!("{len:>12} {name}");
+            println!("{len:>15} {blob:>3} {name}");
         } else {
-            println!("{len:>12} {name}");
+            println!("{len:>15} {blob:>3} {name}");
         }
     }
 
