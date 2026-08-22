@@ -204,20 +204,16 @@ where
             zone_count: zone_dev.zone_count().get().into(),
             _pad_0: Default::default(),
         };
-        let hdr = bytemuck::bytes_of(&hdr);
-        let buf = &mut vec![0; usize::from(zone_dev.block_size())];
-        buf[..hdr.len()].copy_from_slice(hdr);
-        zone_dev.append(0, 0, buf)?;
-        zone_dev.append(nr_zones.get() - 1, 0, buf)?;
-
-        let mut data = BlobStoreData::new(generation, nr_zones);
-        data.log_zone_head = zone_dev.block_size().into();
+        let data = BlobStoreData::new(generation, nr_zones);
 
         let s = Self {
             zone_dev,
             data: data.into(),
         };
-        s.log_terminate(&mut s.data.borrow_mut())?;
+        let mut sd = s.data.borrow_mut();
+        s.log_push(&mut sd, &[bytemuck::bytes_of(&hdr)])?;
+        s.log_flush(&mut sd)?;
+        drop(sd);
         Ok(s)
     }
 
