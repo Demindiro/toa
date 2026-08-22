@@ -274,40 +274,38 @@ where
         // add tail with start to fill a page
         // add middle directly as pages
         // add remainder to "cleared" tail
+        self.store.transaction(|| {
+            let offset = self.len()?;
 
-        let offset = self.len()?;
+            let page_size = self.blobs.page_size as u64;
+            let page_mask = page_size - 1;
 
-        let page_size = self.blobs.page_size as u64;
-        let page_mask = page_size - 1;
+            let tail = &self.blobs.tail;
+            let n = self.store.len(tail)?.wrapping_neg() & page_mask;
+            let n = usize::try_from(n).expect("u32 <= usize");
+            let n = n.min(data.len());
+            let (start, data) = data.split_at(n);
+            self.store.append(tail, start)?;
 
-        let tail = &self.blobs.tail;
-        let n = self.store.len(tail)?.wrapping_neg() & page_mask;
-        let n = usize::try_from(n).expect("u32 <= usize");
-        let n = n.min(data.len());
-        let (start, data) = data.split_at(n);
-        self.store.append(tail, start)?;
-
-        if self.store.len(tail)? >= page_size {
-            assert!(self.store.len(tail)? == page_size, "tail too large");
-            let buf = &mut vec![0; page_size as usize];
-            let n = self.store.read_at(tail, 0, buf)?;
-            assert_eq!(n, buf.len());
-            self.store.transaction(|| {
+            if self.store.len(tail)? >= page_size {
+                assert!(self.store.len(tail)? == page_size, "tail too large");
+                let buf = &mut vec![0; page_size as usize];
+                let n = self.store.read_at(tail, 0, buf)?;
+                assert_eq!(n, buf.len());
                 self.append_page(buf)?;
                 self.store.clear(tail)?;
-                Ok(())
-            })?;
-        }
+            }
 
-        let mut it = data.chunks_exact(page_size as usize);
-        for page in &mut it {
-            self.append_page(page)?;
-        }
+            let mut it = data.chunks_exact(page_size as usize);
+            for page in &mut it {
+                self.append_page(page)?;
+            }
 
-        self.store.append(tail, it.remainder())?;
-        assert!(self.store.len(tail)? < page_size, "tail is full");
+            self.store.append(tail, it.remainder())?;
+            assert!(self.store.len(tail)? < page_size, "tail is full");
 
-        Ok(offset)
+            Ok(offset)
+        })
     }
 
     pub fn append_many(&self, data: &[&[u8]]) -> io::Result<u64> {
