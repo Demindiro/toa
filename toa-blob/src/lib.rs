@@ -378,7 +378,7 @@ where
     pub fn size_on_disk(&self) -> io::Result<u64> {
         let s = self.data.borrow();
         let mut n = s.log_len;
-        for x in s.blobs.iter() {
+        for (_, x) in s.blobs.iter() {
             n += x.len;
         }
         Ok(n)
@@ -776,6 +776,24 @@ impl BlobStoreData {
     }
 }
 
+// It would be more appropriate to implement the check on BlobStore but
+// Rust still doesn't have a sane, safe way to move out of Droppable types
+impl Drop for BlobStoreData {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // avoid double panic
+            return;
+        }
+        for (id, blob) in self.blobs.iter() {
+            debug_assert!(blob.flushed <= blob.tail.len(), "flushed exceeds tail size");
+            assert!(
+                blob.flushed == blob.tail.len(),
+                "unflushed data for blob {id} (did you forget to call BlobStore::flush()?)"
+            );
+        }
+    }
+}
+
 impl<'a, T> BlobRef<'a, T> {
     /// # Note
     ///
@@ -1040,8 +1058,11 @@ impl BlobTable {
         self.table.get_mut(id.0 as usize).and_then(|x| x.take())
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Blob> {
-        self.table.iter().flat_map(|x| x.as_ref())
+    fn iter(&self) -> impl Iterator<Item = (BlobId, &Blob)> {
+        self.table
+            .iter()
+            .enumerate()
+            .flat_map(|(i, x)| x.as_ref().map(|x| (BlobId(i as u32), x)))
     }
 }
 
