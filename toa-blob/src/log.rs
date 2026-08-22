@@ -26,6 +26,7 @@ pub mod entry {
         9 CLEAR_BLOB
         10 TRANSACTION_BEGIN
         11 TRANSACTION_END
+        12 TRANSACTION_ABORT
         84 HEADER
     }
 
@@ -124,6 +125,13 @@ pub mod entry {
         pub _pad_0: [u8; 7],
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    pub struct TransactionAbort {
+        pub ty: u8,
+        pub _pad_0: [u8; 7],
+    }
+
     #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
     #[repr(C)]
     pub struct Header {
@@ -175,6 +183,7 @@ pub enum LogEntry<'a> {
     },
     TransactionBegin,
     TransactionEnd,
+    TransactionAbort,
 }
 
 pub struct LogEnd {
@@ -205,6 +214,7 @@ impl fmt::Display for LogEntry<'_> {
             Self::NextLogZone { zones: [a, b] } => write!(f, "next log zone {a} {b}"),
             Self::TransactionBegin => write!(f, "transaction begin"),
             Self::TransactionEnd => write!(f, "transaction end"),
+            Self::TransactionAbort => write!(f, "transaction abort"),
         }
     }
 }
@@ -420,6 +430,10 @@ where
                 entry::ty::TRANSACTION_END => {
                     k += 1;
                     (cb)(LogEntry::TransactionEnd)?;
+                }
+                entry::ty::TRANSACTION_ABORT => {
+                    k += 1;
+                    (cb)(LogEntry::TransactionAbort)?;
                 }
                 entry::ty::HEADER => k += 2,
                 ty => {

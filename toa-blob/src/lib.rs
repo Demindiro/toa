@@ -82,6 +82,7 @@ pub struct BlobStore<U> {
     data: RefCell<BlobStoreData>,
 }
 
+#[derive(Clone)]
 struct BlobStoreData {
     generation: u64,
     blobs: BlobTable,
@@ -149,6 +150,7 @@ pub struct DataSmallerThanZone;
 ///
 /// To ensure blocks are written as a whole there is a second tail buffer,
 /// which is appended to until it is block-sized.
+#[derive(Clone)]
 struct Blob {
     name: Rc<[u8]>,
     /// `None` if this blob is unzoned.
@@ -158,7 +160,7 @@ struct Blob {
     flushed: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BlobTable {
     table: Vec<Option<Blob>>,
 }
@@ -220,7 +222,7 @@ where
     pub fn load(zone_dev: U) -> io::Result<Self> {
         let mut store = BlobStoreData::new(0, zone_dev.zone_count());
 
-        let mut in_transaction = false;
+        let mut in_transaction = None;
 
         let log_end = log::iter_with(&zone_dev, |entry| {
             match entry {
@@ -245,33 +247,40 @@ where
                     store.mark_zone_allocated(store.log_zone_b)?;
                 }
                 log::LogEntry::TransactionBegin => {
-                    if in_transaction {
+                    if in_transaction.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "transaction_begin while already inside transaction",
                         ));
                     }
-                    in_transaction = true;
+                    in_transaction = Some(store.clone());
                 }
                 log::LogEntry::TransactionEnd => {
-                    if !in_transaction {
+                    let Some(_) = in_transaction.take() else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "transaction_end outside of transaction",
                         ));
-                    }
-                    in_transaction = false;
+                    };
+                }
+                log::LogEntry::TransactionAbort => {
+                    let Some(prev_state) = in_transaction.take() else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transaction_abort outside of transaction",
+                        ));
+                    };
+                    store = prev_state;
                 }
             }
             Ok(())
         })?;
 
-        if in_transaction {
-            // TODO should we attempt rollback? or leave that to fsck?
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unterminated transaction",
-            ));
+        let emit_transaction_abort = in_transaction.is_some();
+
+        if let Some(prev_state) = in_transaction {
+            // Automatically rollback transaction
+            store = prev_state;
         }
 
         log::LogEnd {
@@ -280,10 +289,14 @@ where
             zone_head: store.log_zone_head,
         } = log_end;
 
-        Ok(BlobStore {
+        let store = BlobStore {
             zone_dev,
             data: store.into(),
-        })
+        };
+        if emit_transaction_abort {
+            store.log_transaction_abort(&mut store.data.borrow_mut())?;
+        }
+        Ok(store)
     }
 
     pub fn flush(&self) -> io::Result<()> {
@@ -510,6 +523,14 @@ where
     fn log_transaction_end(&self, s: &mut BlobStoreData) -> io::Result<()> {
         let hdr = log::entry::TransactionEnd {
             ty: log::entry::ty::TRANSACTION_END,
+            _pad_0: [0; 7],
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
+    }
+
+    fn log_transaction_abort(&self, s: &mut BlobStoreData) -> io::Result<()> {
+        let hdr = log::entry::TransactionAbort {
+            ty: log::entry::ty::TRANSACTION_ABORT,
             _pad_0: [0; 7],
         };
         self.log_push(s, &[bytemuck::bytes_of(&hdr)])

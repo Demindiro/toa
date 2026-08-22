@@ -212,6 +212,17 @@ Must be preceded by _Begin Transaction_.
 | u8    | (type)                 |
 | u56   | (pad)                  |
 
+##### 12. Abort Transaction
+
+Abort the current transaction, rewinding all actions inside this transaction.
+
+Must be preceded by _Begin Transaction_.
+
+| type  | name                   |
+|:----- |:---------------------- |
+| u8    | (type)                 |
+| u56   | (pad)                  |
+
 ##### 84. Header
 
 Every log zone must start with this header.
