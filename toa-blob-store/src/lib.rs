@@ -46,7 +46,15 @@ pub trait BlobStoreExt: BlobStore {
         match self.read_at(blob, offset, buf) {
             Ok(n) if n == buf.len() => Ok(true),
             Ok(0) => Ok(false),
-            Ok(_) => todo!(),
+            Ok(n) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "read_at_exact_or_none: partial data (offset {}, wanted {}, got {})",
+                    offset,
+                    buf.len(),
+                    n
+                ),
+            )),
             Err(e) => Err(e),
         }
     }

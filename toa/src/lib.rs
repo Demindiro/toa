@@ -1,5 +1,11 @@
 #![forbid(unsafe_code, unused_must_use, mismatched_lifetime_syntaxes)]
 
+macro_rules! trace {
+    () => {
+        |e| $crate::trace_err(e, std::panic::Location::caller())
+    };
+}
+
 pub mod accel;
 
 pub use toa_blob_compress::{BlobRef, Compression, PageSize};
@@ -156,6 +162,7 @@ where
         let (Some(data), Some(refs)) = (data, refs) else {
             return Ok(None);
         };
+        load_refs(&refs, &mut store)?;
         let meta = store
             .store
             .find("meta.bin")?
@@ -531,7 +538,8 @@ where
         let mut offt = accel.top_cookie().data_offset_full;
         while self
             .chunks_full
-            .read_at_exact_or_none(store, offt, &mut buf)?
+            .read_at_exact_or_none(store, offt, &mut buf)
+            .map_err(trace!())?
         {
             let key = toa_hash::hash_chunk(&buf);
             accel.add(&key, IndexEntry(FileRef::new_chunk_full(offt).0))?;
@@ -546,16 +554,30 @@ where
         A: accel::Index,
     {
         let MapStore { store, accel } = store;
+        let len = self.chunks_partial.len(store).map_err(trace!())?;
+        if len % 8 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "partial chunks blob is not a multiple of 8 (missing {} bytes)",
+                    8 - len % 8
+                ),
+            ))
+            .map_err(trace!());
+        }
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = accel.top_cookie().data_offset_partial;
         while self
             .chunks_partial
-            .read_at_exact_or_none(store, offt, len)?
+            .read_at_exact_or_none(store, offt, len)
+            .map_err(trace!())?
         {
             let len = u16::from_le_bytes(*len) >> 3;
             let buf = &mut buf[..usize::from(len)];
-            self.chunks_partial.read_at_exact(store, offt + 2, buf)?;
+            self.chunks_partial
+                .read_at_exact(store, offt + 2, buf)
+                .map_err(trace!())?;
             let key = toa_hash::hash_chunk(buf);
             accel.add(&key, IndexEntry(FileRef::new_chunk_partial(offt).0))?;
             offt += align8(2 + u64::from(len));
@@ -569,9 +591,20 @@ where
         A: accel::Index,
     {
         let MapStore { store, accel } = store;
-        let mut buf = [0; 80];
         let mut offt = accel.top_cookie().data_offset_pairs;
-        while store.read_at_exact_or_none(&self.pairs, offt, &mut buf)? {
+        let len = store.len(&self.pairs).map_err(trace!())?;
+        if len % 80 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "pairs blob is not a multiple of 80 (missing {} bytes)",
+                    80 - len % 80
+                ),
+            ))
+            .map_err(trace!());
+        }
+        while offt < len {
+            let buf = store.read_at_array(&self.pairs, offt).map_err(trace!())?;
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
             accel.add(&key, IndexEntry(FileRef::new_pair(offt).0))?;
@@ -1038,6 +1071,34 @@ impl BlobStore for Dir {
     }
 }
 
+fn load_refs<S, A>(blob: &S::BlobHandle, store: &mut MapStore<S, A>) -> io::Result<()>
+where
+    S: BlobStore,
+    A: accel::Index,
+{
+    let MapStore { store, accel } = store;
+    let mut offt = accel.top_cookie().refs_offset_pairs;
+    let len = store.len(blob).map_err(trace!())?;
+    if len % 64 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refs blob is not a multiple of 64 (missing {} bytes)",
+                64 - len % 64
+            ),
+        ))
+        .map_err(trace!());
+    }
+    while offt < len {
+        let buf = store.read_at_array(blob, offt).map_err(trace!())?;
+        let [x, y] = bytes_to_refs(buf);
+        let key = toa_hash::hash_refs(x, y);
+        accel.add(&key, IndexEntry(FileRef::new_refs(offt).0))?;
+        offt += buf.len() as u64;
+    }
+    Ok(())
+}
+
 fn align8<T>(x: T) -> T
 where
     T: ops::Add<Output = T> + ops::Not<Output = T> + ops::BitAnd<Output = T> + From<u8>,
@@ -1050,6 +1111,15 @@ fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
     let y = Hash::from_slice(&bytes[32..64]);
     let len = u128::from_le_bytes(bytes[64..].try_into().expect("16 bytes"));
     ([x, y], len)
+}
+
+fn bytes_to_refs(bytes: [u8; 64]) -> [Hash; 2] {
+    let (x, y) = bytes.split_at(32);
+    [x, y].map(Hash::from_slice)
+}
+
+fn trace_err(err: io::Error, loc: &std::panic::Location<'_>) -> io::Error {
+    io::Error::new(err.kind(), format!("{err}\nat {loc}"))
 }
 
 #[cfg(test)]

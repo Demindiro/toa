@@ -82,6 +82,7 @@ pub struct BlobStore<U> {
     data: RefCell<BlobStoreData>,
 }
 
+#[derive(Clone)]
 struct BlobStoreData {
     generation: u64,
     blobs: BlobTable,
@@ -149,6 +150,7 @@ pub struct DataSmallerThanZone;
 ///
 /// To ensure blocks are written as a whole there is a second tail buffer,
 /// which is appended to until it is block-sized.
+#[derive(Clone)]
 struct Blob {
     name: Rc<[u8]>,
     /// `None` if this blob is unzoned.
@@ -158,7 +160,7 @@ struct Blob {
     flushed: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BlobTable {
     table: Vec<Option<Blob>>,
 }
@@ -204,27 +206,23 @@ where
             zone_count: zone_dev.zone_count().get().into(),
             _pad_0: Default::default(),
         };
-        let hdr = bytemuck::bytes_of(&hdr);
-        let buf = &mut vec![0; usize::from(zone_dev.block_size())];
-        buf[..hdr.len()].copy_from_slice(hdr);
-        zone_dev.append(0, 0, buf)?;
-        zone_dev.append(nr_zones.get() - 1, 0, buf)?;
-
-        let mut data = BlobStoreData::new(generation, nr_zones);
-        data.log_zone_head = zone_dev.block_size().into();
+        let data = BlobStoreData::new(generation, nr_zones);
 
         let s = Self {
             zone_dev,
             data: data.into(),
         };
-        s.log_terminate(&mut s.data.borrow_mut())?;
+        let mut sd = s.data.borrow_mut();
+        s.log_push(&mut sd, &[bytemuck::bytes_of(&hdr)])?;
+        s.log_flush(&mut sd)?;
+        drop(sd);
         Ok(s)
     }
 
     pub fn load(zone_dev: U) -> io::Result<Self> {
         let mut store = BlobStoreData::new(0, zone_dev.zone_count());
 
-        let mut in_transaction = false;
+        let mut in_transaction = None;
 
         let log_end = log::iter_with(&zone_dev, |entry| {
             match entry {
@@ -249,33 +247,40 @@ where
                     store.mark_zone_allocated(store.log_zone_b)?;
                 }
                 log::LogEntry::TransactionBegin => {
-                    if in_transaction {
+                    if in_transaction.is_some() {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "transaction_begin while already inside transaction",
                         ));
                     }
-                    in_transaction = true;
+                    in_transaction = Some(store.clone());
                 }
                 log::LogEntry::TransactionEnd => {
-                    if !in_transaction {
+                    let Some(_) = in_transaction.take() else {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "transaction_end outside of transaction",
                         ));
-                    }
-                    in_transaction = false;
+                    };
+                }
+                log::LogEntry::TransactionAbort => {
+                    let Some(prev_state) = in_transaction.take() else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "transaction_abort outside of transaction",
+                        ));
+                    };
+                    store = prev_state;
                 }
             }
             Ok(())
         })?;
 
-        if in_transaction {
-            // TODO should we attempt rollback? or leave that to fsck?
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unterminated transaction",
-            ));
+        let emit_transaction_abort = in_transaction.is_some();
+
+        if let Some(prev_state) = in_transaction {
+            // Automatically rollback transaction
+            store = prev_state;
         }
 
         log::LogEnd {
@@ -284,14 +289,21 @@ where
             zone_head: store.log_zone_head,
         } = log_end;
 
-        Ok(BlobStore {
+        let store = BlobStore {
             zone_dev,
             data: store.into(),
-        })
+        };
+        if emit_transaction_abort {
+            store.log_transaction_abort(&mut store.data.borrow_mut())?;
+        }
+        Ok(store)
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        let s = &mut *self.data.borrow_mut();
+        self.flush_s(&mut self.data.borrow_mut())
+    }
+
+    fn flush_s(&self, s: &mut BlobStoreData) -> io::Result<()> {
         let blob_num = s.blobs.table.len() as u32;
         for id in (0..blob_num).map(BlobId) {
             if s.blobs.get(id).is_some() {
@@ -356,6 +368,12 @@ where
     fn transaction_end(&self, data: &mut BlobStoreData) -> io::Result<()> {
         data.transaction_counter -= 1;
         if data.transaction_counter == 0 {
+            // TODO should we make a distinction between
+            // - transaction as just an atomic unit
+            // - transaction as atomic unit *and* persisted to disk
+            // ?
+            // at minimum, we need to fix blob append so it gets log entries before transaction end
+            self.flush_s(data)?;
             self.log_transaction_end(data)?;
         }
         Ok(())
@@ -382,7 +400,7 @@ where
     pub fn size_on_disk(&self) -> io::Result<u64> {
         let s = self.data.borrow();
         let mut n = s.log_len;
-        for x in s.blobs.iter() {
+        for (_, x) in s.blobs.iter() {
             n += x.len;
         }
         Ok(n)
@@ -510,9 +528,22 @@ where
         self.log_push(s, &[bytemuck::bytes_of(&hdr)])
     }
 
+    fn log_transaction_abort(&self, s: &mut BlobStoreData) -> io::Result<()> {
+        let hdr = log::entry::TransactionAbort {
+            ty: log::entry::ty::TRANSACTION_ABORT,
+            _pad_0: [0; 7],
+        };
+        self.log_push(s, &[bytemuck::bytes_of(&hdr)])
+    }
+
     fn log_push(&self, s: &mut BlobStoreData, data: &[&[u8]]) -> io::Result<()> {
         let len = data.iter().fold(0, |s, x| s + x.len());
         self.log_reserve(s, len)?;
+        assert!(
+            u64::try_from(len).expect("usize <= u64") < self.log_remaining(s),
+            "log entry too large (log size: {len}, remaining: {})",
+            self.log_remaining(s),
+        );
         s.log.extend(data.iter().copied().flatten());
         s.log_pad();
         Ok(())
@@ -532,8 +563,6 @@ where
             return Ok(());
         }
         let block_size = usize::from(self.zone_dev.block_size());
-        let zone_blocks = u64::from(self.zone_dev.zone_blocks());
-        let zone_size = zone_blocks * block_size as u64;
 
         assert!(
             data.log.len() <= block_size,
@@ -551,7 +580,7 @@ where
         data.log.clear();
 
         // allocate a new zone if we nearly exhausted the current one
-        let rem = zone_size - data.log_zone_head;
+        let rem = self.log_remaining(data);
 
         if rem <= block_size as u64 {
             // TODO don't panic
@@ -596,6 +625,18 @@ where
             [_, _] => unreachable!("ZoneDev cannot mix zoned and unzoned regions"),
         }
         Ok(())
+    }
+
+    fn log_remaining(&self, s: &mut BlobStoreData) -> u64 {
+        let block_size = usize::from(self.zone_dev.block_size());
+        let zone_blocks = u64::from(self.zone_dev.zone_blocks());
+        let zone_size = zone_blocks * block_size as u64;
+        zone_size.checked_sub(s.log_zone_head).unwrap_or_else(|| {
+            unreachable!(
+                "log_zone_head should not exceed zone_size (log_zone_head: {}, zone_size: {})",
+                s.log_zone_head, zone_size
+            )
+        })
     }
 }
 
@@ -780,6 +821,24 @@ impl BlobStoreData {
     }
 }
 
+// It would be more appropriate to implement the check on BlobStore but
+// Rust still doesn't have a sane, safe way to move out of Droppable types
+impl Drop for BlobStoreData {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // avoid double panic
+            return;
+        }
+        for (id, blob) in self.blobs.iter() {
+            debug_assert!(blob.flushed <= blob.tail.len(), "flushed exceeds tail size");
+            assert!(
+                blob.flushed == blob.tail.len(),
+                "unflushed data for blob {id} (did you forget to call BlobStore::flush()?)"
+            );
+        }
+    }
+}
+
 impl<'a, T> BlobRef<'a, T> {
     /// # Note
     ///
@@ -942,6 +1001,27 @@ where
         }
     }
 
+    pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.len()?
+            .checked_sub(offset)
+            .and_then(|x| x.checked_sub(buf.len() as u64))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "offset + buffer length exceeds blob length",
+                )
+            })?;
+        let n = self.read_at(offset, buf)?;
+        debug_assert_eq!(n, buf.len());
+        Ok(())
+    }
+
+    pub fn read_array_at<const N: usize>(&self, offset: u64) -> io::Result<[u8; N]> {
+        let mut buf = [0; N];
+        self.read_exact_at(offset, &mut buf)?;
+        Ok(buf)
+    }
+
     pub fn len(&self) -> io::Result<u64> {
         Ok(self.store.data.borrow().blobs[self.id].total_len())
     }
@@ -1044,8 +1124,11 @@ impl BlobTable {
         self.table.get_mut(id.0 as usize).and_then(|x| x.take())
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Blob> {
-        self.table.iter().flat_map(|x| x.as_ref())
+    fn iter(&self) -> impl Iterator<Item = (BlobId, &Blob)> {
+        self.table
+            .iter()
+            .enumerate()
+            .flat_map(|(i, x)| x.as_ref().map(|x| (BlobId(i as u32), x)))
     }
 }
 

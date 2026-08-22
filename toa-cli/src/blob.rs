@@ -1,5 +1,8 @@
 use crate::{Result, args_end, load_store, usage};
-use std::path::PathBuf;
+use std::{
+    io::{self, Read, Write},
+    path::PathBuf,
+};
 use toa::BlobStore;
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
@@ -9,6 +12,8 @@ where
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
         "debug" => cmd_debug(procname, args),
+        "fsck" => cmd_fsck(procname, args),
+        "get" => cmd_get(procname, args),
         "ls" => cmd_ls(procname, args),
         _ => Err(usage(procname)),
     }
@@ -23,6 +28,47 @@ where
         "log" => cmd_debug_log(procname, args),
         _ => Err(usage(procname)),
     }
+}
+
+pub fn cmd_fsck<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let cmd = args.next().ok_or_else(|| usage(procname))?;
+    match &*cmd {
+        "pad-blob" => cmd_fsck_pad_blob(procname, args),
+        "set-blob" => cmd_fsck_set_blob(procname, args),
+        _ => Err(usage(procname)),
+    }
+}
+
+pub fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let blob = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let store = PathBuf::from(store);
+    let store = load_store(&store, false)?;
+    let blob = store
+        .find(blob.as_bytes())?
+        .ok_or_else(|| "blob not found")?;
+
+    let buf = &mut vec![0; 1 << 16];
+    let mut offset = 0;
+    let mut out = io::stdout().lock();
+    loop {
+        let n = blob.read_at(offset, buf)?;
+        if n == 0 {
+            break;
+        }
+        offset += n as u64;
+        out.write_all(&buf[..n])?;
+    }
+
+    Ok(())
 }
 
 pub fn cmd_debug_log<A>(procname: &str, mut args: A) -> Result<()>
@@ -52,6 +98,62 @@ where
     Ok(())
 }
 
+pub fn cmd_fsck_pad_blob<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let blob = args.next().ok_or_else(|| usage(procname))?;
+    let len = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let len = len.parse::<u64>()?;
+
+    let store = PathBuf::from(store);
+    let store = load_store(&store, true)?;
+    let blob = store
+        .find(blob.as_bytes())?
+        .ok_or_else(|| "blob not found")?;
+
+    blob.append(&vec![0; usize::try_from(len).unwrap()])?;
+
+    store.flush()?;
+
+    Ok(())
+}
+
+pub fn cmd_fsck_set_blob<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let blob = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let store = PathBuf::from(store);
+    let store = load_store(&store, true)?;
+    let blob = store
+        .find(blob.as_bytes())?
+        .ok_or_else(|| "blob not found")?;
+
+    let mut inp = io::stdin().lock();
+    let buf = &mut vec![0; 1 << 16];
+    store.transaction(|| {
+        blob.clear()?;
+        loop {
+            let n = inp.read(buf)?;
+            if n == 0 {
+                break;
+            }
+            blob.append(&buf[..n])?;
+        }
+        Ok(())
+    })?;
+    store.flush()?;
+
+    Ok(())
+}
+
 pub fn cmd_ls<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -76,9 +178,9 @@ where
         let len = store.len(&blob)?;
         if fmt_iec {
             let len = crate::fmt_size_iec_short(len);
-            println!("{len:>12} {name}");
+            println!("{len:>15} {blob:>3} {name}");
         } else {
-            println!("{len:>12} {name}");
+            println!("{len:>15} {blob:>3} {name}");
         }
     }
 

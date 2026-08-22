@@ -22,7 +22,7 @@ const REVISION: &str = match env!("GIT_DIFF").as_bytes() {
 
 type Result<T> = core::result::Result<T, Box<dyn Error>>;
 type Store = BlobStore<FileBlocks>;
-type Accel = toa::accel::sled::Db;
+type Accel = Box<dyn toa::accel::Index>;
 type InnerToa = toa::Toa<Store, Accel>;
 type Object<'a> = toa::Object<'a, Store, Accel>;
 
@@ -46,8 +46,14 @@ struct Stat {
 impl ToaToa {
     fn load(path: &Path, accel: &Path, write: bool) -> Result<Self> {
         let store = load_store(path, write)?;
-        let accel = toa::accel::sled::open(accel)
-            .map_err(|e| format!("failed to open accelerator: {e:?}"))?;
+        let accel: Box<dyn toa::accel::Index> = match accel.to_str() {
+            Some(":memory:") => Box::new(BTreeMap::default()),
+            Some(_) | None => {
+                let accel = toa::accel::sled::open(accel)
+                    .map_err(|e| format!("failed to open accelerator: {e:?}"))?;
+                Box::new(accel)
+            }
+        };
         let inner = toa::Toa::load(store, accel)?.ok_or("no store initialized")?;
         Ok(Self { inner })
     }
@@ -89,9 +95,11 @@ impl ToaToa {
 
     fn dir_to_btree(&self, [data, refs]: [Hash; 2]) -> Result<BTreeMap<Box<str>, Hash>> {
         let mut map = BTreeMap::default();
-        let Ok(Some(data)) = self.inner.get(&data) else {
-            todo!()
-        };
+        let data = self
+            .inner
+            .get(&data)
+            .map_err(|e| format!("failed to get dir data object: {e:?}"))?
+            .ok_or("dir data object not found")?;
         let Object::Data(data) = data else { todo!() };
         let type_id = data.read_array::<16>(0).unwrap();
         assert_eq!(type_id, TYPE_ID_DIR);
@@ -200,13 +208,19 @@ fn usage(procname: &str) -> Box<dyn Error> {
 usage: {procname} <cmd> [...]
     init <store>
         initialize a store
+    root <store>
+        get the current root object of the store
     get <store> <accel> <key>
         dump object data to stdout (may contain raw bytes!)
     scrub <store> <accel>
         verify store integrity
+    blob get <store> <blob>
+        dump the contents of a blob to stdout
     blob ls <store> [--iec]
         list all blobs
         --iec     print sizes in IEC units.
+    blob fsck pad-blob <store> <blob> <num>
+        append the given number of (all-zero) bytes to a blob
     blob debug log <store>
         dump log
     unix add <store> <accel> <name> <directory> [-e <skip>]
@@ -376,6 +390,23 @@ where
     Ok(())
 }
 
+fn cmd_root<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let store = load_store(&PathBuf::from(store), false)?;
+    // TODO add helper function to toa crate
+    // we want to avoid loading an Index as it is redundant to do so here
+    let meta = store.find(b"meta.bin")?.unwrap();
+    let root = Hash::from_bytes(meta.read_array_at(16)?);
+    println!("{root}");
+
+    Ok(())
+}
+
 fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -462,6 +493,7 @@ fn start() -> Result<()> {
     match &*cmd {
         "init" => cmd_init(procname, args),
         "get" => cmd_get(procname, args),
+        "root" => cmd_root(procname, args),
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
         "blob" => blob::cmd(procname, args),
