@@ -162,6 +162,7 @@ where
         let (Some(data), Some(refs)) = (data, refs) else {
             return Ok(None);
         };
+        load_refs(&refs, &mut store)?;
         let meta = store
             .store
             .find("meta.bin")?
@@ -1059,6 +1060,34 @@ impl BlobStore for Dir {
     }
 }
 
+fn load_refs<S, A>(blob: &S::BlobHandle, store: &mut MapStore<S, A>) -> io::Result<()>
+where
+    S: BlobStore,
+    A: accel::Index,
+{
+    let MapStore { store, accel } = store;
+    let mut offt = accel.top_cookie().refs_offset_pairs;
+    let len = store.len(blob).map_err(trace!())?;
+    if len % 64 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refs blob is not a multiple of 64 (missing {} bytes)",
+                64 - len % 64
+            ),
+        ))
+        .map_err(trace!());
+    }
+    while offt < len {
+        let buf = store.read_at_array(blob, offt).map_err(trace!())?;
+        let [x, y] = bytes_to_refs(buf);
+        let key = toa_hash::hash_refs(x, y);
+        accel.add(&key, IndexEntry(FileRef::new_refs(offt).0))?;
+        offt += buf.len() as u64;
+    }
+    Ok(())
+}
+
 fn align8<T>(x: T) -> T
 where
     T: ops::Add<Output = T> + ops::Not<Output = T> + ops::BitAnd<Output = T> + From<u8>,
@@ -1071,6 +1100,11 @@ fn bytes_to_pair(bytes: [u8; 80]) -> ([Hash; 2], u128) {
     let y = Hash::from_slice(&bytes[32..64]);
     let len = u128::from_le_bytes(bytes[64..].try_into().expect("16 bytes"));
     ([x, y], len)
+}
+
+fn bytes_to_refs(bytes: [u8; 64]) -> [Hash; 2] {
+    let (x, y) = bytes.split_at(32);
+    [x, y].map(Hash::from_slice)
 }
 
 fn trace_err(err: io::Error, loc: &std::panic::Location<'_>) -> io::Error {
