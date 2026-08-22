@@ -206,6 +206,8 @@ fn usage(procname: &str) -> Box<dyn Error> {
 usage: {procname} <cmd> [...]
     init <store>
         initialize a store
+    root <store>
+        get the current root object of the store
     get <store> <accel> <key>
         dump object data to stdout (may contain raw bytes!)
     scrub <store> <accel>
@@ -384,6 +386,23 @@ where
     Ok(())
 }
 
+fn cmd_root<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let store = load_store(&PathBuf::from(store), false)?;
+    // TODO add helper function to toa crate
+    // we want to avoid loading an Index as it is redundant to do so here
+    let meta = store.find(b"meta.bin")?.unwrap();
+    let root = Hash::from_bytes(meta.read_array_at(16)?);
+    println!("{root}");
+
+    Ok(())
+}
+
 fn cmd_scrub<A>(procname: &str, mut args: A) -> Result<()>
 where
     A: Iterator<Item = String>,
@@ -470,6 +489,7 @@ fn start() -> Result<()> {
     match &*cmd {
         "init" => cmd_init(procname, args),
         "get" => cmd_get(procname, args),
+        "root" => cmd_root(procname, args),
         "scrub" => cmd_scrub(procname, args),
         "unix" => unix::cmd(procname, args),
         "blob" => blob::cmd(procname, args),

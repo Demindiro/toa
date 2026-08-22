@@ -971,6 +971,27 @@ where
         }
     }
 
+    pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.len()?
+            .checked_sub(offset)
+            .and_then(|x| x.checked_sub(buf.len() as u64))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "offset + buffer length exceeds blob length",
+                )
+            })?;
+        let n = self.read_at(offset, buf)?;
+        debug_assert_eq!(n, buf.len());
+        Ok(())
+    }
+
+    pub fn read_array_at<const N: usize>(&self, offset: u64) -> io::Result<[u8; N]> {
+        let mut buf = [0; N];
+        self.read_exact_at(offset, &mut buf)?;
+        Ok(buf)
+    }
+
     pub fn len(&self) -> io::Result<u64> {
         Ok(self.store.data.borrow().blobs[self.id].total_len())
     }
