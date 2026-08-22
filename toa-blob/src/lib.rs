@@ -287,7 +287,10 @@ where
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        let s = &mut *self.data.borrow_mut();
+        self.flush_s(&mut self.data.borrow_mut())
+    }
+
+    fn flush_s(&self, s: &mut BlobStoreData) -> io::Result<()> {
         let blob_num = s.blobs.table.len() as u32;
         for id in (0..blob_num).map(BlobId) {
             if s.blobs.get(id).is_some() {
@@ -352,6 +355,12 @@ where
     fn transaction_end(&self, data: &mut BlobStoreData) -> io::Result<()> {
         data.transaction_counter -= 1;
         if data.transaction_counter == 0 {
+            // TODO should we make a distinction between
+            // - transaction as just an atomic unit
+            // - transaction as atomic unit *and* persisted to disk
+            // ?
+            // at minimum, we need to fix blob append so it gets log entries before transaction end
+            self.flush_s(data)?;
             self.log_transaction_end(data)?;
         }
         Ok(())
