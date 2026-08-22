@@ -579,12 +579,20 @@ where
         A: accel::Index,
     {
         let MapStore { store, accel } = store;
-        let mut buf = [0; 80];
         let mut offt = accel.top_cookie().data_offset_pairs;
-        while store
-            .read_at_exact_or_none(&self.pairs, offt, &mut buf)
-            .map_err(trace!())?
-        {
+        let len = store.len(&self.pairs).map_err(trace!())?;
+        if len % 80 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "pairs blob is not a multiple of 80 (missing {} bytes)",
+                    80 - len % 80
+                ),
+            ))
+            .map_err(trace!());
+        }
+        while offt < len {
+            let buf = store.read_at_array(&self.pairs, offt).map_err(trace!())?;
             let ([x, y], len) = bytes_to_pair(buf);
             let key = toa_hash::hash_pair(x, y, len);
             accel.add(&key, IndexEntry(FileRef::new_pair(offt).0))?;
