@@ -1,5 +1,8 @@
 use crate::{Result, args_end, load_store, usage};
-use std::path::PathBuf;
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+};
 use toa::BlobStore;
 
 pub fn cmd<A>(procname: &str, mut args: A) -> Result<()>
@@ -10,6 +13,7 @@ where
     match &*cmd {
         "debug" => cmd_debug(procname, args),
         "fsck" => cmd_fsck(procname, args),
+        "get" => cmd_get(procname, args),
         "ls" => cmd_ls(procname, args),
         _ => Err(usage(procname)),
     }
@@ -35,6 +39,35 @@ where
         "pad-blob" => cmd_fsck_pad_blob(procname, args),
         _ => Err(usage(procname)),
     }
+}
+
+pub fn cmd_get<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let blob = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let store = PathBuf::from(store);
+    let store = load_store(&store, false)?;
+    let blob = store
+        .find(blob.as_bytes())?
+        .ok_or_else(|| "blob not found")?;
+
+    let buf = &mut vec![0; 1 << 16];
+    let mut offset = 0;
+    let mut out = io::stdout().lock();
+    loop {
+        let n = blob.read_at(offset, buf)?;
+        if n == 0 {
+            break;
+        }
+        offset += n as u64;
+        out.write_all(&buf[..n])?;
+    }
+
+    Ok(())
 }
 
 pub fn cmd_debug_log<A>(procname: &str, mut args: A) -> Result<()>

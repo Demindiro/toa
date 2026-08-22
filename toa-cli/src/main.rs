@@ -214,6 +214,8 @@ usage: {procname} <cmd> [...]
         dump object data to stdout (may contain raw bytes!)
     scrub <store> <accel>
         verify store integrity
+    blob get <store> <blob>
+        dump the contents of a blob to stdout
     blob ls <store> [--iec]
         list all blobs
         --iec     print sizes in IEC units.
