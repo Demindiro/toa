@@ -554,6 +554,17 @@ where
         A: accel::Index,
     {
         let MapStore { store, accel } = store;
+        let len = self.chunks_partial.len(store).map_err(trace!())?;
+        if len % 8 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "partial chunks blob is not a multiple of 8 (missing {} bytes)",
+                    8 - len % 8
+                ),
+            ))
+            .map_err(trace!());
+        }
         let mut buf = vec![0; CHUNK_SIZE as usize];
         let len = &mut [0; 2];
         let mut offt = accel.top_cookie().data_offset_partial;
