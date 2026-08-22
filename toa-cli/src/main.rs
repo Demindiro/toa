@@ -95,9 +95,11 @@ impl ToaToa {
 
     fn dir_to_btree(&self, [data, refs]: [Hash; 2]) -> Result<BTreeMap<Box<str>, Hash>> {
         let mut map = BTreeMap::default();
-        let Ok(Some(data)) = self.inner.get(&data) else {
-            todo!()
-        };
+        let data = self
+            .inner
+            .get(&data)
+            .map_err(|e| format!("failed to get dir data object: {e:?}"))?
+            .ok_or("dir data object not found")?;
         let Object::Data(data) = data else { todo!() };
         let type_id = data.read_array::<16>(0).unwrap();
         assert_eq!(type_id, TYPE_ID_DIR);
