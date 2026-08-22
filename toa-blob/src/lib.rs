@@ -509,6 +509,11 @@ where
     fn log_push(&self, s: &mut BlobStoreData, data: &[&[u8]]) -> io::Result<()> {
         let len = data.iter().fold(0, |s, x| s + x.len());
         self.log_reserve(s, len)?;
+        assert!(
+            u64::try_from(len).expect("usize <= u64") < self.log_remaining(s),
+            "log entry too large (log size: {len}, remaining: {})",
+            self.log_remaining(s),
+        );
         s.log.extend(data.iter().copied().flatten());
         s.log_pad();
         Ok(())
@@ -528,8 +533,6 @@ where
             return Ok(());
         }
         let block_size = usize::from(self.zone_dev.block_size());
-        let zone_blocks = u64::from(self.zone_dev.zone_blocks());
-        let zone_size = zone_blocks * block_size as u64;
 
         assert!(
             data.log.len() <= block_size,
@@ -547,7 +550,7 @@ where
         data.log.clear();
 
         // allocate a new zone if we nearly exhausted the current one
-        let rem = zone_size - data.log_zone_head;
+        let rem = self.log_remaining(data);
 
         if rem <= block_size as u64 {
             // TODO don't panic
@@ -592,6 +595,18 @@ where
             [_, _] => unreachable!("ZoneDev cannot mix zoned and unzoned regions"),
         }
         Ok(())
+    }
+
+    fn log_remaining(&self, s: &mut BlobStoreData) -> u64 {
+        let block_size = usize::from(self.zone_dev.block_size());
+        let zone_blocks = u64::from(self.zone_dev.zone_blocks());
+        let zone_size = zone_blocks * block_size as u64;
+        zone_size.checked_sub(s.log_zone_head).unwrap_or_else(|| {
+            unreachable!(
+                "log_zone_head should not exceed zone_size (log_zone_head: {}, zone_size: {})",
+                s.log_zone_head, zone_size
+            )
+        })
     }
 }
 
