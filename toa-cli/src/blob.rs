@@ -1,6 +1,6 @@
 use crate::{Result, args_end, load_store, usage};
 use std::{
-    io::{self, Write},
+    io::{self, Read, Write},
     path::PathBuf,
 };
 use toa::BlobStore;
@@ -37,6 +37,7 @@ where
     let cmd = args.next().ok_or_else(|| usage(procname))?;
     match &*cmd {
         "pad-blob" => cmd_fsck_pad_blob(procname, args),
+        "set-blob" => cmd_fsck_set_blob(procname, args),
         _ => Err(usage(procname)),
     }
 }
@@ -116,6 +117,38 @@ where
 
     blob.append(&vec![0; usize::try_from(len).unwrap()])?;
 
+    store.flush()?;
+
+    Ok(())
+}
+
+pub fn cmd_fsck_set_blob<A>(procname: &str, mut args: A) -> Result<()>
+where
+    A: Iterator<Item = String>,
+{
+    let store = args.next().ok_or_else(|| usage(procname))?;
+    let blob = args.next().ok_or_else(|| usage(procname))?;
+    args_end(procname, args)?;
+
+    let store = PathBuf::from(store);
+    let store = load_store(&store, true)?;
+    let blob = store
+        .find(blob.as_bytes())?
+        .ok_or_else(|| "blob not found")?;
+
+    let mut inp = io::stdin().lock();
+    let buf = &mut vec![0; 1 << 16];
+    store.transaction(|| {
+        blob.clear()?;
+        loop {
+            let n = inp.read(buf)?;
+            if n == 0 {
+                break;
+            }
+            blob.append(&buf[..n])?;
+        }
+        Ok(())
+    })?;
     store.flush()?;
 
     Ok(())
